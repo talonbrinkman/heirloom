@@ -1,0 +1,450 @@
+<html>
+    <head>
+        <title>Heirloom</title>
+        <link rel="stylesheet" href="/static/style.css">
+    </head>
+    <body>
+        <div class="header-full">
+            <div class="flex gap-15 align-center">
+                <h1 class="m-0">Heirloom</h1>
+                <div style="position: relative;">
+                    <input type="text" id="searchInput" class="search-input" placeholder="Search..." oninput="handleGlobalSearch()" autocomplete="off">
+                    <div id="searchResults" class="dropdown-menu" style="top: 100%; left: 0; min-width: 350px; max-height: 400px; overflow-y: auto; display: none;"></div>
+                </div>
+            </div>
+            <div class="flex gap-15 align-center">
+                {% if user.is_admin %}
+                <a href="/settings" class="icon-link">
+                    <i data-lucide="settings"></i>
+                </a>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="layout-wrapper">
+            <div class="sidebar">
+                <a href="/" class="sidebar-link">
+                    <i data-lucide="home"></i>
+                    Home
+                </a>
+                <a href="/library/movie" class="sidebar-link {% if media_type == 'movie' %}active{% endif %}">
+                    <i data-lucide="film"></i>
+                    Movies
+                </a>
+                <a href="/library/tv" class="sidebar-link {% if media_type == 'tv' %}active{% endif %}">
+                    <i data-lucide="tv"></i>
+                    TV Shows
+                </a>
+                {% if user.photos_access %}
+                <a href="/library/photo" class="sidebar-link {% if media_type == 'photo' %}active{% endif %}">
+                    <i data-lucide="image"></i>
+                    Photos
+                </a>
+                {% endif %}
+            </div>
+
+            <div class="main-content">
+                <div class="card">
+                    <div class="flex justify-between align-center mb-15">
+                        <h2 class="m-0">
+                            {% if media_type == 'movie' %}Movies ({{ total_count }})
+                            {% elif media_type == 'photo' %}
+                                <a href="/library/photo" style="text-decoration: none; color: inherit;">Photos ({{ total_count }})</a>
+                                {% if album %}
+                                    <span style="color: #666; margin: 0 5px;">/</span> <span style="color: #aaa;">{{ album }}</span>
+                                {% endif %}
+                            {% else %}TV Shows ({{ total_count }}){% endif %}
+                        </h2>
+                        <div style="position: relative;">
+                            <button class="btn m-0 bg-dark flex align-center gap-10" onclick="toggleMenu(event, 'sortMenu')" style="border: 1px solid #333;">
+                                <i data-lucide="arrow-down-up" style="width: 16px; height: 16px;"></i>
+                                <span id="currentSortText">Title (A-Z)</span>
+                            </button>
+                            <div class="dropdown-menu" id="sortMenu" style="top: 110%; right: 0; min-width: 180px;">
+                                <button onclick="setSort('title_asc', 'Title (A-Z)')">Title (A-Z)</button>
+                                <button onclick="setSort('title_desc', 'Title (Z-A)')">Title (Z-A)</button>
+                                <button onclick="setSort('year_desc', 'Year (Newest)')">Year (Newest)</button>
+                                <button onclick="setSort('year_asc', 'Year (Oldest)')">Year (Oldest)</button>
+                                <button onclick="setSort('date_desc', 'Recently Added')">Recently Added</button>
+                                <button onclick="setSort('date_asc', 'Oldest Added')">Oldest Added</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="grid-row" id="mediaGrid">
+                        <!-- JavaScript will populate media cards here -->
+                    </div>
+                    <div id="sentinel" style="height: 20px;"></div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            let currentPage = 1;
+            let currentSort = localStorage.getItem(`sort_pref_{{ media_type }}`) || 'title_asc';
+            let isLoading = false;
+            let hasMore = true;
+            let currentAlbum = null;
+
+            function toggleMenu(event, menuId) {
+                event.preventDefault();
+                event.stopPropagation();
+                
+                const allMenus = document.querySelectorAll('.dropdown-menu');
+                allMenus.forEach(menu => {
+                    if (menu.id !== menuId) {
+                        menu.classList.remove('show');
+                    }
+                });
+                
+                const menu = document.getElementById(menuId);
+                if (menu) {
+                    const isShowing = !menu.classList.contains('show');
+                    if (isShowing) {
+                        document.body.appendChild(menu);
+                        const btnRect = event.currentTarget.getBoundingClientRect();
+                        menu.style.position = 'fixed';
+                        menu.style.top = (btnRect.bottom + 5) + 'px';
+                        menu.style.right = (window.innerWidth - btnRect.right) + 'px';
+                        menu.style.left = 'auto';
+                        menu.classList.add('show');
+                    } else {
+                        menu.classList.remove('show');
+                    }
+                }
+            }
+
+            document.addEventListener('click', function(event) {
+                if (!event.target.closest('.three-dots-btn') && !event.target.closest('.dropdown-menu') && !event.target.closest('.btn')) {
+                    const allMenus = document.querySelectorAll('.dropdown-menu');
+                    allMenus.forEach(menu => {
+                        menu.classList.remove('show');
+                    });
+                }
+            });
+
+            window.addEventListener('scroll', function() {
+                document.querySelectorAll('.dropdown-menu.show').forEach(menu => {
+                    menu.classList.remove('show');
+                });
+            }, true);
+
+        let globalSearchTimeout = null;
+        async function handleGlobalSearch() {
+            const query = document.getElementById('searchInput').value;
+            const resultsContainer = document.getElementById('searchResults');
+            
+            if (!query.trim()) {
+                resultsContainer.style.display = 'none';
+                return;
+            }
+
+            clearTimeout(globalSearchTimeout);
+            globalSearchTimeout = setTimeout(async () => {
+                try {
+                    const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+                    const data = await res.json();
+                    
+                    if (data.items.length === 0) {
+                        resultsContainer.innerHTML = '<div style="padding: 10px; color: var(--text-secondary); text-align: center;">No results found</div>';
+                    } else {
+                        resultsContainer.innerHTML = data.items.map(item => `
+                            <a href="${item.url}" style="display: flex; align-items: center; gap: 10px; padding: 10px; text-decoration: none; color: inherit; border-bottom: 1px solid var(--bg-tertiary);" onmouseover="this.style.backgroundColor='var(--bg-tertiary)'" onmouseout="this.style.backgroundColor='transparent'">
+                                ${item.poster ? `<img src="/metadata/${item.poster}" style="width: 40px; height: 60px; object-fit: cover; border-radius: 4px;">` : `<div style="width: 40px; height: 60px; background: var(--bg-tertiary); border-radius: 4px; display: flex; align-items: center; justify-content: center;"><i data-lucide="${item.type === 'photo' ? 'image' : (item.type === 'tv' ? 'tv' : 'film')}" style="width: 20px; height: 20px; color: var(--text-quaternary);"></i></div>`}
+                                <div>
+                                    <div style="font-weight: bold; font-size: 14px;">${item.title}</div>
+                                    <div style="font-size: 12px; color: var(--text-quaternary);">${item.year ? item.year + ' • ' : ''}${item.type === 'movie' ? 'Movie' : (item.type === 'tv' ? 'TV Show' : 'Photo')}</div>
+                                </div>
+                            </a>
+                        `).join('');
+                        lucide.createIcons();
+                    }
+                    resultsContainer.style.display = 'flex';
+                } catch (err) {
+                    console.error(err);
+                }
+            }, 300);
+        }
+
+        document.addEventListener('click', function(event) {
+            const searchContainer = document.getElementById('searchResults');
+            const searchInput = document.getElementById('searchInput');
+            if (searchContainer && event.target !== searchInput && !searchContainer.contains(event.target)) {
+                searchContainer.style.display = 'none';
+            }
+        });
+
+        document.getElementById('searchInput')?.addEventListener('click', function() {
+            if (this.value.trim() && document.getElementById('searchResults').innerHTML.trim() !== '') {
+                document.getElementById('searchResults').style.display = 'flex';
+            }
+        });
+
+            function setSort(value, text) {
+                currentSort = value;
+                localStorage.setItem(`sort_pref_{{ media_type }}`, value);
+                document.getElementById('currentSortText').textContent = text;
+                document.getElementById('sortMenu').classList.remove('show');
+                currentPage = 1;
+                hasMore = true;
+                fetchMedia(currentPage, false);
+            }
+
+            async function fetchMedia(page, append = true) {
+                if (isLoading || (!hasMore && append)) return;
+                isLoading = true;
+
+                const mediaType = "{{ media_type }}";
+                const urlParams = new URLSearchParams(window.location.search);
+                const album = urlParams.get('album');
+                const albumParam = album ? `&album=${encodeURIComponent(album)}` : '';
+                const downloadsAccess = {{ 'true' if user.downloads_access else 'false' }};
+                
+                try {
+                    const res = await fetch(`/api/library/${mediaType}?page=${page}&limit=50&sort=${currentSort}${albumParam}`);
+                    const data = await res.json();
+                    
+                    const grid = document.getElementById('mediaGrid');
+                    if (!append) {
+                        grid.innerHTML = '';
+                        currentAlbum = null;
+                    }
+                    
+                    if (data.items.length < 50) {
+                        hasMore = false;
+                    }
+                    
+                    data.items.forEach((m, index) => {
+                        // Removed inline album header grouping, handled as folders now
+                        
+                        const globalIndex = ((page - 1) * 50) + index;
+                        const card = document.createElement('div');
+                        card.className = mediaType === 'photo' ? 'media-card photo-card' : 'media-card';
+                        card.setAttribute('data-id', m.id);
+                        
+                        const isAlbum = m.type === 'album';
+                        
+                        const watchlistForm = (mediaType === 'photo' || isAlbum) ? '' : (m.in_watchlist 
+                            ? `<form action="/watchlist/remove_by_item/${mediaType}/${m.id}" method="post" class="m-0"><button type="submit">Remove from Watchlist</button></form>`
+                            : `<form action="/watchlist/add/${mediaType}/${m.id}" method="post" class="m-0"><button type="submit">Add to Watchlist</button></form>`);
+                            
+                        const posterHtml = m.poster_filename 
+                            ? `<img src="/metadata/${m.poster_filename}" class="poster" ${isAlbum ? 'style="filter: blur(8px) brightness(0.6); transform: scale(1.1);"' : ''}>`
+                            : `<div class="poster-placeholder" ${isAlbum ? 'style="background: var(--bg-tertiary);"' : ''}></div>`;
+                            
+                        const yearHtml = m.year && !isAlbum ? `<div class="media-year">${m.year}</div>` : '';
+                        
+                        const posterClass = mediaType === 'photo' ? 'poster-container photo-poster-container' : 'poster-container';
+                        
+                        let hoverContent = '';
+                        if (isAlbum) {
+                            hoverContent = `<div class="album-title-overlay" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; font-weight: bold; font-size: 1.2rem; text-align: center; width: 90%; z-index: 2; pointer-events: none; text-shadow: 1px 1px 4px rgba(0,0,0,0.8);">${m.title}</div>`;
+                        } else {
+                            hoverContent = `
+                                <a href="/play/${mediaType}/${m.id}" class="hover-play">
+                                    <i data-lucide="play" fill="currentColor"></i>
+                                </a>
+                                <button class="three-dots-btn" onclick="toggleMenu(event, 'menu-item-${globalIndex}')">
+                                    <i data-lucide="more-vertical" fill="white"></i>
+                                </button>
+                                <div class="dropdown-menu" id="menu-item-${globalIndex}">
+                                    ${downloadsAccess ? `
+                                    <form action="/download/${mediaType}/${m.id}" method="get" class="m-0">
+                                        <button type="submit">Download</button>
+                                    </form>
+                                    ` : ''}
+                                    ${watchlistForm}
+                                </div>
+                            `;
+                        }
+                        
+                        card.innerHTML = `
+                            <div class="${posterClass}">
+                                <a href="${m.url}">
+                                    ${posterHtml}
+                                </a>
+                                ${hoverContent}
+                            </div>
+                            ${!isAlbum ? `<div class="media-title">${m.title}</div>` : ''}
+                            ${yearHtml}
+                        `;
+                        grid.appendChild(card);
+                    });
+                    
+                    // Re-render lucide icons for new elements
+                    lucide.createIcons();
+                } catch (error) {
+                    console.error("Error fetching library:", error);
+                } finally {
+                    isLoading = false;
+                }
+            }
+
+            // IntersectionObserver for Infinite Scroll
+            document.addEventListener('DOMContentLoaded', () => {
+                const sortLabels = {
+                    'title_asc': 'Title (A-Z)',
+                    'title_desc': 'Title (Z-A)',
+                    'year_desc': 'Year (Newest)',
+                    'year_asc': 'Year (Oldest)',
+                    'date_desc': 'Recently Added',
+                    'date_asc': 'Oldest Added'
+                };
+                const textElem = document.getElementById('currentSortText');
+                if (textElem) textElem.textContent = sortLabels[currentSort] || 'Title (A-Z)';
+                
+                fetchMedia(1, false); // Initial load
+                
+                const sentinel = document.getElementById('sentinel');
+                const observer = new IntersectionObserver((entries) => {
+                    if (entries[0].isIntersecting && hasMore && !isLoading) {
+                        currentPage++;
+                        fetchMedia(currentPage, true);
+                    }
+                }, { rootMargin: '200px' }); // Trigger 200px before reaching the bottom
+                
+                if (sentinel) observer.observe(sentinel);
+            });
+        </script>
+        <script src="/static/lucide.min.js"></script>
+        <script>lucide.createIcons();</script>
+    
+<script>
+    async function loadInbox() {
+        try {
+            const res = await fetch('/api/inbox');
+            const data = await res.json();
+            const items = data.invites;
+            const badge = document.getElementById('inboxBadge');
+            const container = document.getElementById('inboxItems');
+            if(!badge || !container) return;
+            
+            if (items.length > 0) {
+                badge.style.display = 'block';
+                container.innerHTML = items.map(inv => `
+                    <div style="padding: 10px; border-bottom: 1px solid var(--bg-tertiary);">
+                        <div><strong>${inv.sender}</strong> invited you to watch <em>${inv.title}</em></div>
+                        <div style="display: flex; gap: 10px; margin-top: 10px;">
+                            <button class="btn-small" onclick="respondInvite(${inv.id}, 'accept')">Accept</button>
+                            <button class="btn-small bg-gray" onclick="respondInvite(${inv.id}, 'decline')">Decline</button>
+                        </div>
+                    </div>
+                `).join('');
+            } else {
+                badge.style.display = 'none';
+                container.innerHTML = '<div style="color: var(--text-secondary); text-align: center;">No new invitations</div>';
+            }
+        } catch (err) {
+            console.error("Error loading inbox:", err);
+        }
+    }
+    
+    async function respondInvite(id, action) {
+        try {
+            const res = await fetch(`/watch_together/${action}/${id}`, { method: 'POST' });
+            const data = await res.json();
+            if (data.success && action === 'accept') {
+                window.location.href = `/play_sync/${data.session_id}`;
+            } else {
+                loadInbox();
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+    
+    function toggleInbox(e) {
+        e.preventDefault();
+        const menu = document.getElementById('inboxMenu');
+        if (menu.style.display === 'none') {
+            menu.style.display = 'block';
+            loadInbox();
+        } else {
+            menu.style.display = 'none';
+        }
+    }
+    
+    document.addEventListener('click', function(event) {
+        const menu = document.getElementById('inboxMenu');
+        const btn = document.getElementById('inboxBtn');
+        if (menu && btn && event.target !== btn && !btn.contains(event.target) && !menu.contains(event.target)) {
+            menu.style.display = 'none';
+        }
+    });
+    
+    setInterval(loadInbox, 10000);
+    document.addEventListener('DOMContentLoaded', loadInbox);
+</script>
+
+
+<!-- Watch Together Modal -->
+<div id="wtModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center;">
+    <div class="card" style="width: 400px; max-width: 90%;">
+        <div class="card-header">
+            <h2 class="m-0">Watch Together</h2>
+            <button class="btn-small bg-gray" onclick="document.getElementById('wtModal').style.display='none'">Close</button>
+        </div>
+        <p style="color: var(--text-secondary);">Select users to invite to this session:</p>
+        <div id="wtUserList" style="margin-bottom: 20px; max-height: 200px; overflow-y: auto;">
+            Loading users...
+        </div>
+        <button class="btn w-full" onclick="startWatchTogether()">Start Session</button>
+    </div>
+</div>
+
+<script>
+    let wtCurrentMedia = { type: null, id: null };
+    
+    async function openWatchTogether(mediaType, itemId) {
+        wtCurrentMedia = { type: mediaType, id: itemId };
+        const modal = document.getElementById('wtModal');
+        const userList = document.getElementById('wtUserList');
+        modal.style.display = 'flex';
+        userList.innerHTML = 'Loading users...';
+        
+        try {
+            const res = await fetch(`/api/users/eligible?media_type=${mediaType}`);
+            const users = await res.json();
+            
+            if (users.length === 0) {
+                userList.innerHTML = '<div style="color: var(--text-secondary);">No eligible users found. Make sure they have Watch Together and library access enabled in settings.</div>';
+            } else {
+                userList.innerHTML = users.map(u => `
+                    <label class="toggle-pill" style="display: flex; width: 100%; margin-bottom: 5px;">
+                        <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
+                        <span>${u.username}</span>
+                    </label>
+                `).join('');
+            }
+        } catch (err) {
+            console.error(err);
+            userList.innerHTML = 'Error loading users.';
+        }
+    }
+    
+    async function startWatchTogether() {
+        const checkboxes = document.querySelectorAll('.wt-user-checkbox:checked');
+        const userIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+        
+        try {
+            const res = await fetch('/watch_together/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    media_type: wtCurrentMedia.type,
+                    item_id: wtCurrentMedia.id,
+                    invited_user_ids: userIds
+                })
+            });
+            const data = await res.json();
+            if (data.session_id) {
+                window.location.href = `/play_sync/${data.session_id}`;
+            }
+        } catch (err) {
+            console.error(err);
+            alert("Error creating session.");
+        }
+    }
+</script>
+
+</body>
+</html>

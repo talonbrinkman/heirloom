@@ -1,0 +1,11 @@
+/media/
+/.agents/
+/config/
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.pytest_cache/

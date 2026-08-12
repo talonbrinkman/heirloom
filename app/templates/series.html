@@ -1,0 +1,382 @@
+<html>
+    <head>
+        <title>Heirloom - {{ title }}</title>
+        <link rel="stylesheet" href="/static/style.css">
+    </head>
+    <body {% if series.backdrop_filename %}class="has-backdrop" style="--backdrop-url: url('/metadata/{{ series.backdrop_filename }}');"{% endif %}>
+        <div class="header-full">
+            <div class="flex gap-15 align-center">
+                <a href="/" class="text-white flex align-center" title="Home">
+                    <i data-lucide="arrow-left"></i>
+                </a>
+                <h1 class="m-0">Heirloom</h1>
+            </div>
+            <div class="flex gap-15 align-center">
+                <a href="/settings" class="icon-link">
+                    <i data-lucide="settings"></i>
+                </a>
+            </div>
+        </div>
+
+        <div class="layout-wrapper">
+            <div class="main-content">
+                <div class="info-layout">
+                    {% if series.poster_filename %}
+                    <img src="/metadata/{{ series.poster_filename }}" class="info-poster">
+                    {% else %}
+                    <div class="info-poster" class="bg-dark flex align-center justify-center placeholder-poster">No Poster</div>
+                    {% endif %}
+                    
+                    <div class="info-details">
+                        <div class="flex gap-15 mb-10">
+                            <div style="display: flex; flex-direction: column; gap: 5px;">
+                                <div class="flex align-center gap-15">
+                                    <h1 class="info-title m-0" style="color: #fff;">{{ title }}</h1>
+                                    {% if series.rating %}
+                                    <div class="rating-badge flex align-center gap-10">
+                                        <i data-lucide="star" fill="var(--accent-primary)" color="var(--accent-primary)" size="24"></i>
+                                        <strong style="font-size: 1.5em;">{{ "%.1f"|format(series.rating) }}</strong>
+                                    </div>
+                                    {% endif %}
+                                </div>
+                                {% if selected_ep_dict %}
+                                <div style="color: var(--text-secondary); font-size: 1.2em; font-weight: normal;">
+                                    {% if selected_ep_dict.episode_name %}{{ selected_ep_dict.episode_name }} &bull; {% endif %}S{{ "%02d"|format(selected_ep_dict.season) }}E{{ "%02d"|format(series.episode or 1) }}
+                                </div>
+                                {% endif %}
+                            </div>
+                        </div>
+                        <div class="info-plot">{{ series.plot or "No description available." }}</div>
+                        
+                        <div class="metadata-block mt-20 mb-20">
+                            {% if series.director %}
+                            <div class="mb-10"><strong style="color: var(--text-primary);">Creator/Director:</strong> <span style="color: var(--text-secondary);">{{ series.director }}</span></div>
+                            {% endif %}
+                        </div>
+                        
+                        <div class="flex gap-15 mb-20">
+                            <a href="{{ resume_link }}" class="play-btn m-0">
+                                <i data-lucide="play" fill="currentColor"></i>
+                                {% if has_progress %}Resume{% else %}Play Episode{% endif %}
+                            </a>
+                            
+                            {% if user.watch_together_access %}
+                            <button class="play-btn m-0" style="background: var(--bg-tertiary);" onclick="openWatchTogether('tv', {{ series.id }})">
+                                <i data-lucide="users"></i>
+                            </button>
+                            {% endif %}
+                            {% if in_watchlist %}
+                            <form action="/watchlist/remove_by_item/tv/{{ series.id }}" method="post" class="m-0">
+                                <button type="submit" class="play-btn m-0">
+                                    <i data-lucide="bookmark" fill="currentColor"></i>
+                                </button>
+                            </form>
+                            {% else %}
+                            <form action="/watchlist/add/tv/{{ series.id }}" method="post" class="m-0">
+                                <button type="submit" class="play-btn m-0">
+                                    <i data-lucide="bookmark" fill="none"></i>
+                                </button>
+                            </form>
+                            {% endif %}
+                            
+                            {% if user.downloads_access %}
+                            <a href="/download/tv/{{ series.id }}" class="play-btn m-0" download title="Download First Episode">
+                                <i data-lucide="download" fill="currentColor"></i>
+                            </a>
+                            {% endif %}
+                        </div>
+                        
+                        {% if cast_list %}
+                        <div class="mt-20">
+                            <strong style="color: var(--text-primary); display: block; margin-bottom: 15px;">Cast</strong>
+                            <div class="cast-row">
+                                {% for actor in cast_list %}
+                                <div class="cast-member">
+                                    {% if actor.profile_filename %}
+                                    <img src="/metadata/{{ actor.profile_filename }}" class="cast-avatar">
+                                    {% else %}
+                                    <div class="cast-avatar placeholder-avatar"><i data-lucide="user"></i></div>
+                                    {% endif %}
+                                    <div class="cast-name">{{ actor.name }}</div>
+                                    {% if actor.character %}
+                                    <div class="cast-character">{{ actor.character }}</div>
+                                    {% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="season-tabs" id="seasonTabs">
+                        {% for s in seasons %}
+                            {% if s == 0 %}
+                            <div class="season-tab" data-season="0" onclick="selectSeason(0)">Specials</div>
+                            {% else %}
+                            <div class="season-tab" data-season="{{ s }}" onclick="selectSeason({{ s }})">Season {{ s }}</div>
+                            {% endif %}
+                        {% endfor %}
+                    </div>
+
+                    <div class="carousel-container">
+                        <button class="carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
+                        <div class="carousel-row" id="episodesGrid">
+                            {% for ep in episodes %}
+                            <div class="media-card episode-card {% if selected_ep_id == ep.id %}selected-episode{% endif %}" data-season="{{ ep.season }}">
+                                <div class="poster-container">
+                                    <a href="/series/{{ title | urlencode }}?ep={{ ep.id }}">
+                                        {% if ep.season_poster_filename %}
+                                        <img src="/metadata/{{ ep.season_poster_filename }}" class="poster">
+                                        {% elif ep.poster_filename %}
+                                        <img src="/metadata/{{ ep.poster_filename }}" class="poster">
+                                        {% else %}
+                                        <div class="poster-placeholder"></div>
+                                        {% endif %}
+                                        <div class="hover-play">
+                                            <i data-lucide="play" fill="currentColor"></i>
+                                        </div>
+                                    </a>
+                                </div>
+                                <div class="media-year" style="padding: 0 5px; color: #fff;">
+                                    <span style="color: #fff;">{{ ep.season_episode | safe }}</span>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <button class="carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            let currentSeason = -1;
+
+            function selectSeason(season) {
+                currentSeason = season;
+                
+                // Update tabs
+                document.querySelectorAll('.season-tab').forEach(tab => {
+                    if (parseInt(tab.getAttribute('data-season')) === season) {
+                        tab.classList.add('active');
+                    } else {
+                        tab.classList.remove('active');
+                    }
+                });
+
+                filterEpisodes();
+            }
+
+            function filterEpisodes() {
+                const cards = document.querySelectorAll('.episode-card');
+                
+                cards.forEach(card => {
+                    const cardSeason = parseInt(card.getAttribute('data-season'));
+                    const matchesSeason = (currentSeason === -1) || (cardSeason === currentSeason);
+                    
+                    if (matchesSeason) {
+                        card.style.display = 'block';
+                    } else {
+                        card.style.display = 'none';
+                    }
+                });
+            }
+
+            // Auto-select season on load
+            window.onload = function() {
+                let initialSeason = -1;
+                {% if series.season %}
+                initialSeason = parseInt("{{ series.season }}");
+                {% endif %}
+                
+                if (initialSeason !== -1 && document.querySelector(`.season-tab[data-season="${initialSeason}"]`)) {
+                    selectSeason(initialSeason);
+                } else {
+                    const firstTab = document.querySelector('.season-tab');
+                    if (firstTab) {
+                        const s = parseInt(firstTab.getAttribute('data-season'));
+                        selectSeason(s);
+                    } else {
+                        filterEpisodes();
+                    }
+                }
+            };
+
+            function scrollCarousel(btn, direction) {
+                const row = btn.parentElement.querySelector('.carousel-row');
+                const scrollAmount = row.clientWidth * 0.8;
+                row.scrollBy({ left: direction * scrollAmount, behavior: 'smooth' });
+                setTimeout(() => lucide.createIcons(), 300);
+            }
+
+            function updateCarouselArrows() {
+                document.querySelectorAll('.carousel-container').forEach(container => {
+                    const row = container.querySelector('.carousel-row');
+                    const leftBtn = container.querySelector('.carousel-arrow.left');
+                    const rightBtn = container.querySelector('.carousel-arrow.right');
+                    
+                    if (!row || !leftBtn || !rightBtn) return;
+                    
+                    if (row.scrollWidth > row.clientWidth) {
+                        leftBtn.style.display = row.scrollLeft > 0 ? 'flex' : 'none';
+                        rightBtn.style.display = Math.ceil(row.scrollLeft + row.clientWidth) >= row.scrollWidth ? 'none' : 'flex';
+                    } else {
+                        leftBtn.style.display = 'none';
+                        rightBtn.style.display = 'none';
+                    }
+                });
+            }
+
+            window.addEventListener('resize', updateCarouselArrows);
+            document.addEventListener('DOMContentLoaded', () => {
+                updateCarouselArrows();
+                document.querySelectorAll('.carousel-row').forEach(row => {
+                    row.addEventListener('scroll', updateCarouselArrows);
+                });
+            });
+        </script>
+        <script src="/static/lucide.min.js"></script>
+        <script>lucide.createIcons();</script>
+    
+<script>
+    async function loadInbox() {
+        try {
+            const res = await fetch('/api/inbox');
+            const data = await res.json();
+            const items = data.invites;
+            const badge = document.getElementById('inboxBadge');
+            const container = document.getElementById('inboxItems');
+            if(!badge || !container) return;
+            
+            if (items.length > 0) {
+                badge.style.display = 'block';
+                container.innerHTML = items.map(inv => `
+                    <div style="padding: 10px; border-bottom: 1px solid var(--bg-tertiary);">
+                        <div><strong>${inv.sender}</strong> invited you to watch <em>${inv.title}</em></div>
+                        <div style="display: flex; gap: 10px; margin-top: 10px;">
+                            <button class="btn-small" onclick="respondInvite(${inv.id}, 'accept')">Accept</button>
+                            <button class="btn-small bg-gray" onclick="respondInvite(${inv.id}, 'decline')">Decline</button>
+                        </div>
+                    </div>
+                `).join('');
+            } else {
+                badge.style.display = 'none';
+                container.innerHTML = '<div style="color: var(--text-secondary); text-align: center;">No new invitations</div>';
+            }
+        } catch (err) {
+            console.error("Error loading inbox:", err);
+        }
+    }
+    
+    async function respondInvite(id, action) {
+        try {
+            const res = await fetch(`/watch_together/${action}/${id}`, { method: 'POST' });
+            const data = await res.json();
+            if (data.success && action === 'accept') {
+                window.location.href = `/play_sync/${data.session_id}`;
+            } else {
+                loadInbox();
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+    
+    function toggleInbox(e) {
+        e.preventDefault();
+        const menu = document.getElementById('inboxMenu');
+        if (menu.style.display === 'none') {
+            menu.style.display = 'block';
+            loadInbox();
+        } else {
+            menu.style.display = 'none';
+        }
+    }
+    
+    document.addEventListener('click', function(event) {
+        const menu = document.getElementById('inboxMenu');
+        const btn = document.getElementById('inboxBtn');
+        if (menu && btn && event.target !== btn && !btn.contains(event.target) && !menu.contains(event.target)) {
+            menu.style.display = 'none';
+        }
+    });
+    
+    setInterval(loadInbox, 10000);
+    document.addEventListener('DOMContentLoaded', loadInbox);
+</script>
+
+
+<!-- Watch Together Modal -->
+<div id="wtModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center;">
+    <div class="card" style="width: 400px; max-width: 90%;">
+        <div class="card-header">
+            <h2 class="m-0">Watch Together</h2>
+            <button class="btn-small bg-gray" onclick="document.getElementById('wtModal').style.display='none'">Close</button>
+        </div>
+        <p style="color: var(--text-secondary);">Select users to invite to this session:</p>
+        <div id="wtUserList" style="margin-bottom: 20px; max-height: 200px; overflow-y: auto;">
+            Loading users...
+        </div>
+        <button class="btn w-full" onclick="startWatchTogether()">Start Session</button>
+    </div>
+</div>
+
+<script>
+    let wtCurrentMedia = { type: null, id: null };
+    
+    async function openWatchTogether(mediaType, itemId) {
+        wtCurrentMedia = { type: mediaType, id: itemId };
+        const modal = document.getElementById('wtModal');
+        const userList = document.getElementById('wtUserList');
+        modal.style.display = 'flex';
+        userList.innerHTML = 'Loading users...';
+        
+        try {
+            const res = await fetch(`/api/users/eligible?media_type=${mediaType}`);
+            const users = await res.json();
+            
+            if (users.length === 0) {
+                userList.innerHTML = '<div style="color: var(--text-secondary);">No eligible users found. Make sure they have Watch Together and library access enabled in settings.</div>';
+            } else {
+                userList.innerHTML = users.map(u => `
+                    <label class="toggle-pill" style="display: flex; width: 100%; margin-bottom: 5px;">
+                        <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
+                        <span>${u.username}</span>
+                    </label>
+                `).join('');
+            }
+        } catch (err) {
+            console.error(err);
+            userList.innerHTML = 'Error loading users.';
+        }
+    }
+    
+    async function startWatchTogether() {
+        const checkboxes = document.querySelectorAll('.wt-user-checkbox:checked');
+        const userIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+        
+        try {
+            const res = await fetch('/watch_together/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    media_type: wtCurrentMedia.type,
+                    item_id: wtCurrentMedia.id,
+                    invited_user_ids: userIds
+                })
+            });
+            const data = await res.json();
+            if (data.session_id) {
+                window.location.href = `/play_sync/${data.session_id}`;
+            }
+        } catch (err) {
+            console.error(err);
+            alert("Error creating session.");
+        }
+    }
+</script>
+
+</body>
+</html>

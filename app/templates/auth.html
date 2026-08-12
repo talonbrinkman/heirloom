@@ -1,0 +1,40 @@
+<html>
+    <head>
+        <title>{% if mode == 'setup' %}Setup{% elif mode == 'register' %}Registration{% else %}Login{% endif %} - Heirloom</title>
+        <link rel="stylesheet" href="/static/style.css">
+    </head>
+    <body class="center-screen">
+        <div class="setup-box">
+            {% if mode == 'setup' %}
+                <h1 style="background: var(--accent-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Welcome to Heirloom</h1>
+                <p style="margin-bottom: 30px;">Create your admin account to get started.</p>
+            {% elif mode == 'register' %}
+                <h1 style="background: var(--accent-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Join Heirloom</h1>
+                <p style="margin-bottom: 30px;">Create your account using your invite code.</p>
+            {% else %}
+                <h1 style="background: var(--accent-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Login</h1>
+            {% endif %}
+            
+            <form action="{% if mode == 'setup' %}/setup{% elif mode == 'register' %}/register{% else %}/login{% endif %}" method="post" style="text-align: left;">
+                
+                {% if mode == 'register' %}
+                <label for="invite_code">Invite Code</label>
+                <input type="text" name="invite_code" id="invite_code" value="{{ invite_code }}" required readonly style="color: #10B981; font-family: monospace; font-weight: bold; letter-spacing: 1px;">
+                {% endif %}
+                
+                <label for="username">{% if mode == 'login' %}Username{% else %}Choose a Username{% endif %}</label>
+                <input type="text" name="username" id="username" required {% if mode != 'login' %}autocomplete="off"{% endif %}>
+                
+                <label for="password">{% if mode == 'login' %}Password{% else %}Choose a Password{% endif %}</label>
+                <input type="password" name="password" id="password" required>
+                
+                <button type="submit" class="btn" style="width: 100%; margin-top: 10px;">
+                    {% if mode == 'setup' %}Create Admin Account
+                    {% elif mode == 'register' %}Create Account
+                    {% else %}Sign In
+                    {% endif %}
+                </button>
+            </form>
+        </div>
+    </body>
+</html>

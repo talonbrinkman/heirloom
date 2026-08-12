@@ -1,0 +1,611 @@
+<html>
+
+<head>
+    <title>Heirloom • {{ item.title }}{% if season_episode %} {{ season_episode | replace('<br>', ' - ') }}{% endif %}
+    </title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script type="text/javascript" src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
+    <style>
+        google-cast-launcher {
+            width: 24px;
+            height: 24px;
+            cursor: pointer;
+            --connected-color: var(--accent-primary);
+            --disconnected-color: var(--text-primary);
+        }
+    </style>
+</head>
+
+<body class="player-body">
+    <video id="mediaPlayer" class="player-video" playsinline crossorigin="anonymous">
+        Your browser does not support HTML video.
+        {% if subtitle_url %}
+        <track label="English" kind="subtitles" srclang="en" src="{{ subtitle_url }}" default>
+        {% endif %}
+    </video>
+    
+    <div id="loadingSpinner" class="loading-spinner">
+        <i data-lucide="loader-circle"></i>
+    </div>
+
+    <div id="playerOverlay" class="player-overlay pointer-events-none">
+        <div class="pointer-events-auto player-header">
+            <div style="flex: 1;">
+                <h1 class="player-title">{{ item.title }}</h1>
+                {% if season_episode %}
+                <div class="player-subtitle">{{ season_episode | safe }}</div>
+                {% elif item.year %}
+                <div class="player-subtitle">{{ item.year }}</div>
+                {% endif %}
+            </div>
+            <a href="/" class="player-close-btn" title="Close Player">
+                <i data-lucide="x"></i>
+            </a>
+        </div>
+        
+        <div class="player-controls pointer-events-auto">
+            <div class="progress-container" id="progressContainer">
+                <div class="progress-bar-fill" id="progressBarFill"></div>
+                <div class="progress-hover-time" id="progressHoverTime">0:00</div>
+            </div>
+            
+            <div class="controls-row">
+                <div class="controls-left">
+                    <div class="time-display" id="timeDisplay">0:00 / 0:00</div>
+                </div>
+                
+                <div class="controls-center">
+                    <button class="control-btn" id="rewindBtn" onclick="seekOffset(-10)">
+                        <i data-lucide="rewind"></i>
+                    </button>
+                    <button class="control-btn play-btn-large" id="playPauseBtn">
+                        <i data-lucide="play" id="playIcon"></i>
+                    </button>
+                    <button class="control-btn" id="forwardBtn" onclick="seekOffset(10)">
+                        <i data-lucide="fast-forward"></i>
+                    </button>
+                </div>
+                
+                <div class="controls-right">
+                    <div class="volume-container flex align-center" style="gap: 5px;">
+                        <button class="control-btn" id="muteBtn" onclick="toggleMute()">
+                            <i data-lucide="volume-2" id="volumeIcon"></i>
+                        </button>
+                        <input type="range" id="volumeSlider" class="volume-slider" min="0" max="1" step="0.05" value="1">
+                    </div>
+                    {% if subtitle_url %}
+                    <button class="control-btn" id="ccBtn" onclick="toggleSubtitles()" title="Toggle Subtitles">
+                        <i data-lucide="subtitles"></i>
+                    </button>
+                    {% endif %}
+                    <button class="control-btn" id="nativeCastBtn" onclick="requestCast()" title="AirPlay / PiP" style="display: none;">
+                        <i data-lucide="cast"></i>
+                    </button>
+                    <button class="control-btn" id="googleCastBtn" title="Cast to TV" style="display: none; align-items: center; justify-content: center;">
+                        <google-cast-launcher></google-cast-launcher>
+                    </button>
+                    <div class="settings-container">
+                        <button class="control-btn" onclick="toggleSettings(event)">
+                            <i data-lucide="settings"></i>
+                        </button>
+                        <div class="dropdown-menu settings-menu-expanded" id="settingsMenu">
+                            <!-- Resolution -->
+                            <div class="settings-section">
+                                <div class="settings-header">Resolution</div>
+                                <button class="res-btn active" data-res="original" onclick="setResolution('original')">Original</button>
+                                <button class="res-btn" data-res="1080" onclick="setResolution('1080')">1080p</button>
+                                <button class="res-btn" data-res="720" onclick="setResolution('720')">720p</button>
+                                <button class="res-btn" data-res="480" onclick="setResolution('480')">480p</button>
+                            </div>
+                            
+                            <!-- Speed -->
+                            <div class="settings-section">
+                                <div class="settings-header">Speed</div>
+                                <button class="speed-btn" data-speed="0.5" onclick="setPlaybackSpeed(0.5)">0.5x</button>
+                                <button class="speed-btn active" data-speed="1" onclick="setPlaybackSpeed(1)">1x</button>
+                                <button class="speed-btn" data-speed="1.25" onclick="setPlaybackSpeed(1.25)">1.25x</button>
+                                <button class="speed-btn" data-speed="1.5" onclick="setPlaybackSpeed(1.5)">1.5x</button>
+                                <button class="speed-btn" data-speed="2" onclick="setPlaybackSpeed(2)">2x</button>
+                            </div>
+                            
+                            <!-- Aspect Ratio -->
+                            <div class="settings-section">
+                                <div class="settings-header">Aspect Ratio</div>
+                                <button class="aspect-btn active" data-aspect="contain" onclick="setAspectRatio('contain')">Fit</button>
+                                <button class="aspect-btn" data-aspect="cover" onclick="setAspectRatio('cover')">Fill</button>
+                                <button class="aspect-btn" data-aspect="fill" onclick="setAspectRatio('fill')">Stretch</button>
+                            </div>
+                        </div>
+                    </div>
+                    <button class="control-btn" id="fullscreenBtn">
+                        <i data-lucide="maximize"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('mediaPlayer');
+        const loadingSpinner = document.getElementById('loadingSpinner');
+        
+        video.addEventListener('waiting', () => {
+            loadingSpinner.style.opacity = '1';
+        });
+        video.addEventListener('playing', () => {
+            loadingSpinner.style.opacity = '0';
+        });
+        video.addEventListener('canplay', () => {
+            loadingSpinner.style.opacity = '0';
+        });
+
+        const playBtn = document.getElementById('playPauseBtn');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressBarFill = document.getElementById('progressBarFill');
+        const progressHoverTime = document.getElementById('progressHoverTime');
+        const timeDisplay = document.getElementById('timeDisplay');
+        const fullscreenBtn = document.getElementById('fullscreenBtn');
+        const volumeSlider = document.getElementById('volumeSlider');
+        const muteBtn = document.getElementById('muteBtn');
+        
+        let totalDuration = Number("{{ duration or 0 }}");
+        let savedProgress = Number("{{ history.progress or 0 }}");
+        let offsetStart = 0;
+        
+        let currentRes = localStorage.getItem('player_res') || 'original';
+        let savedSpeed = parseFloat(localStorage.getItem('player_speed')) || 1;
+        let savedAspect = localStorage.getItem('player_aspect') || 'contain';
+        let savedVolume = localStorage.getItem('player_volume');
+        savedVolume = savedVolume !== null ? parseFloat(savedVolume) : 1;
+        
+        let subtitlesEnabled = localStorage.getItem('player_subtitles') === 'true';
+        
+        video.volume = savedVolume;
+        volumeSlider.value = savedVolume;
+        video.playbackRate = savedSpeed;
+        video.style.objectFit = savedAspect;
+        
+        document.querySelectorAll('.res-btn').forEach(b => b.classList.toggle('active', b.dataset.res === currentRes));
+        document.querySelectorAll('.speed-btn').forEach(b => b.classList.toggle('active', parseFloat(b.dataset.speed) === savedSpeed));
+        document.querySelectorAll('.aspect-btn').forEach(b => b.classList.toggle('active', b.dataset.aspect === savedAspect));
+
+        
+        if (totalDuration > 0 && savedProgress > 0 && savedProgress < 100) {
+            offsetStart = (savedProgress / 100) * totalDuration;
+        }
+
+        // Setup Video Source
+        function loadVideoSource() {
+            video.src = `/stream/{{ media_type }}/{{ item.id }}?res=${currentRes}&start=${offsetStart}`;
+            video.load();
+            video.play().catch(e => console.log("Auto-play prevented", e));
+        }
+
+        loadVideoSource();
+
+        // Play/Pause
+        function togglePlay() {
+            if (castPlayer && castPlayer.isConnected) {
+                if (castPlayer.isPaused) {
+                    castController.playOrPause();
+                } else {
+                    castController.playOrPause();
+                }
+                return;
+            }
+            if (video.paused) {
+                video.play();
+            } else {
+                video.pause();
+            }
+        }
+        playBtn.addEventListener('click', togglePlay);
+        video.addEventListener('click', togglePlay);
+
+        video.addEventListener('play', () => {
+            playBtn.innerHTML = '<i data-lucide="pause"></i>';
+            lucide.createIcons();
+        });
+        video.addEventListener('pause', () => {
+            playBtn.innerHTML = '<i data-lucide="play"></i>';
+            lucide.createIcons();
+        });
+
+        // Next Episode Auto-play
+        video.addEventListener('ended', () => {
+            {% if next_episode_id %}
+            window.location.href = "/play/tv/{{ next_episode_id }}";
+            {% endif %}
+        });
+
+        // Time Formatting
+        function formatTime(seconds) {
+            if (isNaN(seconds) || seconds < 0) return "0:00";
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = Math.floor(seconds % 60);
+            if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+            return `${m}:${s.toString().padStart(2, '0')}`;
+        }
+
+        let lastUpdate = 0;
+
+        function updateProgressUI(actualTime, effectiveDuration) {
+            if (effectiveDuration > 0) {
+                const pct = (actualTime / effectiveDuration) * 100;
+                progressBarFill.style.width = `${Math.min(pct, 100)}%`;
+                timeDisplay.textContent = `${formatTime(actualTime)} / ${formatTime(effectiveDuration)}`;
+            } else {
+                timeDisplay.textContent = `${formatTime(actualTime)}`;
+            }
+
+            // Sync progress to backend
+            const now = Date.now();
+            if (now - lastUpdate > 5000 && effectiveDuration > 0) {
+                const currentProgress = (actualTime / effectiveDuration) * 100;
+                const formData = new FormData();
+                formData.append('progress', currentProgress);
+                fetch('/progress/{{ media_type }}/{{ item.id }}', { method: 'POST', body: formData });
+                lastUpdate = now;
+            }
+        }
+
+        // Update Progress
+        video.addEventListener('timeupdate', () => {
+            if (castPlayer && castPlayer.isConnected) return;
+            const actualTime = offsetStart + video.currentTime;
+            const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
+            updateProgressUI(actualTime, effectiveDuration);
+        });
+        
+        // Seeking
+        progressContainer.addEventListener('mousemove', (e) => {
+            const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
+            if (effectiveDuration <= 0) return;
+            
+            const rect = progressContainer.getBoundingClientRect();
+            const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+            
+            const hoverTime = pct * effectiveDuration;
+            progressHoverTime.textContent = formatTime(hoverTime);
+            progressHoverTime.style.left = `${pct * 100}%`;
+        });
+        
+        progressContainer.addEventListener('click', (e) => {
+            const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
+            if (effectiveDuration <= 0) return;
+            
+            const rect = progressContainer.getBoundingClientRect();
+            const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+            
+            const newTime = pct * effectiveDuration;
+            if (castPlayer && castPlayer.isConnected) {
+                castPlayer.currentTime = newTime;
+                castController.seek();
+            } else {
+                offsetStart = newTime;
+                loadVideoSource();
+            }
+        });
+        
+        function seekOffset(seconds) {
+            if (castPlayer && castPlayer.isConnected) {
+                castPlayer.currentTime = castPlayer.currentTime + seconds;
+                castController.seek();
+                return;
+            }
+            const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
+            if (effectiveDuration <= 0) return;
+            
+            const actualTime = offsetStart + video.currentTime;
+            offsetStart = Math.max(0, Math.min(effectiveDuration, actualTime + seconds));
+            loadVideoSource();
+        }
+
+        // Subtitles
+        function updateSubtitles() {
+            if (video.textTracks && video.textTracks.length > 0) {
+                video.textTracks[0].mode = subtitlesEnabled ? 'showing' : 'hidden';
+            }
+            const ccBtn = document.getElementById('ccBtn');
+            if (ccBtn) {
+                if (subtitlesEnabled) {
+                    ccBtn.style.color = "var(--accent-primary)";
+                } else {
+                    ccBtn.style.color = "";
+                }
+            }
+        }
+        
+        function toggleSubtitles() {
+            subtitlesEnabled = !subtitlesEnabled;
+            localStorage.setItem('player_subtitles', subtitlesEnabled);
+            updateSubtitles();
+        }
+        
+        // Wait for metadata to apply subtitles properly if track loads late
+        video.addEventListener('loadedmetadata', updateSubtitles);
+        // Call immediately for cached loads
+        updateSubtitles();
+
+        // Resolution Switch
+        function setResolution(res) {
+            document.querySelectorAll('.res-btn').forEach(b => b.classList.remove('active'));
+            document.querySelector(`.res-btn[data-res="${res}"]`).classList.add('active');
+            
+            offsetStart = offsetStart + video.currentTime;
+            currentRes = res;
+            localStorage.setItem('player_res', res);
+            loadVideoSource();
+            document.getElementById('settingsMenu').classList.remove('show');
+        }
+        
+        // Playback Speed
+        function setPlaybackSpeed(speed) {
+            document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+            document.querySelector(`.speed-btn[data-speed="${speed}"]`).classList.add('active');
+            
+            video.playbackRate = speed;
+            localStorage.setItem('player_speed', speed);
+        }
+        
+        // Aspect Ratio
+        function setAspectRatio(aspect) {
+            document.querySelectorAll('.aspect-btn').forEach(b => b.classList.remove('active'));
+            document.querySelector(`.aspect-btn[data-aspect="${aspect}"]`).classList.add('active');
+            
+            video.style.objectFit = aspect;
+            localStorage.setItem('player_aspect', aspect);
+        }
+
+        // Volume
+        volumeSlider.addEventListener('input', (e) => {
+            video.volume = e.target.value;
+            video.muted = video.volume === 0;
+            localStorage.setItem('player_volume', video.volume);
+            updateVolumeIcon();
+        });
+
+        function toggleMute() {
+            if (video.muted || video.volume === 0) {
+                video.muted = false;
+                video.volume = video.volume === 0 ? 1 : video.volume;
+                volumeSlider.value = video.volume;
+            } else {
+                video.muted = true;
+                volumeSlider.value = 0;
+            }
+            localStorage.setItem('player_volume', video.volume);
+            updateVolumeIcon();
+        }
+
+        function updateVolumeIcon() {
+            let icon = 'volume-2';
+            if (video.muted || video.volume === 0) icon = 'volume-x';
+            else if (video.volume < 0.5) icon = 'volume-1';
+            muteBtn.innerHTML = `<i data-lucide="${icon}"></i>`;
+            lucide.createIcons();
+        }
+
+        function toggleSettings(event) {
+            event.stopPropagation();
+            document.getElementById('settingsMenu').classList.toggle('show');
+        }
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.settings-container')) {
+                document.getElementById('settingsMenu').classList.remove('show');
+            }
+        });
+
+        // Google Cast Initialization
+        let castPlayer = null;
+        let castController = null;
+        
+        // Fallback for Safari/Firefox or HTTP
+        setTimeout(() => {
+            if (typeof cast === 'undefined' || !cast.framework) {
+                document.getElementById('googleCastBtn').style.display = 'none';
+                document.getElementById('nativeCastBtn').style.display = 'inline-block';
+            }
+        }, 1500);
+
+        async function requestCast() {
+            if (video.remote && video.remote.state !== 'disconnected') {
+                video.remote.prompt().catch(err => {
+                    console.log("Remote playback failed", err);
+                    fallbackPiP();
+                });
+            } else if (document.pictureInPictureEnabled) {
+                fallbackPiP();
+            } else {
+                alert("Casting is not supported on this browser/network. (Use Chrome on HTTPS/localhost for Chromecast)");
+            }
+        }
+        
+        async function fallbackPiP() {
+            try {
+                if (document.pictureInPictureElement) {
+                    await document.exitPictureInPicture();
+                } else {
+                    await video.requestPictureInPicture();
+                }
+            } catch (err) {
+                console.log("PiP failed", err);
+            }
+        }
+
+        window.__onGCastApiAvailable = function(isAvailable) {
+            if (isAvailable) {
+                cast.framework.CastContext.getInstance().setOptions({
+                    receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+                    autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED
+                });
+                
+                castPlayer = new cast.framework.RemotePlayer();
+                castController = new cast.framework.RemotePlayerController(castPlayer);
+                
+                cast.framework.CastContext.getInstance().addEventListener(
+                    cast.framework.CastContextEventType.CAST_STATE_CHANGED,
+                    function(event) {
+                        if (event.castState === cast.framework.CastState.NO_DEVICES_AVAILABLE) {
+                            document.getElementById('googleCastBtn').style.display = 'none';
+                        } else {
+                            document.getElementById('googleCastBtn').style.display = 'flex';
+                        }
+                    }
+                );
+                
+                castController.addEventListener(
+                    cast.framework.RemotePlayerEventType.IS_CONNECTED_CHANGED,
+                    function() {
+                        if (castPlayer.isConnected) {
+                            loadCastMedia();
+                        } else {
+                            video.currentTime = castPlayer.currentTime;
+                            video.play();
+                        }
+                    }
+                );
+                
+                castController.addEventListener(
+                    cast.framework.RemotePlayerEventType.CURRENT_TIME_CHANGED,
+                    function() {
+                        if (castPlayer.isConnected) {
+                            updateProgressUI(castPlayer.currentTime, castPlayer.duration || video.duration);
+                        }
+                    }
+                );
+
+                castController.addEventListener(
+                    cast.framework.RemotePlayerEventType.IS_PAUSED_CHANGED,
+                    function() {
+                        if (castPlayer.isConnected) {
+                            playBtn.innerHTML = castPlayer.isPaused ? '<i data-lucide="play"></i>' : '<i data-lucide="pause"></i>';
+                            lucide.createIcons();
+                        }
+                    }
+                );
+            }
+        };
+
+        function loadCastMedia() {
+            const castSession = cast.framework.CastContext.getInstance().getCurrentSession();
+            if (!castSession) return;
+            
+            const mediaInfo = new chrome.cast.media.MediaInfo(
+                window.location.origin + video.src, 'video/mp4'
+            );
+            
+            {% if subtitle_url %}
+            const subtitle = new chrome.cast.media.Track(1, chrome.cast.media.TrackType.TEXT);
+            subtitle.trackContentId = window.location.origin + '{{ subtitle_url }}';
+            subtitle.trackContentType = 'text/vtt';
+            subtitle.subtype = chrome.cast.media.TextTrackType.SUBTITLES;
+            subtitle.name = 'English Subtitles';
+            subtitle.language = 'en-US';
+            mediaInfo.tracks = [subtitle];
+            mediaInfo.textTrackStyle = new chrome.cast.media.TextTrackStyle();
+            {% endif %}
+            
+            const request = new chrome.cast.media.LoadRequest(mediaInfo);
+            request.currentTime = offsetStart + video.currentTime;
+            
+            {% if subtitle_url %}
+            if (subtitlesEnabled) {
+                request.activeTrackIds = [1];
+            }
+            {% endif %}
+            
+            castSession.loadMedia(request).then(
+                function() { console.log('Cast load success'); },
+                function(error) { console.error('Cast load error', error); }
+            );
+            
+            video.pause();
+        }
+
+        // Fullscreen
+        fullscreenBtn.addEventListener('click', () => {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().catch(err => console.log(err));
+            } else {
+                document.exitFullscreen();
+            }
+        });
+        
+        document.addEventListener('fullscreenchange', () => {
+            const icon = document.fullscreenElement ? 'minimize' : 'maximize';
+            fullscreenBtn.innerHTML = `<i data-lucide="${icon}"></i>`;
+            lucide.createIcons();
+        });
+
+        // Overlay fade logic
+        const overlay = document.getElementById('playerOverlay');
+        let hideTimeout;
+        function showOverlay() {
+            overlay.style.opacity = '1';
+            document.body.style.cursor = 'default';
+            clearTimeout(hideTimeout);
+            hideTimeout = setTimeout(() => {
+                if (!video.paused) {
+                    overlay.style.opacity = '0';
+                    document.body.style.cursor = 'none';
+                }
+            }, 3000);
+        }
+        document.addEventListener('mousemove', showOverlay);
+        video.addEventListener('pause', showOverlay);
+        showOverlay();
+    </script>
+    <script src="/static/lucide.min.js"></script>
+    <script>lucide.createIcons();</script>
+
+{% if sync_session_id %}
+<script>
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${window.location.host}/ws/sync/{{ sync_session_id }}`);
+    let isRemoteUpdate = false;
+    
+    ws.onmessage = function(event) {
+        const data = JSON.parse(event.data);
+        isRemoteUpdate = true;
+        if (data.action === 'play') {
+            if (Math.abs(video.currentTime - data.time) > 1.0) {
+                video.currentTime = data.time;
+            }
+            video.play();
+        } else if (data.action === 'pause') {
+            if (Math.abs(video.currentTime - data.time) > 1.0) {
+                video.currentTime = data.time;
+            }
+            video.pause();
+        } else if (data.action === 'seek') {
+            video.currentTime = data.time;
+        }
+        setTimeout(() => { isRemoteUpdate = false; }, 200);
+    };
+    
+    video.addEventListener('play', () => {
+        if (!isRemoteUpdate) ws.send(JSON.stringify({action: 'play', time: video.currentTime}));
+    });
+    
+    video.addEventListener('pause', () => {
+        if (!isRemoteUpdate) ws.send(JSON.stringify({action: 'pause', time: video.currentTime}));
+    });
+    
+    video.addEventListener('seeked', () => {
+        if (!isRemoteUpdate) ws.send(JSON.stringify({action: 'seek', time: video.currentTime}));
+    });
+    
+    // Periodically sync time if we drift
+    setInterval(() => {
+        if (!video.paused && !isRemoteUpdate) {
+            ws.send(JSON.stringify({action: 'play', time: video.currentTime}));
+        }
+    }, 5000);
+</script>
+{% endif %}
+
+</body>
+
+</html>

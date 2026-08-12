@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+sqlmodel
+python-multipart
+bcrypt
+requests
+jinja2
+watchdog
+Pillow
+websockets

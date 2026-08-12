@@ -1,0 +1,247 @@
+<html>
+    <head>
+        <title>Heirloom - {{ movie.title }}</title>
+        <link rel="stylesheet" href="/static/style.css">
+    </head>
+    <body {% if movie.backdrop_filename %}class="has-backdrop" style="--backdrop-url: url('/metadata/{{ movie.backdrop_filename }}');"{% endif %}>
+        <div class="header-full">
+            <div class="flex gap-15 align-center">
+                <a href="/" class="text-white flex align-center" title="Home">
+                    <i data-lucide="arrow-left"></i>
+                </a>
+                <h1 class="m-0">Heirloom</h1>
+            </div>
+            <div class="flex gap-15 align-center">
+                <a href="/settings" class="icon-link">
+                    <i data-lucide="settings"></i>
+                </a>
+            </div>
+        </div>
+
+        <div class="layout-wrapper">
+            <div class="main-content">
+                <div class="info-layout">
+                    {% if movie.poster_filename %}
+                    <img src="/metadata/{{ movie.poster_filename }}" class="info-poster">
+                    {% else %}
+                    <div class="info-poster" class="bg-dark flex align-center justify-center placeholder-poster">No Poster</div>
+                    {% endif %}
+                    
+                    <div class="info-details">
+                        <div class="flex align-center gap-15 mb-10">
+                            <h1 class="info-title m-0">{{ movie.title }}</h1>
+                            {% if movie.rating %}
+                            <div class="rating-badge flex align-center gap-10">
+                                <i data-lucide="star" fill="var(--accent-primary)" color="var(--accent-primary)" size="24"></i>
+                                <strong style="font-size: 1.5em;">{{ "%.1f"|format(movie.rating) }}</strong>
+                            </div>
+                            {% endif %}
+                        </div>
+                        <div class="info-year">{{ movie.year }}</div>
+                        <div class="info-plot">{{ movie.plot or "No description available." }}</div>
+                        
+                        <div class="metadata-block mt-20 mb-20">
+                            {% if movie.director %}
+                            <div class="mb-10"><strong style="color: var(--text-primary);">Director:</strong> <span style="color: var(--text-secondary);">{{ movie.director }}</span></div>
+                            {% endif %}
+                        </div>
+                        
+                        <div class="flex gap-15 mb-20">
+                            <a href="/play/movie/{{ movie.id }}" class="play-btn m-0">
+                                <i data-lucide="play" fill="currentColor"></i>
+                                {% if has_progress %}Resume{% else %}Play Movie{% endif %}
+                            </a>
+                            
+                            {% if user.watch_together_access %}
+                            <button class="play-btn m-0" style="background: var(--bg-tertiary);" onclick="openWatchTogether('movie', {{ movie.id }})">
+                                <i data-lucide="users"></i>
+                            </button>
+                            {% endif %}
+                            {% if in_watchlist %}
+                            <form action="/watchlist/remove_by_item/movie/{{ movie.id }}" method="post" class="m-0">
+                                <button type="submit" class="play-btn m-0">
+                                    <i data-lucide="bookmark" fill="currentColor"></i>
+                                </button>
+                            </form>
+                            {% else %}
+                            <form action="/watchlist/add/movie/{{ movie.id }}" method="post" class="m-0">
+                                <button type="submit" class="play-btn m-0">
+                                    <i data-lucide="bookmark" fill="none"></i>
+                                </button>
+                            </form>
+                            {% endif %}
+                            
+                            {% if user.downloads_access %}
+                            <a href="/download/movie/{{ movie.id }}" class="play-btn m-0" download>
+                                <i data-lucide="arrow-down-to-line" fill="currentColor"></i>
+                            </a>
+                            {% endif %}
+                        </div>
+                        
+                        {% if cast_list %}
+                        <div class="mt-20">
+                            <strong style="color: var(--text-primary); display: block; margin-bottom: 15px;">Cast</strong>
+                            <div class="cast-row">
+                                {% for actor in cast_list %}
+                                <div class="cast-member">
+                                    {% if actor.profile_filename %}
+                                    <img src="/metadata/{{ actor.profile_filename }}" class="cast-avatar">
+                                    {% else %}
+                                    <div class="cast-avatar placeholder-avatar"><i data-lucide="user"></i></div>
+                                    {% endif %}
+                                    <div class="cast-name">{{ actor.name }}</div>
+                                    {% if actor.character %}
+                                    <div class="cast-character">{{ actor.character }}</div>
+                                    {% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+        <script src="/static/lucide.min.js"></script>
+        <script>lucide.createIcons();</script>
+    
+<script>
+    async function loadInbox() {
+        try {
+            const res = await fetch('/api/inbox');
+            const data = await res.json();
+            const items = data.invites;
+            const badge = document.getElementById('inboxBadge');
+            const container = document.getElementById('inboxItems');
+            if(!badge || !container) return;
+            
+            if (items.length > 0) {
+                badge.style.display = 'block';
+                container.innerHTML = items.map(inv => `
+                    <div style="padding: 10px; border-bottom: 1px solid var(--bg-tertiary);">
+                        <div><strong>${inv.sender}</strong> invited you to watch <em>${inv.title}</em></div>
+                        <div style="display: flex; gap: 10px; margin-top: 10px;">
+                            <button class="btn-small" onclick="respondInvite(${inv.id}, 'accept')">Accept</button>
+                            <button class="btn-small bg-gray" onclick="respondInvite(${inv.id}, 'decline')">Decline</button>
+                        </div>
+                    </div>
+                `).join('');
+            } else {
+                badge.style.display = 'none';
+                container.innerHTML = '<div style="color: var(--text-secondary); text-align: center;">No new invitations</div>';
+            }
+        } catch (err) {
+            console.error("Error loading inbox:", err);
+        }
+    }
+    
+    async function respondInvite(id, action) {
+        try {
+            const res = await fetch(`/watch_together/${action}/${id}`, { method: 'POST' });
+            const data = await res.json();
+            if (data.success && action === 'accept') {
+                window.location.href = `/play_sync/${data.session_id}`;
+            } else {
+                loadInbox();
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+    
+    function toggleInbox(e) {
+        e.preventDefault();
+        const menu = document.getElementById('inboxMenu');
+        if (menu.style.display === 'none') {
+            menu.style.display = 'block';
+            loadInbox();
+        } else {
+            menu.style.display = 'none';
+        }
+    }
+    
+    document.addEventListener('click', function(event) {
+        const menu = document.getElementById('inboxMenu');
+        const btn = document.getElementById('inboxBtn');
+        if (menu && btn && event.target !== btn && !btn.contains(event.target) && !menu.contains(event.target)) {
+            menu.style.display = 'none';
+        }
+    });
+    
+    setInterval(loadInbox, 10000);
+    document.addEventListener('DOMContentLoaded', loadInbox);
+</script>
+
+
+<!-- Watch Together Modal -->
+<div id="wtModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center;">
+    <div class="card" style="width: 400px; max-width: 90%;">
+        <div class="card-header">
+            <h2 class="m-0">Watch Together</h2>
+            <button class="btn-small bg-gray" onclick="document.getElementById('wtModal').style.display='none'">Close</button>
+        </div>
+        <p style="color: var(--text-secondary);">Select users to invite to this session:</p>
+        <div id="wtUserList" style="margin-bottom: 20px; max-height: 200px; overflow-y: auto;">
+            Loading users...
+        </div>
+        <button class="btn w-full" onclick="startWatchTogether()">Start Session</button>
+    </div>
+</div>
+
+<script>
+    let wtCurrentMedia = { type: null, id: null };
+    
+    async function openWatchTogether(mediaType, itemId) {
+        wtCurrentMedia = { type: mediaType, id: itemId };
+        const modal = document.getElementById('wtModal');
+        const userList = document.getElementById('wtUserList');
+        modal.style.display = 'flex';
+        userList.innerHTML = 'Loading users...';
+        
+        try {
+            const res = await fetch(`/api/users/eligible?media_type=${mediaType}`);
+            const users = await res.json();
+            
+            if (users.length === 0) {
+                userList.innerHTML = '<div style="color: var(--text-secondary);">No eligible users found. Make sure they have Watch Together and library access enabled in settings.</div>';
+            } else {
+                userList.innerHTML = users.map(u => `
+                    <label class="toggle-pill" style="display: flex; width: 100%; margin-bottom: 5px;">
+                        <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
+                        <span>${u.username}</span>
+                    </label>
+                `).join('');
+            }
+        } catch (err) {
+            console.error(err);
+            userList.innerHTML = 'Error loading users.';
+        }
+    }
+    
+    async function startWatchTogether() {
+        const checkboxes = document.querySelectorAll('.wt-user-checkbox:checked');
+        const userIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+        
+        try {
+            const res = await fetch('/watch_together/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    media_type: wtCurrentMedia.type,
+                    item_id: wtCurrentMedia.id,
+                    invited_user_ids: userIds
+                })
+            });
+            const data = await res.json();
+            if (data.session_id) {
+                window.location.href = `/play_sync/${data.session_id}`;
+            }
+        } catch (err) {
+            console.error(err);
+            alert("Error creating session.");
+        }
+    }
+</script>
+
+</body>
+</html>

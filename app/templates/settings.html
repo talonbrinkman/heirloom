@@ -1,0 +1,404 @@
+<html>
+
+<head>
+    <title>Heirloom</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script>
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).catch(err => console.error("Failed to copy:", err));
+        }
+
+        function togglePasswordVisibility() {
+            const input = document.getElementById('newPasswordInput');
+            const icon = document.getElementById('togglePasswordBtn');
+            if (input.type === 'password') {
+                input.type = 'text';
+                icon.setAttribute('data-lucide', 'eye-off');
+            } else {
+                input.type = 'password';
+                icon.setAttribute('data-lucide', 'eye');
+            }
+            lucide.createIcons();
+        }
+
+        let currentDirPath = "";
+        async function openDirBrowser() {
+            document.getElementById('dirModal').style.display = 'flex';
+            let startPath = document.getElementById('pathInput').value || "/";
+            await loadDir(startPath);
+        }
+        async function loadDir(path) {
+            if (path === "..") {
+                path = currentDirPath.substring(0, currentDirPath.lastIndexOf('/')) || "/";
+                if (path === "" && currentDirPath.indexOf('/') !== -1) path = "/";
+            }
+            const res = await fetch('/api/browse?path=' + encodeURIComponent(path));
+            const data = await res.json();
+            currentDirPath = data.current;
+            document.getElementById('modalPath').value = currentDirPath;
+
+            const list = document.getElementById('dirList');
+            list.innerHTML = "";
+            if (currentDirPath !== "/" && currentDirPath !== "C:\\" && !currentDirPath.endsWith(":/") && !currentDirPath.endsWith(":\\")) {
+                const item = document.createElement('div');
+                item.textContent = "📁 ..";
+                item.style.padding = "8px";
+                item.style.cursor = "pointer";
+                item.style.borderBottom = "1px solid #333";
+                item.onclick = () => loadDir("..");
+                list.appendChild(item);
+            }
+            data.directories.forEach(d => {
+                if (d === "..") return; // Handled above
+                const item = document.createElement('div');
+                item.textContent = "📁 " + d;
+                item.style.padding = "8px";
+                item.style.cursor = "pointer";
+                item.style.borderBottom = "1px solid #333";
+                // handle windows paths correctly if needed
+                let newPath = currentDirPath.endsWith('/') || currentDirPath.endsWith('\\') ? currentDirPath + d : currentDirPath + "/" + d;
+                item.onclick = () => loadDir(newPath);
+                list.appendChild(item);
+            });
+        }
+        function selectDir() {
+            document.getElementById('pathInput').value = currentDirPath;
+            document.getElementById('dirModal').style.display = 'none';
+        }
+
+        function checkHttpsWarning(url) {
+            const warningEl = document.getElementById('httpsWarning');
+            if (url && url.startsWith('http://')) {
+                warningEl.style.display = 'block';
+            } else {
+                warningEl.style.display = 'none';
+            }
+        }
+
+        async function testRemoteAccess() {
+            let url = document.getElementById('remoteUrlInput').value.trim();
+            checkHttpsWarning(url);
+
+            const statusBox = document.getElementById('testStatusBox');
+            const spinner = document.getElementById('testSpinner');
+            const check = document.getElementById('testCheck');
+            const cross = document.getElementById('testCross');
+            const text = document.getElementById('testStatusText');
+
+            if (!url) {
+                statusBox.style.display = 'none';
+                return;
+            }
+            if (url.endsWith('/')) {
+                url = url.slice(0, -1);
+            }
+
+            statusBox.style.display = 'flex';
+            statusBox.className = 'status-box testing';
+            spinner.style.display = 'block';
+            check.style.display = 'none';
+            cross.style.display = 'none';
+            text.textContent = 'Testing...';
+
+            try {
+                const res = await fetch(url + '/ping');
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.status === 'ok') {
+                        statusBox.className = 'status-box success';
+                        spinner.style.display = 'none';
+                        check.style.display = 'block';
+                        text.textContent = 'Online';
+                    } else {
+                        statusBox.className = 'status-box error';
+                        spinner.style.display = 'none';
+                        cross.style.display = 'block';
+                        text.textContent = 'Error';
+                        console.warn('Unexpected response:', data);
+                    }
+                } else {
+                    statusBox.className = 'status-box error';
+                    spinner.style.display = 'none';
+                    cross.style.display = 'block';
+                    text.textContent = 'Offline';
+                    console.error('Error:', res.status, res.statusText);
+                }
+            } catch (err) {
+                statusBox.className = 'status-box error';
+                spinner.style.display = 'none';
+                cross.style.display = 'block';
+                text.textContent = 'Offline';
+                console.error('Connection Failed:', err.message);
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const remoteUrlInput = document.getElementById('remoteUrlInput');
+            if (remoteUrlInput) {
+                testRemoteAccess();
+                remoteUrlInput.addEventListener('input', () => {
+                    testRemoteAccess();
+                });
+            }
+        });
+
+        function toggleMediaTypeMenu(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            document.getElementById('mediaTypeMenu').classList.toggle('show');
+        }
+
+        function selectMediaType(value, label) {
+            document.getElementById('mediaTypeInput').value = value;
+            document.getElementById('mediaTypeBtn').innerHTML = label + ' <i data-lucide="chevron-down" style="width: 16px; height: 16px; margin-left: 5px; vertical-align: middle;"></i>';
+            document.getElementById('mediaTypeMenu').classList.remove('show');
+            document.querySelectorAll('#mediaTypeMenu .res-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+            lucide.createIcons();
+        }
+
+        document.addEventListener('click', function (event) {
+            if (!event.target.closest('.custom-select-container')) {
+                const menu = document.getElementById('mediaTypeMenu');
+                if (menu) menu.classList.remove('show');
+            }
+        });
+    </script>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header flex justify-start gap-15">
+            <a href="/" class="text-white flex align-center" title="Home">
+                <i data-lucide="arrow-left"></i>
+            </a>
+            <h1 class="m-0">Settings</h1>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2 class="m-0">My Account, {{ user.username }}</h2>
+            </div>
+
+            {% if request.query_params.get("pw_success") %}
+            <div style="color: #4caf50; margin-bottom: 15px; font-weight: bold;">Password changed successfully!</div>
+            {% endif %}
+
+            <form action="/settings/change_password" method="post" class="flex gap-10 align-center m-0">
+                <div class="flex-1" style="position: relative;">
+                    <input type="password" name="new_password" id="newPasswordInput" placeholder="New Password" required
+                        class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
+                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
+                        onclick="togglePasswordVisibility()">
+                        <i data-lucide="eye" id="togglePasswordBtn"></i>
+                    </div>
+                </div>
+                <button type="submit" class="btn m-0" style="min-width: 140px;">Change Password</button>
+            </form>
+        </div>
+
+        {% if user.is_admin %}
+        <div class="card">
+            <div class="card-header">
+                <h2 class="m-0">Media Volume Paths</h2>
+                <form action="/settings/rescan" method="post" class="m-0">
+                    <button type="submit" class="btn-small">Rescan Library</button>
+                </form>
+            </div>
+
+            <form action="/settings/add_volume" method="post" class="flex gap-10 align-center mb-20">
+                <div class="flex-1 flex gap-10 align-center">
+                    <input type="text" name="path" id="pathInput" placeholder="/media/movies or custom volume path"
+                        required class="m-0 flex-1">
+                    <button type="button" class="btn m-0 p-12 bg-gray" onclick="openDirBrowser()">Browse</button>
+                </div>
+                <div class="custom-select-container" style="position: relative;">
+                    <input type="hidden" name="media_type" id="mediaTypeInput" value="movie">
+                    <button type="button" class="btn m-0 bg-gray" style="padding: 12px; height: 100%;"
+                        onclick="toggleMediaTypeMenu(event)" id="mediaTypeBtn">
+                        Movies <i data-lucide="chevron-down"
+                            style="width: 16px; height: 16px; margin-left: 5px; vertical-align: middle;"></i>
+                    </button>
+                    <div class="dropdown-menu settings-menu-expanded" id="mediaTypeMenu"
+                        style="flex-direction: column; top: 100%; bottom: auto; right: auto; left: 0; min-width: 120px; padding: 5px; margin-top: 5px;">
+                        <button type="button" class="res-btn active"
+                            onclick="selectMediaType('movie', 'Movies')">Movies</button>
+                        <button type="button" class="res-btn" onclick="selectMediaType('tv', 'TV Shows')">TV
+                            Shows</button>
+                        <button type="button" class="res-btn"
+                            onclick="selectMediaType('photo', 'Photos')">Photos</button>
+                    </div>
+                </div>
+                <button type="submit" class="btn m-0 nowrap">+ Add Path</button>
+            </form>
+
+            <ul>
+                {% for vp in volume_paths %}
+                <li class="list-item">
+                    <div>
+                        <strong>{{ vp.display_path }}</strong>
+                        {% if vp.exists %}
+                        <span class="code-text badge-active" title="Active">{{ vp.media_type }}</span>
+                        {% else %}
+                        <span class="code-text badge-inactive" title="Inactive">{{ vp.media_type }}</span>
+                        {% endif %}
+                    </div>
+                    <form action="/settings/delete_volume/{{ vp.id }}" method="post" class="m-0">
+                        <button type="submit" class="btn-small btn-danger"
+                            onclick="return confirm('Remove this volume path? Missing media will be removed from library.');">Delete</button>
+                    </form>
+                </li>
+                {% else %}
+                <li>No volume paths configured.</li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2 class="m-0">Users & Invitations</h2>
+                <form action="/settings/generate_invite" method="post" class="m-0" onsubmit="document.getElementById('hiddenRemoteUrl').value = document.getElementById('remoteUrlInput').value">
+                    <input type="hidden" name="remote_url" id="hiddenRemoteUrl">
+                    <button type="submit" class="btn-small">+ Add User</button>
+                </form>
+            </div>
+            <ul>
+                {% for u in users %}
+                <li class="list-item">
+                    <div>
+                        <strong>{{ u.username }}</strong> {% if u.is_admin %}(Admin){% endif %}
+                    </div>
+                    {% if not u.is_admin %}
+                    <div class="flex gap-15 align-center">
+                        <!-- Auto-submit on change removes the need for a button -->
+                        <form action="/settings/update_user/{{ u.id }}" method="post"
+                            class="m-0 flex gap-10 align-center">
+                            <label class="toggle-pill"><input type="checkbox" name="movies_access"
+                                    class="hidden-checkbox" onchange="this.form.submit()" {% if u.movies_access
+                                    %}checked{% endif %}>
+                                <span>Movies</span></label>
+                            <label class="toggle-pill"><input type="checkbox" name="tv_access" class="hidden-checkbox"
+                                    onchange="this.form.submit()" {% if u.tv_access %}checked{% endif %}>
+                                <span>TV Shows</span></label>
+                            <label class="toggle-pill"><input type="checkbox" name="photos_access"
+                                    class="hidden-checkbox" onchange="this.form.submit()" {% if u.photos_access
+                                    %}checked{% endif %}>
+                                <span>Photos</span></label>
+                            <label class="toggle-pill"><input type="checkbox" name="downloads_access"
+                                    class="hidden-checkbox" onchange="this.form.submit()" {% if u.downloads_access
+                                    %}checked{% endif %}>
+                                <span>Downloads</span></label>
+                            <label class="toggle-pill"><input type="checkbox" name="watch_together_access"
+                                    class="hidden-checkbox" onchange="this.form.submit()" {% if u.watch_together_access
+                                    %}checked{% endif %}>
+                                <span>Watch Together</span></label>
+                        </form>
+                        <form action="/settings/delete_user/{{ u.id }}" method="post" class="m-0" style="margin-left: 20px;">
+                            <button type="submit" class="btn-small btn-danger"
+                                onclick="return confirm('Delete this user?');">Delete</button>
+                        </form>
+                    </div>
+                    {% endif %}
+                </li>
+                {% endfor %}
+
+                {% for invite in invites %}
+                <li class="list-item">
+                    <div>
+                        <strong>Pending User Invitation</strong>
+                        <div class="share-link">Expires {{ invite.expires_at.strftime('%m/%d/%y') }} (Code: <span
+                                class="code-text">{{ invite.code }}</span>)</div>
+                    </div>
+                    <div class="flex gap-10">
+                        <button type="button" class="btn-small"
+                            onclick="copyToClipboard('{{ host_url }}/register?invite={{ invite.code }}')">Copy
+                            Link</button>
+                        <form action="/settings/delete_invite/{{ invite.id }}" method="post" class="m-0">
+                            <button type="submit" class="btn-small btn-danger">Delete</button>
+                        </form>
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2 class="mt-0">Metadata Integration (TMDB)</h2>
+            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Provide a free TMDB API Key to automatically
+                download beautiful backdrops, cast, and crew information for your media.</p>
+            {% if tmdb_key %}
+            <p style="color: var(--status-active); font-size: 0.9em; font-weight: bold;" class="mb-15"><i
+                    data-lucide="check-circle"
+                    style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i> TMDB API Key is
+                configured and active.</p>
+            {% endif %}
+            <form action="/settings/tmdb" method="post" class="flex gap-10 align-center m-0">
+                <input type="text" name="tmdb_key" placeholder="Enter TMDB API Key" value="{{ tmdb_key }}"
+                    class="flex-1 m-0">
+                <button type="submit" class="btn m-0" style="min-width: 100px;">Save</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2 class="mt-0">Network & Remote Access</h2>
+            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Configure your external URL and port if you use DDNS
+                or port forwarding. This ensures invite links work outside your local network.</p>
+            <form action="/settings/remote_access" method="post" class="flex gap-10 align-center m-0">
+                <input type="text" name="remote_url" id="remoteUrlInput"
+                    placeholder="e.g. http://my-home.duckdns.org:8080" value="{{ remote_url }}" class="flex-1 m-0">
+
+                <div id="testStatusBox" class="status-box m-0"
+                    style="display: none; padding: 10px 20px; border-radius: 4px; align-items: center; gap: 8px; font-weight: bold; min-width: 100px; justify-content: center; background-color: var(--bg-secondary);">
+                    <i id="testSpinner" data-lucide="loader" class="spinner"
+                        style="display: none; width: 18px; height: 18px;"></i>
+                    <i id="testCheck" data-lucide="check"
+                        style="display: none; color: var(--status-active); width: 18px; height: 18px;"></i>
+                    <i id="testCross" data-lucide="x"
+                        style="display: none; color: var(--status-inactive); width: 18px; height: 18px;"></i>
+                    <span id="testStatusText" style="font-size: 16px; color: var(--text-primary);">Testing...</span>
+                </div>
+
+                <button type="submit" class="btn m-0" style="min-width: 100px;">Save</button>
+            </form>
+            <div id="httpsWarning" style="display: none; color: #ffaa00; font-size: 0.85em; margin-top: 10px;">
+                <i data-lucide="alert-triangle"
+                    style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i>
+                Warning: You are using HTTP. It is highly recommended to use HTTPS for remote access to ensure your
+                credentials and data are encrypted.
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="card">
+            <form action="/logout" method="post" class="m-0">
+                <button type="submit" class="btn w-full">Logout</button>
+            </form>
+        </div>
+        <div style="text-align: center; color: #888; font-size: 0.8em; margin-top: 10px;">
+            <strong>v1.0.0</strong>
+        </div>
+    </div>
+
+    <!-- Directory Browser Modal -->
+    <div id="dirModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <h3 class="mt-0">Select Directory</h3>
+            <div class="flex gap-10 mb-10">
+                <input type="text" id="modalPath" class="m-0 flex-1" readonly>
+                <button type="button" class="btn m-0" onclick="loadDir('..')">Up</button>
+            </div>
+            <div id="dirList" class="dir-list">
+                <!-- dirs loaded here -->
+            </div>
+            <div class="flex justify-end gap-10">
+                <button type="button" class="btn bg-gray m-0"
+                    onclick="document.getElementById('dirModal').style.display='none'">Cancel</button>
+                <button type="button" class="btn m-0" onclick="selectDir()">Select</button>
+            </div>
+        </div>
+    </div>
+    <script src="/static/lucide.min.js"></script>
+    <script>lucide.createIcons();</script>
+</body>
+
+</html>

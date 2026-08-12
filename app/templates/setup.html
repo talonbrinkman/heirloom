@@ -1,0 +1,22 @@
+<html>
+    <head>
+        <title>Heirloom</title>
+        <link rel="stylesheet" href="/static/style.css">
+    </head>
+    <body class="center-screen">
+        <div class="setup-box">
+            <h1>Welcome to Heirloom</h1>
+            <p class="mb-30" style="color: #bbb;">Create your admin account to get started.</p>
+            
+            <form action="/setup" method="post" class="text-left">
+                <label for="username">Username</label>
+                <input type="text" name="username" id="username" required autocomplete="off">
+                
+                <label for="password">Password</label>
+                <input type="password" name="password" id="password" required>
+                
+                <button type="submit" class="btn w-full">Create Admin Account</button>
+            </form>
+        </div>
+    </body>
+</html>

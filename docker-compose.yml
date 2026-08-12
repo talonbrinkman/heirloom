@@ -1,0 +1,24 @@
+services:
+  heirloom:
+    # We use build: . instead of image: while you are actively developing
+    build: .
+    container_name: heirloom
+    environment:
+      # These tell the container who to pretend to be
+      - PUID=1026
+      - PGID=100
+      - TZ=America/Chicago
+    ports:
+      # Host : Container
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      # Host Path : Container Path
+      - ./config:/config
+      - ./media/tv:/media/tv:ro
+      - ./media/movies:/media/movies:ro
+      - ./media/photos:/media/photos:ro
+      - ./app:/app/app
+    restart: unless-stopped
