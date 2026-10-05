@@ -9,8 +9,12 @@
         }
 
         function togglePasswordVisibility() {
-            const input = document.getElementById('newPasswordInput');
-            const icon = document.getElementById('togglePasswordBtn');
+            toggleVisibility('newPasswordInput', 'togglePasswordBtn');
+        }
+
+        function toggleVisibility(inputId, btnId) {
+            const input = document.getElementById(inputId);
+            const icon = document.getElementById(btnId);
             if (input.type === 'password') {
                 input.type = 'text';
                 icon.setAttribute('data-lucide', 'eye-off');
@@ -19,6 +23,16 @@
                 icon.setAttribute('data-lucide', 'eye');
             }
             lucide.createIcons();
+        }
+
+        function submitUserForm(form) {
+            const formData = new FormData(form);
+            fetch(form.action, {
+                method: form.method,
+                body: formData
+            }).then(response => {
+                // Silent save completed
+            }).catch(err => console.error("Failed to save:", err));
         }
 
         let currentDirPath = "";
@@ -169,7 +183,7 @@
 <body>
     <div class="container">
         <div class="header flex justify-start gap-15">
-            <a href="/" class="text-white flex align-center" title="Home">
+            <a href="/" class="icon-link" title="Home">
                 <i data-lucide="arrow-left"></i>
             </a>
             <h1 class="m-0">Settings</h1>
@@ -235,13 +249,13 @@
             <ul>
                 {% for vp in volume_paths %}
                 <li class="list-item">
-                    <div>
-                        <strong>{{ vp.display_path }}</strong>
+                    <div class="flex gap-10 align-center">
                         {% if vp.exists %}
-                        <span class="code-text badge-active" title="Active">{{ vp.media_type }}</span>
+                        <span class="code-text badge-active" style="text-transform: uppercase;" title="Active">{{ vp.media_type }}</span>
                         {% else %}
-                        <span class="code-text badge-inactive" title="Inactive">{{ vp.media_type }}</span>
+                        <span class="code-text badge-inactive" style="text-transform: uppercase;" title="Inactive">{{ vp.media_type }}</span>
                         {% endif %}
+                        <strong>{{ vp.display_path }}</strong>
                     </div>
                     <form action="/settings/delete_volume/{{ vp.id }}" method="post" class="m-0">
                         <button type="submit" class="btn-small btn-danger"
@@ -265,35 +279,43 @@
             <ul>
                 {% for u in users %}
                 <li class="list-item">
-                    <div>
+                    <div class="flex gap-10 align-center">
                         <strong>{{ u.username }}</strong> {% if u.is_admin %}(Admin){% endif %}
                     </div>
                     {% if not u.is_admin %}
-                    <div class="flex gap-15 align-center">
+                    <div class="flex align-center" style="gap: 20px;">
                         <!-- Auto-submit on change removes the need for a button -->
                         <form action="/settings/update_user/{{ u.id }}" method="post"
-                            class="m-0 flex gap-10 align-center">
-                            <label class="toggle-pill"><input type="checkbox" name="movies_access"
-                                    class="hidden-checkbox" onchange="this.form.submit()" {% if u.movies_access
-                                    %}checked{% endif %}>
-                                <span>Movies</span></label>
-                            <label class="toggle-pill"><input type="checkbox" name="tv_access" class="hidden-checkbox"
-                                    onchange="this.form.submit()" {% if u.tv_access %}checked{% endif %}>
-                                <span>TV Shows</span></label>
-                            <label class="toggle-pill"><input type="checkbox" name="photos_access"
-                                    class="hidden-checkbox" onchange="this.form.submit()" {% if u.photos_access
-                                    %}checked{% endif %}>
-                                <span>Photos</span></label>
-                            <label class="toggle-pill"><input type="checkbox" name="downloads_access"
-                                    class="hidden-checkbox" onchange="this.form.submit()" {% if u.downloads_access
-                                    %}checked{% endif %}>
-                                <span>Downloads</span></label>
-                            <label class="toggle-pill"><input type="checkbox" name="watch_together_access"
-                                    class="hidden-checkbox" onchange="this.form.submit()" {% if u.watch_together_access
-                                    %}checked{% endif %}>
-                                <span>Watch Together</span></label>
+                            class="m-0 flex align-center" style="gap: 20px;">
+                            <div class="flex gap-10 align-center">
+                                <label class="toggle-pill"><input type="checkbox" name="movies_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.movies_access
+                                        %}checked{% endif %}>
+                                    <span>Movies</span></label>
+                                <label class="toggle-pill"><input type="checkbox" name="tv_access" class="hidden-checkbox"
+                                        onchange="submitUserForm(this.form)" {% if u.tv_access %}checked{% endif %}>
+                                    <span>TV Shows</span></label>
+                                <label class="toggle-pill"><input type="checkbox" name="photos_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.photos_access
+                                        %}checked{% endif %}>
+                                    <span>Photos</span></label>
+                            </div>
+                            <div class="flex gap-10 align-center">
+                                <label class="toggle-pill"><input type="checkbox" name="downloads_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.downloads_access
+                                        %}checked{% endif %}>
+                                    <span>Downloads</span></label>
+                                <label class="toggle-pill"><input type="checkbox" name="watch_together_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.watch_together_access
+                                        %}checked{% endif %}>
+                                    <span>Watch Together</span></label>
+                                <label class="toggle-pill"><input type="checkbox" name="kids_mode"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.kids_mode
+                                        %}checked{% endif %}>
+                                    <span>Kids Only</span></label>
+                            </div>
                         </form>
-                        <form action="/settings/delete_user/{{ u.id }}" method="post" class="m-0" style="margin-left: 20px;">
+                        <form action="/settings/delete_user/{{ u.id }}" method="post" class="m-0">
                             <button type="submit" class="btn-small btn-danger"
                                 onclick="return confirm('Delete this user?');">Delete</button>
                         </form>
@@ -333,8 +355,14 @@
                 configured and active.</p>
             {% endif %}
             <form action="/settings/tmdb" method="post" class="flex gap-10 align-center m-0">
-                <input type="text" name="tmdb_key" placeholder="Enter TMDB API Key" value="{{ tmdb_key }}"
-                    class="flex-1 m-0">
+                <div class="flex-1" style="position: relative;">
+                    <input type="password" name="tmdb_key" id="tmdbKeyInput" placeholder="Enter TMDB API Key" value="{{ tmdb_key }}"
+                        class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
+                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
+                        onclick="toggleVisibility('tmdbKeyInput', 'toggleTmdbBtn')">
+                        <i data-lucide="eye" id="toggleTmdbBtn"></i>
+                    </div>
+                </div>
                 <button type="submit" class="btn m-0" style="min-width: 100px;">Save</button>
             </form>
         </div>
@@ -344,8 +372,14 @@
             <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Configure your external URL and port if you use DDNS
                 or port forwarding. This ensures invite links work outside your local network.</p>
             <form action="/settings/remote_access" method="post" class="flex gap-10 align-center m-0">
-                <input type="text" name="remote_url" id="remoteUrlInput"
-                    placeholder="e.g. http://my-home.duckdns.org:8080" value="{{ remote_url }}" class="flex-1 m-0">
+                <div class="flex-1" style="position: relative;">
+                    <input type="password" name="remote_url" id="remoteUrlInput"
+                        placeholder="e.g. http://my-home.duckdns.org:8080" value="{{ remote_url }}" class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
+                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
+                        onclick="toggleVisibility('remoteUrlInput', 'toggleRemoteUrlBtn')">
+                        <i data-lucide="eye" id="toggleRemoteUrlBtn"></i>
+                    </div>
+                </div>
 
                 <div id="testStatusBox" class="status-box m-0"
                     style="display: none; padding: 10px 20px; border-radius: 4px; align-items: center; gap: 8px; font-weight: bold; min-width: 100px; justify-content: center; background-color: var(--bg-secondary);">
@@ -368,6 +402,21 @@
             </div>
         </div>
         {% endif %}
+
+        <div class="card">
+            <h2 class="mt-0">Hardware Accelerated Transcoding</h2>
+            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Select a hardware encoder if your server supports it to reduce CPU usage when streaming to unsupported devices or at lower resolutions.</p>
+            <form action="/settings/transcoding" method="post" class="flex gap-10 align-center m-0">
+                <select name="hw_accel_profile" class="flex-1 m-0" style="padding: 10px; border-radius: 4px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color);">
+                    <option value="auto" {% if hw_accel_profile == 'auto' or not hw_accel_profile %}selected{% endif %}>Auto (Detect best available)</option>
+                    <option value="software" {% if hw_accel_profile == 'software' %}selected{% endif %}>Software (CPU / libx264)</option>
+                    <option value="nvenc" {% if hw_accel_profile == 'nvenc' %}selected{% endif %}>NVIDIA NVENC (h264_nvenc)</option>
+                    <option value="qsv" {% if hw_accel_profile == 'qsv' %}selected{% endif %}>Intel QuickSync (h264_qsv)</option>
+                    <option value="videotoolbox" {% if hw_accel_profile == 'videotoolbox' %}selected{% endif %}>Apple VideoToolbox (h264_videotoolbox)</option>
+                </select>
+                <button type="submit" class="btn m-0" style="min-width: 100px;">Save</button>
+            </form>
+        </div>
 
         <div class="card">
             <form action="/logout" method="post" class="m-0">

@@ -1,5 +1,7 @@
 from fastapi import FastAPI, Depends, Form, Request, HTTPException, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from typing import Optional
@@ -10,13 +12,22 @@ import os
 import uuid
 from datetime import datetime
 from .database import create_db_and_tables, get_session, engine
-from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite
+from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest
 from .scanner import scan_media_library
 from .watcher import start_watcher, stop_watcher
 from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path
 import subprocess
 
 app = FastAPI(title="Heirloom")
+
+# Add CORS middleware to allow Flutter Web testing
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class ConnectionManager:
     def __init__(self):
@@ -113,6 +124,12 @@ def on_shutdown():
 def get_current_user(request: Request, session: Session = Depends(get_session)):
     token = request.cookies.get("session_token")
     if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+    if not token:
+        token = request.query_params.get("token")
+    if not token:
         return None
     return session.exec(select(User).where(User.session_token == token)).first()
 
@@ -165,6 +182,23 @@ async def process_login(request: Request, username: str = Form(...), password: s
     record_failed_attempt(request)
     return RedirectResponse(url="/login?error=1", status_code=303)
 
+class APILoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/api/login")
+async def api_login(request: Request, login_data: APILoginRequest, session: Session = Depends(get_session)):
+    check_rate_limit(request)
+    user = session.exec(select(User).where(User.username == login_data.username)).first()
+    if user and bcrypt.checkpw(login_data.password.encode('utf-8'), user.password_hash.encode('utf-8')):
+        user.session_token = str(uuid.uuid4())
+        session.add(user)
+        session.commit()
+        return {"success": True, "token": user.session_token, "user": {"id": user.id, "username": user.username}}
+    record_failed_attempt(request)
+    return JSONResponse(status_code=401, content={"success": False, "error": "Invalid credentials"})
+
+
 @app.post("/logout")
 async def process_logout(response: Response, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     if current_user:
@@ -174,6 +208,65 @@ async def process_logout(response: Response, current_user: User = Depends(get_cu
     redirect = RedirectResponse(url="/login", status_code=303)
     redirect.delete_cookie("session_token")
     return redirect
+
+@app.post("/forgot_password")
+async def request_password_reset(request: Request, username: str = Form(...), session: Session = Depends(get_session)):
+    user = session.exec(select(User).where(User.username == username)).first()
+    if user and not user.is_admin:
+        # Check if there's already a pending request
+        existing = session.exec(select(PasswordResetRequest).where(PasswordResetRequest.user_id == user.id, PasswordResetRequest.status == "pending")).first()
+        if not existing:
+            reset_req = PasswordResetRequest(user_id=user.id)
+            session.add(reset_req)
+            session.commit()
+    # Always redirect with success to avoid username enumeration
+    return RedirectResponse(url="/login?reset=1", status_code=303)
+
+@app.get("/reset_password/{token}", response_class=HTMLResponse)
+async def view_reset_password(request: Request, token: str, session: Session = Depends(get_session)):
+    reset_req = session.exec(select(PasswordResetRequest).where(PasswordResetRequest.token == token, PasswordResetRequest.status == "approved")).first()
+    if not reset_req:
+        return RedirectResponse(url="/login?reset_error=1", status_code=303)
+    user = session.get(User, reset_req.user_id)
+    return templates.TemplateResponse(request=request, name="reset_password.html", context={"token": token, "username": user.username if user else ""})
+
+@app.post("/reset_password/{token}")
+async def process_reset_password(token: str, password: str = Form(...), session: Session = Depends(get_session)):
+    reset_req = session.exec(select(PasswordResetRequest).where(PasswordResetRequest.token == token, PasswordResetRequest.status == "approved")).first()
+    if not reset_req:
+        return RedirectResponse(url="/login?reset_error=1", status_code=303)
+    user = session.get(User, reset_req.user_id)
+    if user:
+        user.password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        user.session_token = None
+        session.add(user)
+        reset_req.status = "used"
+        session.add(reset_req)
+        session.commit()
+    return RedirectResponse(url="/login?reset_success=1", status_code=303)
+
+@app.post("/password_reset/approve/{request_id}")
+async def approve_password_reset(request_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    if not current_user or not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    reset_req = session.get(PasswordResetRequest, request_id)
+    if reset_req and reset_req.status == "pending":
+        reset_req.status = "approved"
+        session.add(reset_req)
+        session.commit()
+    return {"success": True}
+
+@app.post("/password_reset/deny/{request_id}")
+async def deny_password_reset(request_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    if not current_user or not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    reset_req = session.get(PasswordResetRequest, request_id)
+    if reset_req and reset_req.status == "pending":
+        reset_req.status = "denied"
+        session.add(reset_req)
+        session.commit()
+    return {"success": True}
+
 
 @app.post("/setup")
 async def process_setup(username: str = Form(...), password: str = Form(...), session: Session = Depends(get_session)):
@@ -203,7 +296,7 @@ async def process_register(request: Request, username: str = Form(...), password
         raise HTTPException(status_code=400, detail="Username taken")
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
-    new_user = User(username=username, password_hash=hashed, is_admin=False, session_token=str(uuid.uuid4()))
+    new_user = User(username=username, password_hash=hashed, is_admin=False, session_token=str(uuid.uuid4()), kids_mode=False)
     session.add(new_user)
     session.delete(invite)
     session.commit()
@@ -233,6 +326,10 @@ def process_tv_shows(shows):
         result.append(item)
     return result
 
+def is_kids_safe(rating: str) -> bool:
+    if not rating: return False
+    return rating.strip().upper() in {"G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"}
+
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     if not session.exec(select(User)).first():
@@ -242,6 +339,9 @@ async def root(request: Request, current_user: User = Depends(get_current_user),
 
     movies = session.exec(select(Movie).order_by(Movie.id.desc())).all() if current_user.movies_access else []
     tv_shows_raw = session.exec(select(TVShow).order_by(TVShow.id.desc())).all() if current_user.tv_access else []    
+    if current_user.kids_mode:
+        movies = [m for m in movies if is_kids_safe(m.content_rating)]
+        tv_shows_raw = [t for t in tv_shows_raw if is_kids_safe(t.content_rating)]
     photos = session.exec(select(Photo).order_by(Photo.id.desc())).all() if current_user.photos_access else []
     recent_movies = movies[:15]
     recent_photos = photos[:15]
@@ -322,9 +422,52 @@ async def root(request: Request, current_user: User = Depends(get_current_user),
     
     user_watchlist_movies = [w.item_id for w in watchlist_db if w.media_type == 'movie']
     user_watchlist_tv = [w.item_id for w in watchlist_db if w.media_type == 'tv']
+    
+    import random
+    from collections import Counter
+    history_db_full = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).order_by(WatchHistory.last_watched.desc()).limit(100)).all()
+    watched_movie_ids = set()
+    watched_tv_titles = set()
+    genre_counts = Counter()
+    for h in history_db_full:
+        item_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
+        if item_obj:
+            if h.media_type == 'movie': watched_movie_ids.add(h.item_id)
+            else: watched_tv_titles.add(item_obj.title.strip().lower())
+            if item_obj.genres:
+                for g in item_obj.genres.split(','): genre_counts[g.strip()] += 1
+                
+    top_genres = [g for g, _ in genre_counts.most_common(3)]
+    recommended = []
+    if top_genres:
+        candidate_movies = [m for m in movies if m.id not in watched_movie_ids and m.genres and any(g in m.genres for g in top_genres)]
+        unique_shows = process_tv_shows(tv_shows_raw)
+        candidate_shows = [s for s in unique_shows if s.title.strip().lower() not in watched_tv_titles and s.genres and any(g in s.genres for g in top_genres)]
+        
+        for m in candidate_movies:
+            recommended.append({"item": {"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year}, "media_type": "movie"})
+        for s in candidate_shows:
+            recommended.append({"item": {"id": s.id, "title": s.title, "poster_filename": s.poster_filename, "year": getattr(s, 'year', '')}, "media_type": "tv"})
+            
+        random.shuffle(recommended)
+        recommended = recommended[:15]
+
+    if "application/json" in request.headers.get("Accept", ""):
+        return {
+            "user": {"id": current_user.id, "username": current_user.username, "is_admin": current_user.is_admin, "watch_together_access": current_user.watch_together_access, "downloads_access": current_user.downloads_access},
+            "recent_movies": recent_movies,
+            "recent_tv": recent_tv,
+            "recent_photos": recent_photos,
+            "watchlist": watchlist,
+            "history": history,
+            "recommended": recommended,
+            "user_watchlist_movies": user_watchlist_movies,
+            "user_watchlist_tv": user_watchlist_tv
+        }
 
     return templates.TemplateResponse(request=request, name="dashboard.html", context={
         "user": current_user, "recent_movies": recent_movies, "recent_tv": recent_tv, "recent_photos": recent_photos, "watchlist": watchlist, "history": history,
+        "recommended": recommended,
         "user_watchlist_movies": user_watchlist_movies, "user_watchlist_tv": user_watchlist_tv
     })
 
@@ -339,6 +482,8 @@ async def api_library(
     if media_type == "movie":
         if not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
         query = select(Movie)
+        if current_user.kids_mode:
+            query = query.where(Movie.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
         if search:
             query = query.where(Movie.title.ilike(f"%{search}%"))
             
@@ -353,6 +498,8 @@ async def api_library(
     elif media_type == "tv":
         if not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
         query = select(TVShow)
+        if current_user.kids_mode:
+            query = query.where(TVShow.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
         if search:
             query = query.where(TVShow.title.ilike(f"%{search}%"))
         
@@ -472,6 +619,244 @@ async def api_library(
         
     return {"items": result}
 
+@app.get("/api/me")
+async def api_me(current_user: User = Depends(get_current_user)):
+    if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"id": current_user.id, "username": current_user.username}
+
+@app.get("/api/dashboard")
+async def api_dashboard(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    movies = session.exec(select(Movie).order_by(Movie.id.desc())).all() if current_user.movies_access else []
+    tv_shows_raw = session.exec(select(TVShow).order_by(TVShow.id.desc())).all() if current_user.tv_access else []    
+    if current_user.kids_mode:
+        movies = [m for m in movies if is_kids_safe(m.content_rating)]
+        tv_shows_raw = [t for t in tv_shows_raw if is_kids_safe(t.content_rating)]
+        
+    recent_movies = [{"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year} for m in movies[:15]]
+    
+    import os, re
+    recent_tv_groups = []
+    for t_obj in tv_shows_raw:
+        if not recent_tv_groups:
+            recent_tv_groups.append({"item": t_obj, "count": 1})
+        elif recent_tv_groups[-1]["item"].title == t_obj.title:
+            recent_tv_groups[-1]["count"] += 1
+        else:
+            if len(recent_tv_groups) >= 15: break
+            recent_tv_groups.append({"item": t_obj, "count": 1})
+            
+    recent_tv = []
+    for g in recent_tv_groups[:15]:
+        t_obj = g["item"]
+        count = g["count"]
+        t = {
+            "id": t_obj.id,
+            "title": t_obj.title,
+            "year": t_obj.year,
+            "poster_filename": t_obj.poster_filename,
+            "file_path": t_obj.file_path,
+        }
+        if count > 1:
+            t['year'] = f"{count} Episodes"
+        else:
+            m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', t['file_path'])
+            if m:
+                base = f"S{int(m.group(1))} E{int(m.group(2))}"
+                t['year'] = base
+        recent_tv.append(t)
+        
+    watchlist_db = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id)).all()
+    watchlist = []
+    for w in watchlist_db:
+        if w.media_type == 'movie' and not current_user.movies_access: continue
+        if w.media_type == 'tv' and not current_user.tv_access: continue
+        item_obj = session.get(Movie if w.media_type == 'movie' else TVShow, w.item_id)
+        if item_obj:
+            item = {
+                "id": item_obj.id,
+                "title": item_obj.title,
+                "poster_filename": item_obj.poster_filename,
+                "year": getattr(item_obj, "year", "")
+            }
+            if w.media_type == 'tv':
+                m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', item_obj.file_path)
+                if m:
+                    item['year'] = f"S{int(m.group(1))} E{int(m.group(2))}"
+            watchlist.append({"item": item, "media_type": w.media_type})
+        
+    history_db = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).order_by(WatchHistory.last_watched.desc()).limit(15)).all()
+    history = []
+    for h in history_db:
+        if h.media_type == 'movie' and not current_user.movies_access: continue
+        if h.media_type == 'tv' and not current_user.tv_access: continue
+        item_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
+        if item_obj:
+            item = {
+                "id": item_obj.id,
+                "title": item_obj.title,
+                "poster_filename": item_obj.poster_filename,
+                "file_path": item_obj.file_path,
+                "year": getattr(item_obj, "year", "")
+            }
+            if h.media_type == 'tv':
+                m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', item['file_path'])
+                if m:
+                    base = f"S{int(m.group(1))} E{int(m.group(2))}"
+                    item['year'] = base
+            
+            history.append({"item": item, "media_type": h.media_type, "progress": h.progress})
+
+    import random
+    from collections import Counter
+    history_db_full = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).order_by(WatchHistory.last_watched.desc()).limit(100)).all()
+    watched_movie_ids = set()
+    watched_tv_titles = set()
+    genre_counts = Counter()
+    for h in history_db_full:
+        item_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
+        if item_obj:
+            if h.media_type == 'movie': watched_movie_ids.add(h.item_id)
+            else: watched_tv_titles.add(item_obj.title.strip().lower())
+            if item_obj.genres:
+                for g in item_obj.genres.split(','): genre_counts[g.strip()] += 1
+                
+    top_genres = [g for g, _ in genre_counts.most_common(3)]
+    recommended = []
+    if top_genres:
+        candidate_movies = [m for m in movies if m.id not in watched_movie_ids and m.genres and any(g in m.genres for g in top_genres)]
+        
+        # Unique shows
+        seen_titles = set()
+        unique_shows = []
+        for t in tv_shows_raw:
+            if t.title not in seen_titles:
+                seen_titles.add(t.title)
+                unique_shows.append(t)
+                
+        candidate_shows = [s for s in unique_shows if s.title.strip().lower() not in watched_tv_titles and s.genres and any(g in s.genres for g in top_genres)]
+        
+        for m in candidate_movies:
+            recommended.append({"item": {"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year}, "media_type": "movie"})
+        for s in candidate_shows:
+            recommended.append({"item": {"id": s.id, "title": s.title, "poster_filename": s.poster_filename, "year": getattr(s, 'year', '')}, "media_type": "tv"})
+            
+        random.shuffle(recommended)
+        recommended = recommended[:15]
+
+    photos = session.exec(select(Photo).order_by(Photo.date_added.desc())).all() if current_user.photos_access else []
+    recent_photos = [{"id": p.id, "title": p.title, "poster_filename": p.poster_filename, "album": p.album} for p in photos[:15]]
+
+    return {
+        "recent_movies": recent_movies,
+        "recent_tv": recent_tv,
+        "history": history,
+        "watchlist": watchlist,
+        "recommended": recommended,
+        "recent_photos": recent_photos
+    }
+
+@app.get("/api/movie/{movie_id}")
+async def api_movie(movie_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    if not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
+    
+    movie = session.get(Movie, movie_id)
+    if not movie: raise HTTPException(status_code=404, detail="Movie not found")
+    if current_user.kids_mode and not is_kids_safe(movie.content_rating):
+        raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+        
+    cast_list = []
+    if movie.cast and movie.cast.startswith("["):
+        try:
+            import json
+            cast_list = json.loads(movie.cast)
+        except: pass
+        
+    history = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == movie.id).where(WatchHistory.media_type == 'movie')).first()
+    has_progress = history.progress > 0 if history and history.progress else False
+    
+    in_watchlist = bool(session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.item_id == movie.id).where(Watchlist.media_type == 'movie')).first())
+    
+    return {
+        "id": movie.id,
+        "title": movie.title,
+        "year": movie.year,
+        "plot": movie.plot,
+        "rating": movie.rating,
+        "runtime": movie.runtime,
+        "content_rating": movie.content_rating,
+        "poster_filename": movie.poster_filename,
+        "backdrop_filename": movie.backdrop_filename,
+        "director": movie.director,
+        "cast": cast_list,
+        "file_path": movie.file_path,
+        "has_progress": has_progress,
+        "progress": history.progress if history else 0,
+        "in_watchlist": in_watchlist
+    }
+
+@app.get("/api/series/{series_id}")
+async def api_series(series_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    if not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
+    
+    show = session.get(TVShow, series_id)
+    if not show: raise HTTPException(status_code=404, detail="Show not found")
+    
+    if current_user.kids_mode and not is_kids_safe(show.content_rating):
+        raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+        
+    cast_list = []
+    if show.cast and show.cast.startswith("["):
+        try:
+            import json
+            cast_list = json.loads(show.cast)
+        except: pass
+
+    # Get all episodes with the same title
+    episodes = session.exec(select(TVShow).where(TVShow.title == show.title).order_by(TVShow.file_path.asc())).all()
+    
+    import re, os
+    seasons = {}
+    for ep in episodes:
+        m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', ep.file_path)
+        season_num = int(m.group(1)) if m else 1
+        ep_num = int(m.group(2)) if m else ep.id
+        
+        if season_num not in seasons:
+            seasons[season_num] = []
+            
+        history = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == ep.id).where(WatchHistory.media_type == 'tv')).first()
+        
+        seasons[season_num].append({
+            "id": ep.id,
+            "season": season_num,
+            "episode": ep_num,
+            "file_path": ep.file_path,
+            "has_progress": history.progress > 0 if history and history.progress else False,
+            "progress": history.progress if history else 0
+        })
+        
+    in_watchlist = bool(session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.item_id == show.id).where(Watchlist.media_type == 'tv')).first())
+    
+    return {
+        "id": show.id,
+        "title": show.title,
+        "year": show.year,
+        "plot": show.plot,
+        "rating": show.rating,
+        "runtime": show.runtime,
+        "content_rating": show.content_rating,
+        "poster_filename": show.poster_filename,
+        "backdrop_filename": show.backdrop_filename,
+        "director": show.director,
+        "cast": cast_list,
+        "in_watchlist": in_watchlist,
+        "seasons": seasons
+    }
+
 @app.get("/api/search")
 async def api_search(
     request: Request, q: str = "",
@@ -483,7 +868,10 @@ async def api_search(
     import urllib.parse
     results = []
     if current_user.movies_access:
-        movies = session.exec(select(Movie).where(Movie.title.ilike(f"%{q}%")).limit(10)).all()
+        query = select(Movie).where(Movie.title.ilike(f"%{q}%"))
+        if current_user.kids_mode:
+            query = query.where(Movie.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
+        movies = session.exec(query.limit(10)).all()
         for m in movies:
             results.append({
                 "id": m.id, "title": m.title, "type": "movie", "url": f"/movie/{m.id}",
@@ -491,7 +879,10 @@ async def api_search(
             })
             
     if current_user.tv_access:
-        shows = session.exec(select(TVShow).where(TVShow.title.ilike(f"%{q}%"))).all()
+        query = select(TVShow).where(TVShow.title.ilike(f"%{q}%"))
+        if current_user.kids_mode:
+            query = query.where(TVShow.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
+        shows = session.exec(query).all()
         processed = process_tv_shows(shows)
         for t in processed[:10]:
             results.append({
@@ -569,6 +960,8 @@ async def movie_view(request: Request, movie_id: int, current_user: User = Depen
     
     movie = session.get(Movie, movie_id)
     if not movie: raise HTTPException(status_code=404, detail="Movie not found")
+    if current_user.kids_mode and not is_kids_safe(movie.content_rating):
+        raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
         
     cast_list = []
     if movie.cast and movie.cast.startswith("["):
@@ -614,6 +1007,8 @@ async def series_view(request: Request, title: str, ep: Optional[int] = None, cu
     shows = session.exec(select(TVShow).where(TVShow.title == title)).all()
     if not shows:
         raise HTTPException(status_code=404, detail="Series not found")
+    if current_user.kids_mode and not is_kids_safe(shows[0].content_rating):
+        raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
         
     cast_list = []
     if shows[0].cast and shows[0].cast.startswith("["):
@@ -702,13 +1097,15 @@ async def series_view(request: Request, title: str, ep: Optional[int] = None, cu
     })
 
 @app.get("/play/{media_type}/{item_id}", response_class=HTMLResponse)
-async def play_video(request: Request, media_type: str, item_id: int, sync: str = None, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def play_video(request: Request, media_type: str, item_id: int, sync: str = None, mobile: str = None, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     if not current_user: return RedirectResponse(url="/login", status_code=303)
     if media_type == "movie" and not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
     if media_type == "tv" and not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
     
     item = session.get(Movie if media_type == "movie" else TVShow, item_id)
     if not item: raise HTTPException(status_code=404, detail="Item not found")
+    if current_user.kids_mode and not is_kids_safe(item.content_rating):
+        raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
         
     history_entry = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == item_id).where(WatchHistory.media_type == media_type)).first()
     if history_entry:
@@ -766,9 +1163,8 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
     except:
         pass
         
-    # Pass the history_entry into the context so the player knows where to resume
-    return templates.TemplateResponse(request=request, name="player.html", context={"item": item, "media_type": media_type, "history": history_entry, "season_episode": season_episode, "duration": duration, "next_episode_id": next_episode_id, "subtitle_url": subtitle_url, "sync_session_id": sync, "user": current_user})
-
+    token = request.query_params.get("token", "")
+    return templates.TemplateResponse(request=request, name="player.html", context={"item": item, "media_type": media_type, "history": history_entry, "season_episode": season_episode, "duration": duration, "next_episode_id": next_episode_id, "subtitle_url": subtitle_url, "sync_session_id": sync, "user": current_user, "token": token, "is_mobile": mobile == "1"})
 
 @app.get("/subtitle/{media_type}/{item_id}")
 async def get_subtitle(media_type: str, item_id: int, ext: str, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
@@ -1035,7 +1431,7 @@ async def delete_invite(invite_id: int, current_user: User = Depends(get_current
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/update_user/{user_id}")
-async def update_user(user_id: int, movies_access: str = Form(None), tv_access: str = Form(None), photos_access: str = Form(None), downloads_access: str = Form(None), watch_together_access: str = Form(None), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def update_user(user_id: int, movies_access: str = Form(None), tv_access: str = Form(None), photos_access: str = Form(None), downloads_access: str = Form(None), watch_together_access: str = Form(None), kids_mode: str = Form(None), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     if not current_user or not current_user.is_admin: raise HTTPException(status_code=403, detail="Forbidden")
     user = session.get(User, user_id)
     if user and not user.is_admin:
@@ -1044,6 +1440,7 @@ async def update_user(user_id: int, movies_access: str = Form(None), tv_access: 
         user.photos_access = photos_access == "on"
         user.downloads_access = downloads_access == "on"
         user.watch_together_access = watch_together_access == "on"
+        user.kids_mode = kids_mode == "on"
         session.commit()
     return RedirectResponse(url="/settings", status_code=303)
 
@@ -1076,7 +1473,7 @@ async def websocket_sync(websocket: WebSocket, session_id: str):
 
 @app.get("/api/inbox")
 async def get_inbox(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user: return {"invites": []}
+    if not current_user: return {"invites": [], "reset_requests": []}
     # Get pending invites
     invites = session.exec(select(WatchInvite).where(WatchInvite.invited_user_id == current_user.id).where(WatchInvite.status == "pending")).all()
     results = []
@@ -1099,7 +1496,21 @@ async def get_inbox(current_user: User = Depends(get_current_user), session: Ses
                 "media_type": ws_session.media_type,
                 "title": title
             })
-    return {"invites": results}
+    
+    # Get pending password reset requests (admin only)
+    reset_requests = []
+    if current_user.is_admin:
+        pending_resets = session.exec(select(PasswordResetRequest).where(PasswordResetRequest.status == "pending")).all()
+        for pr in pending_resets:
+            req_user = session.get(User, pr.user_id)
+            if req_user:
+                reset_requests.append({
+                    "id": pr.id,
+                    "username": req_user.username,
+                    "created_at": pr.created_at.strftime("%m/%d/%y %I:%M %p")
+                })
+    
+    return {"invites": results, "reset_requests": reset_requests}
 
 from pydantic import BaseModel
 class WatchTogetherRequest(BaseModel):

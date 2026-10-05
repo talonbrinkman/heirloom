@@ -316,7 +316,7 @@ input[type="checkbox"]:checked {
 
 }
 
-.toggle-pill .hidden-checkbox:checked + span {
+.toggle-pill .hidden-checkbox:checked+span {
 
     background-color: var(--accent-primary);
 
@@ -330,7 +330,7 @@ input[type="checkbox"]:checked {
 
 }
 
-.toggle-pill .hidden-checkbox:checked + span:hover {
+.toggle-pill .hidden-checkbox:checked+span:hover {
 
     background-color: var(--accent-hover);
 
@@ -429,8 +429,8 @@ ul {
     padding: 15px;
 
     border-radius: 8px;
-
-    margin-bottom: 10px;
+    margin-bottom: 20px;
+    gap: 20px;
 
 }
 
@@ -1277,6 +1277,10 @@ ul {
 
 }
 
+.watch-together-btn {
+    background-color: var(--bg-tertiary);
+}
+
 /* Gear Icon Animation */
 
 .icon-link {
@@ -1285,11 +1289,25 @@ ul {
     display: inline-flex;
     align-items: center;
 }
+
 .icon-link:hover {
     color: var(--accent-primary);
 }
+
+.icon-link .lucide-settings {
+    transition: transform 0.3s ease;
+}
+
 .icon-link:hover .lucide-settings {
     transform: rotate(30deg);
+}
+
+.icon-link .lucide-arrow-left {
+    transition: transform 0.3s ease;
+}
+
+.icon-link:hover .lucide-arrow-left {
+    transform: translateX(-3px);
 }
 
 /* Utility Classes for Refactoring */
@@ -1338,7 +1356,7 @@ ul {
 
 .m-0 {
 
-    margin: 0 !important;
+    margin: 0;
 
 }
 
@@ -2356,14 +2374,17 @@ ul {
     color: var(--accent-primary);
     font-weight: bold;
 }
- /* Photo Specific Styles */
+
+/* Photo Specific Styles */
 .photo-card {
     min-width: 150px;
 }
+
 .photo-poster-container {
     width: 150px;
     height: 150px;
 }
+
 .photo-poster-container .poster {
     object-fit: cover;
     aspect-ratio: 1/1;
@@ -2375,6 +2396,7 @@ ul {
         flex-direction: column;
         padding: 0 10px;
     }
+
     .sidebar {
         width: 100%;
         margin-right: 0;
@@ -2384,37 +2406,47 @@ ul {
         padding-right: 0;
         padding-bottom: 10px;
     }
+
     .sidebar-link {
         white-space: nowrap;
     }
+
     .info-layout {
         flex-direction: column;
         align-items: center;
         gap: 20px;
     }
+
     .info-poster {
         width: 100%;
         max-width: 300px;
     }
+
     .info-title {
         font-size: 2em;
         text-align: center;
     }
+
     .play-btn {
         width: 100%;
         justify-content: center;
     }
+
     .flex {
         flex-wrap: wrap;
     }
-    .grid-row, .carousel-row {
+
+    .grid-row,
+    .carousel-row {
         justify-content: center;
     }
+
     .header-full {
         padding: 15px 10px;
         flex-direction: column;
         gap: 15px;
     }
+
     .search-input {
         width: 100%;
     }

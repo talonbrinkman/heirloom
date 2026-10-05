@@ -13,6 +13,7 @@ class User(SQLModel, table=True):
     photos_access: bool = Field(default=True)
     downloads_access: bool = Field(default=True)
     watch_together_access: bool = Field(default=True)
+    kids_mode: bool = Field(default=False)
     session_token: Optional[str] = Field(default=None, index=True)
 
 class Movie(SQLModel, table=True):
@@ -26,7 +27,9 @@ class Movie(SQLModel, table=True):
     cast: Optional[str] = None
     director: Optional[str] = None
     rating: Optional[float] = None
+    genres: Optional[str] = None
     runtime: Optional[int] = None
+    content_rating: Optional[str] = None
 
 class TVShow(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -39,10 +42,12 @@ class TVShow(SQLModel, table=True):
     cast: Optional[str] = None
     director: Optional[str] = None
     rating: Optional[float] = None
+    genres: Optional[str] = None
     runtime: Optional[int] = None
     season: Optional[int] = None
     episode: Optional[int] = None
     season_poster_filename: Optional[str] = None
+    content_rating: Optional[str] = None
 
 class Photo(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -101,4 +106,11 @@ class WatchInvite(SQLModel, table=True):
     sender_id: int = Field(foreign_key="user.id")
     invited_user_id: int = Field(foreign_key="user.id")
     status: str = Field(default="pending")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class PasswordResetRequest(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id")
+    status: str = Field(default="pending")  # pending, approved, denied, used
+    token: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = Field(default_factory=datetime.utcnow)

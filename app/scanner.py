@@ -28,16 +28,21 @@ def download_image(image_path, prefix, tmdb_id, img_type="poster"):
             return None
     return filename
 
-def fetch_credits(tmdb_id: int, media_type: str, api_key: str):
+def fetch_additional_details(tmdb_id: int, media_type: str, api_key: str):
     import json
     try:
-        url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={api_key}"
+        if media_type == "movie":
+            url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}&append_to_response=credits,release_dates"
+        else:
+            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}&append_to_response=credits,content_ratings"
+            
         res = requests.get(url, timeout=10)
         if res.status_code == 200:
             data = res.json()
             
+            credits_data = data.get("credits", {})
             cast_list = []
-            for c in data.get("cast", [])[:5]:
+            for c in credits_data.get("cast", [])[:5]:
                 profile_filename = None
                 if c.get("profile_path"):
                     profile_filename = download_image(c["profile_path"], "person", c["id"], "profile")
@@ -49,14 +54,36 @@ def fetch_credits(tmdb_id: int, media_type: str, api_key: str):
                 })
             
             # Director(s)
-            directors = [c["name"] for c in data.get("crew", []) if c.get("job") == "Director"]
+            directors = [c["name"] for c in credits_data.get("crew", []) if c.get("job") == "Director"]
             
             cast_str = json.dumps(cast_list) if cast_list else None
             dir_str = ", ".join(directors) if directors else None
-            return cast_str, dir_str
+            
+            genres = data.get("genres", [])
+            genres_str = ", ".join([g.get("name") for g in genres if g.get("name")]) if genres else None
+            
+            content_rating = None
+            if media_type == "movie":
+                release_dates = data.get("release_dates", {}).get("results", [])
+                for result in release_dates:
+                    if result.get("iso_3166_1") == "US":
+                        for date in result.get("release_dates", []):
+                            if date.get("certification"):
+                                content_rating = date.get("certification")
+                                break
+                        break
+            else:
+                content_ratings = data.get("content_ratings", {}).get("results", [])
+                for result in content_ratings:
+                    if result.get("iso_3166_1") == "US":
+                        if result.get("rating"):
+                            content_rating = result.get("rating")
+                            break
+                            
+            return cast_str, dir_str, content_rating, genres_str
     except Exception:
         pass
-    return None, None
+    return None, None, None, None
 
 def scan_media_library(session: Session):
     volume_paths = session.exec(select(VolumePath)).all()
@@ -102,8 +129,10 @@ def scan_media_library(session: Session):
                             year = match.group(2) if match else ""
                             
                             plot, poster_filename, backdrop_filename = None, None, None
-                            rating = None
                             cast, director = None, None
+                            rating = None
+                            content_rating = None
+                            genres_str = None
                             
                             if tmdb_api_key:
                                 url = f"https://api.themoviedb.org/3/search/movie?query={search_title}&year={year}&api_key={tmdb_api_key}"
@@ -119,14 +148,15 @@ def scan_media_library(session: Session):
                                         search_title = data.get("title", search_title)
                                         year = data.get("release_date", "")[:4]
                                         
-                                        cast, director = fetch_credits(tmdb_id, "movie", tmdb_api_key)
+                                        cast, director, content_rating, genres_str = fetch_additional_details(tmdb_id, "movie", tmdb_api_key)
                                 except Exception:
                                     pass
 
                             new_movie = Movie(
                                 title=search_title, file_path=full_path, year=year, 
                                 plot=plot, poster_filename=poster_filename,
-                                backdrop_filename=backdrop_filename, cast=cast, director=director, rating=rating
+                                backdrop_filename=backdrop_filename, cast=cast, director=director, rating=rating,
+                                content_rating=content_rating, genres=genres_str
                             )
                             session.add(new_movie)
                             session.commit()
@@ -141,9 +171,19 @@ def scan_media_library(session: Session):
                         raw_title = os.path.splitext(file)[0]
                         
                         if not session.exec(select(TVShow).where(TVShow.file_path == full_path)).first():
-                            title_match = re.search(r'^(.*?)\s*[-_]?\s*(?:[Ss]\d+\s*[-_]?\s*[Ee]?\d+|\d+x\d+)', raw_title, re.IGNORECASE)
+                            # Update regex to capture season and episode digits
+                            title_match = re.search(r'^(.*?)\s*[-_]?\s*(?:[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)|(\d+)x(\d+))', raw_title, re.IGNORECASE)
+                            season, episode = None, None
+                            
                             if title_match:
                                 search_title = title_match.group(1).strip()
+                                # Parse season and episode from the capture groups
+                                if title_match.group(2) and title_match.group(3):
+                                    season = int(title_match.group(2))
+                                    episode = int(title_match.group(3))
+                                elif title_match.group(4) and title_match.group(5):
+                                    season = int(title_match.group(4))
+                                    episode = int(title_match.group(5))
                             else:
                                 search_title = raw_title.split(" - ")[0]
                             
@@ -151,8 +191,12 @@ def scan_media_library(session: Session):
                             search_title = re.sub(r'\s*\(\d{4}\)$', '', search_title).strip()
                             
                             plot, poster_filename, backdrop_filename = None, None, None
-                            rating = None
                             cast, director = None, None
+                            rating = None
+                            content_rating = None
+                            year = ""
+                            season_poster_filename = None
+                            genres_str = None
                             
                             if tmdb_api_key:
                                 url = f"https://api.themoviedb.org/3/search/tv?query={search_title}&api_key={tmdb_api_key}"
@@ -164,27 +208,31 @@ def scan_media_library(session: Session):
                                         plot = data.get("overview")
                                         poster_filename = download_image(data.get("poster_path"), "tv", tmdb_id, "poster")
                                         backdrop_filename = download_image(data.get("backdrop_path"), "tv", tmdb_id, "backdrop")
-                                        search_title = data.get("name", search_title)
                                         rating = data.get("vote_average")
+                                        search_title = data.get("name", search_title)
                                         
-                                        if season_number is not None:
-                                            try:
-                                                s_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season_number}?api_key={tmdb_api_key}"
-                                                s_res = requests.get(s_url, timeout=10)
-                                                if s_res.status_code == 200:
-                                                    s_data = s_res.json()
-                                                    season_poster_filename = download_image(s_data.get("poster_path"), "tv_season", f"{tmdb_id}_{season_number}", "poster")
-                                            except Exception:
-                                                pass
+                                        if not year:
+                                            year = data.get("first_air_date", "")[:4]
+                                            
+                                        cast, director, content_rating, genres_str = fetch_additional_details(tmdb_id, "tv", tmdb_api_key)
                                         
-                                        cast, director = fetch_credits(tmdb_id, "tv", tmdb_api_key)
-                                except Exception:
-                                    pass
+                                        # Also fetch season poster if we have a valid season
+                                        if season is not None:
+                                            s_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season}?api_key={tmdb_api_key}"
+                                            s_res = requests.get(s_url, timeout=10)
+                                            if s_res.status_code == 200:
+                                                s_data = s_res.json()
+                                                if s_data.get("poster_path"):
+                                                    season_poster_filename = download_image(s_data["poster_path"], f"tv_s{season}", tmdb_id, "poster")
+                                except Exception as e:
+                                    print(f"Error fetching TV show data: {e}")
 
                             new_show = TVShow(
-                                title=search_title, file_path=full_path, year="", 
+                                title=search_title, file_path=full_path, year=year, 
                                 plot=plot, poster_filename=poster_filename,
-                                backdrop_filename=backdrop_filename, cast=cast, director=director, rating=rating
+                                backdrop_filename=backdrop_filename, cast=cast, director=director, rating=rating,
+                                season=season, episode=episode, season_poster_filename=season_poster_filename,
+                                content_rating=content_rating, genres=genres_str
                             )
                             session.add(new_show)
                             session.commit()

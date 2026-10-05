@@ -14,6 +14,15 @@
             </div>
             <div class="flex gap-15 align-center">
                 {% if user.is_admin %}
+                <div style="position: relative;">
+                    <a href="#" class="icon-link" id="inboxBtn" onclick="toggleInbox(event)" title="Inbox">
+                        <i data-lucide="inbox"></i>
+                        <span id="inboxBadge" style="display: none; position: absolute; top: -2px; right: -2px; background: red; width: 10px; height: 10px; border-radius: 50%;"></span>
+                    </a>
+                    <div id="inboxMenu" class="dropdown-menu" style="top: 100%; right: 0; left: auto; min-width: 300px; max-height: 400px; overflow-y: auto; display: none; padding: 10px;">
+                        <div id="inboxItems">Loading...</div>
+                    </div>
+                </div>
                 <a href="/settings" class="icon-link">
                     <i data-lucide="settings"></i>
                 </a>

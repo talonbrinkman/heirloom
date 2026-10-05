@@ -20,7 +20,7 @@
     <video id="mediaPlayer" class="player-video" playsinline crossorigin="anonymous">
         Your browser does not support HTML video.
         {% if subtitle_url %}
-        <track label="English" kind="subtitles" srclang="en" src="{{ subtitle_url }}" default>
+        <track label="English" kind="subtitles" srclang="en" src="{{ subtitle_url }}{% if token %}&token={{ token }}{% endif %}" default>
         {% endif %}
     </video>
     
@@ -38,9 +38,15 @@
                 <div class="player-subtitle">{{ item.year }}</div>
                 {% endif %}
             </div>
+            {% if is_mobile %}
+            <a href="javascript:void(0);" onclick="if(window.FlutterApp) window.FlutterApp.postMessage('close');" class="player-close-btn" title="Close Player">
+                <i data-lucide="x"></i>
+            </a>
+            {% else %}
             <a href="/" class="player-close-btn" title="Close Player">
                 <i data-lucide="x"></i>
             </a>
+            {% endif %}
         </div>
         
         <div class="player-controls pointer-events-auto">
@@ -55,15 +61,25 @@
                 </div>
                 
                 <div class="controls-center">
+                    {% if prev_episode_id %}
+                    <a href="/play/tv/{{ prev_episode_id }}" class="control-btn" title="Previous Episode" style="display: flex; align-items: center; justify-content: center;">
+                        <i data-lucide="skip-back"></i>
+                    </a>
+                    {% endif %}
                     <button class="control-btn" id="rewindBtn" onclick="seekOffset(-10)">
-                        <i data-lucide="rewind"></i>
+                        <i data-lucide="rotate-ccw"></i>
                     </button>
                     <button class="control-btn play-btn-large" id="playPauseBtn">
                         <i data-lucide="play" id="playIcon"></i>
                     </button>
                     <button class="control-btn" id="forwardBtn" onclick="seekOffset(10)">
-                        <i data-lucide="fast-forward"></i>
+                        <i data-lucide="rotate-cw"></i>
                     </button>
+                    {% if next_episode_id %}
+                    <a href="/play/tv/{{ next_episode_id }}" class="control-btn" title="Next Episode" style="display: flex; align-items: center; justify-content: center;">
+                        <i data-lucide="skip-forward"></i>
+                    </a>
+                    {% endif %}
                 </div>
                 
                 <div class="controls-right">
@@ -73,17 +89,18 @@
                         </button>
                         <input type="range" id="volumeSlider" class="volume-slider" min="0" max="1" step="0.05" value="1">
                     </div>
-                    {% if subtitle_url %}
-                    <button class="control-btn" id="ccBtn" onclick="toggleSubtitles()" title="Toggle Subtitles">
-                        <i data-lucide="subtitles"></i>
-                    </button>
-                    {% endif %}
+
                     <button class="control-btn" id="nativeCastBtn" onclick="requestCast()" title="AirPlay / PiP" style="display: none;">
                         <i data-lucide="cast"></i>
                     </button>
                     <button class="control-btn" id="googleCastBtn" title="Cast to TV" style="display: none; align-items: center; justify-content: center;">
                         <google-cast-launcher></google-cast-launcher>
                     </button>
+                    {% if subtitle_url %}
+                    <button class="control-btn" id="ccBtn" onclick="toggleSubtitles()" title="Toggle Subtitles">
+                        <i data-lucide="subtitles"></i>
+                    </button>
+                    {% endif %}
                     <div class="settings-container">
                         <button class="control-btn" onclick="toggleSettings(event)">
                             <i data-lucide="settings"></i>
@@ -176,7 +193,11 @@
 
         // Setup Video Source
         function loadVideoSource() {
-            video.src = `/stream/{{ media_type }}/{{ item.id }}?res=${currentRes}&start=${offsetStart}`;
+            let url = `/stream/{{ media_type }}/{{ item.id }}?res=${currentRes}&start=${offsetStart}`;
+            {% if token %}
+            url += `&token={{ token }}`;
+            {% endif %}
+            video.src = url;
             video.load();
             video.play().catch(e => console.log("Auto-play prevented", e));
         }
@@ -201,6 +222,33 @@
         }
         playBtn.addEventListener('click', togglePlay);
         video.addEventListener('click', togglePlay);
+        
+        document.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+            
+            if (e.code === 'Space') {
+                e.preventDefault();
+                togglePlay();
+            } else if (e.key.toLowerCase() === 'f') {
+                e.preventDefault();
+                if (!document.fullscreenElement) {
+                    document.documentElement.requestFullscreen().catch(err => {
+                        console.log(`Error attempting to enable fullscreen: ${err.message}`);
+                    });
+                } else {
+                    document.exitFullscreen();
+                }
+            } else if (e.key.toLowerCase() === 'm') {
+                e.preventDefault();
+                toggleMute();
+            } else if (e.code === 'ArrowRight') {
+                e.preventDefault();
+                seekOffset(10);
+            } else if (e.code === 'ArrowLeft') {
+                e.preventDefault();
+                seekOffset(-10);
+            }
+        });
 
         video.addEventListener('play', () => {
             playBtn.innerHTML = '<i data-lucide="pause"></i>';
@@ -214,7 +262,12 @@
         // Next Episode Auto-play
         video.addEventListener('ended', () => {
             {% if next_episode_id %}
-            window.location.href = "/play/tv/{{ next_episode_id }}";
+            let nextUrl = "/play/tv/{{ next_episode_id }}";
+            let params = [];
+            {% if token %} params.push("token={{ token }}"); {% endif %}
+            {% if is_mobile %} params.push("mobile=1"); {% endif %}
+            if (params.length > 0) nextUrl += "?" + params.join("&");
+            window.location.href = nextUrl;
             {% endif %}
         });
 
@@ -234,7 +287,10 @@
             if (effectiveDuration > 0) {
                 const pct = (actualTime / effectiveDuration) * 100;
                 progressBarFill.style.width = `${Math.min(pct, 100)}%`;
-                timeDisplay.textContent = `${formatTime(actualTime)} / ${formatTime(effectiveDuration)}`;
+                const actualSec = Math.floor(actualTime);
+                const durSec = Math.floor(effectiveDuration);
+                const timeLeft = durSec - actualSec;
+                timeDisplay.textContent = `${formatTime(actualSec)} / ${formatTime(durSec)} -${formatTime(timeLeft)}`;
             } else {
                 timeDisplay.textContent = `${formatTime(actualTime)}`;
             }
@@ -245,7 +301,11 @@
                 const currentProgress = (actualTime / effectiveDuration) * 100;
                 const formData = new FormData();
                 formData.append('progress', currentProgress);
-                fetch('/progress/{{ media_type }}/{{ item.id }}', { method: 'POST', body: formData });
+                let progUrl = '/progress/{{ media_type }}/{{ item.id }}';
+                {% if token %}
+                progUrl += '?token={{ token }}';
+                {% endif %}
+                fetch(progUrl, { method: 'POST', body: formData });
                 lastUpdate = now;
             }
         }

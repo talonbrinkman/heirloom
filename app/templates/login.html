@@ -6,13 +6,55 @@
     <body class="center-screen">
         <div class="setup-box">
             <h1>Login</h1>
-            <form action="/login" method="post" class="text-left">
+            <form action="/login" method="post" class="text-left" id="loginForm">
                 <label for="username">Username</label>
                 <input type="text" name="username" id="username" required>
                 <label for="password">Password</label>
                 <input type="password" name="password" id="password" required>
                 <button type="submit" class="btn w-full">Sign In</button>
             </form>
+            <div style="text-align: center; margin-top: 15px;">
+                <a href="#" onclick="showForgotPassword(event)" style="color: var(--text-secondary); font-size: 0.9em; text-decoration: none;">Forgot Password?</a>
+            </div>
+
+            <form action="/forgot_password" method="post" id="forgotForm" style="display: none; margin-top: 20px; text-align: left;">
+                <p style="color: var(--text-secondary); font-size: 0.9em; margin-bottom: 15px;">Enter your username and a password reset request will be sent to the admin for approval.</p>
+                <label for="forgot_username">Username</label>
+                <input type="text" name="username" id="forgot_username" required>
+                <button type="submit" class="btn w-full">Request Reset</button>
+                <div style="text-align: center; margin-top: 10px;">
+                    <a href="#" onclick="hideForgotPassword(event)" style="color: var(--text-secondary); font-size: 0.9em; text-decoration: none;">Back to Login</a>
+                </div>
+            </form>
         </div>
+
+        <script>
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('error')) showNotice('Invalid username or password.', 'var(--danger)');
+            if (params.get('reset')) showNotice('Password reset request sent. An admin will review it shortly.', 'var(--accent-primary)');
+            if (params.get('reset_success')) showNotice('Password changed successfully! You can now log in.', '#10B981');
+            if (params.get('reset_error')) showNotice('This reset link is invalid or has already been used.', 'var(--danger)');
+
+            function showNotice(msg, color) {
+                const notice = document.createElement('div');
+                notice.style.cssText = `text-align: center; margin-top: 15px; padding: 10px 15px; border-radius: 8px; background: ${color}22; border: 1px solid ${color}44; color: ${color}; font-size: 0.9em;`;
+                notice.textContent = msg;
+                document.querySelector('.setup-box').insertBefore(notice, document.querySelector('.setup-box h1').nextSibling);
+            }
+
+            function showForgotPassword(e) {
+                e.preventDefault();
+                document.getElementById('loginForm').style.display = 'none';
+                document.querySelector('.setup-box > div[style*="text-align: center"]').style.display = 'none';
+                document.getElementById('forgotForm').style.display = 'block';
+            }
+
+            function hideForgotPassword(e) {
+                e.preventDefault();
+                document.getElementById('loginForm').style.display = 'block';
+                document.querySelector('.setup-box > div[style*="text-align: center"]').style.display = 'block';
+                document.getElementById('forgotForm').style.display = 'none';
+            }
+        </script>
     </body>
 </html>

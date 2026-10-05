@@ -119,9 +119,66 @@
             </div>
             {% endif %}
 
+            {% if recommended %}
+            <div class="card">
+                <h2>Recommended for You</h2>
+                <div class="carousel-container">
+                    <button class="carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
+                            data-lucide="chevron-left"></i></button>
+                    <div class="carousel-row">
+                        {% for r in recommended %}
+                        <div class="media-card">
+                            <div class="poster-container">
+                                <a
+                                    href="{% if r.media_type == 'tv' %}/series/{{ r.item.title | urlencode }}{% else %}/movie/{{ r.item.id }}{% endif %}">
+                                    {% if r.item.poster_filename %}
+                                    <img src="/metadata/{{ r.item.poster_filename }}" class="poster">
+                                    {% else %}
+                                    <div class="poster-placeholder"></div>
+                                    {% endif %}
+                                </a>
+                                <a href="/play/{{ r.media_type }}/{{ r.item.id }}" class="hover-play">
+                                    <i data-lucide="play" fill="currentColor"></i>
+                                </a>
+                                <button class="three-dots-btn"
+                                    onclick="toggleMenu(event, 'menu-recommended-{{ loop.index }}')">
+                                    <i data-lucide="more-vertical" fill="white"></i>
+                                </button>
+                                <div class="dropdown-menu" id="menu-recommended-{{ loop.index }}">
+                                    {% if user.watch_together_access %}<div class="m-0"><button type="button" onclick="openWatchTogether('{{ r.media_type }}', {{ r.item.id }})">Watch Together</button></div>{% endif %}
+                                    {% if user.downloads_access %}
+                                    <form action="/download/{{ r.media_type }}/{{ r.item.id }}" method="get"
+                                        class="m-0">
+                                        <button type="submit">Download</button>
+                                    </form>
+                                    {% endif %}
+                                    <form action="/watchlist/toggle" method="post" class="m-0">
+                                        <input type="hidden" name="media_type" value="{{ r.media_type }}">
+                                        <input type="hidden" name="item_id" value="{{ r.item.id }}">
+                                        <button type="submit">
+                                            {% if (r.media_type == 'movie' and r.item.id in user_watchlist_movies) or (r.media_type == 'tv' and r.item.id in user_watchlist_tv) %}
+                                            Remove from Watchlist
+                                            {% else %}
+                                            Add to Watchlist
+                                            {% endif %}
+                                        </button>
+                                    </form>
+                                </div>
+                            </div>
+                            <div class="media-title">{{ r.item.title }}</div>
+                            {% if r.item.year %}<div class="media-year">{{ r.item.year | safe }}</div>{% endif %}
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <button class="carousel-arrow right" onclick="scrollCarousel(this, 1)"><i
+                            data-lucide="chevron-right"></i></button>
+                </div>
+            </div>
+            {% endif %}
+
             {% if watchlist %}
             <div class="card">
-                <h2>My Watchlist</h2>
+                <h2>Watchlist</h2>
                 <div class="carousel-container">
                     <button class="carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
                             data-lucide="chevron-left"></i></button>
@@ -464,13 +521,16 @@
             const res = await fetch('/api/inbox');
             const data = await res.json();
             const items = data.invites;
+            const resets = data.reset_requests || [];
             const badge = document.getElementById('inboxBadge');
             const container = document.getElementById('inboxItems');
             if(!badge || !container) return;
             
-            if (items.length > 0) {
+            const totalCount = items.length + resets.length;
+            if (totalCount > 0) {
                 badge.style.display = 'block';
-                container.innerHTML = items.map(inv => `
+                let html = '';
+                html += items.map(inv => `
                     <div style="padding: 10px; border-bottom: 1px solid var(--bg-tertiary);">
                         <div><strong>${inv.sender}</strong> invited you to watch <em>${inv.title}</em></div>
                         <div style="display: flex; gap: 10px; margin-top: 10px;">
@@ -479,9 +539,20 @@
                         </div>
                     </div>
                 `).join('');
+                html += resets.map(pr => `
+                    <div style="padding: 10px; border-bottom: 1px solid var(--bg-tertiary);">
+                        <div><strong>${pr.username}</strong> is requesting a password reset</div>
+                        <div style="color: var(--text-secondary); font-size: 0.85em; margin-top: 4px;">Requested ${pr.created_at}</div>
+                        <div style="display: flex; gap: 10px; margin-top: 10px;">
+                            <button class="btn-small" onclick="respondReset(${pr.id}, 'approve')">Approve</button>
+                            <button class="btn-small bg-gray" onclick="respondReset(${pr.id}, 'deny')">Deny</button>
+                        </div>
+                    </div>
+                `).join('');
+                container.innerHTML = html;
             } else {
                 badge.style.display = 'none';
-                container.innerHTML = '<div style="color: var(--text-secondary); text-align: center;">No new invitations</div>';
+                container.innerHTML = '<div style="color: var(--text-secondary); text-align: center;">No new notifications</div>';
             }
         } catch (err) {
             console.error("Error loading inbox:", err);
@@ -497,6 +568,15 @@
             } else {
                 loadInbox();
             }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    async function respondReset(id, action) {
+        try {
+            await fetch(`/password_reset/${action}/${id}`, { method: 'POST' });
+            loadInbox();
         } catch (err) {
             console.error(err);
         }

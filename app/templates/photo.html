@@ -111,13 +111,16 @@
             const res = await fetch('/api/inbox');
             const data = await res.json();
             const items = data.invites;
+            const resets = data.reset_requests || [];
             const badge = document.getElementById('inboxBadge');
             const container = document.getElementById('inboxItems');
             if(!badge || !container) return;
             
-            if (items.length > 0) {
+            const totalCount = items.length + resets.length;
+            if (totalCount > 0) {
                 badge.style.display = 'block';
-                container.innerHTML = items.map(inv => `
+                let html = '';
+                html += items.map(inv => `
                     <div style="padding: 10px; border-bottom: 1px solid var(--bg-tertiary);">
                         <div><strong>${inv.sender}</strong> invited you to watch <em>${inv.title}</em></div>
                         <div style="display: flex; gap: 10px; margin-top: 10px;">
@@ -126,9 +129,20 @@
                         </div>
                     </div>
                 `).join('');
+                html += resets.map(pr => `
+                    <div style="padding: 10px; border-bottom: 1px solid var(--bg-tertiary);">
+                        <div><strong>${pr.username}</strong> is requesting a password reset</div>
+                        <div style="color: var(--text-secondary); font-size: 0.85em; margin-top: 4px;">Requested ${pr.created_at}</div>
+                        <div style="display: flex; gap: 10px; margin-top: 10px;">
+                            <button class="btn-small" onclick="respondReset(${pr.id}, 'approve')">Approve</button>
+                            <button class="btn-small bg-gray" onclick="respondReset(${pr.id}, 'deny')">Deny</button>
+                        </div>
+                    </div>
+                `).join('');
+                container.innerHTML = html;
             } else {
                 badge.style.display = 'none';
-                container.innerHTML = '<div style="color: var(--text-secondary); text-align: center;">No new invitations</div>';
+                container.innerHTML = '<div style="color: var(--text-secondary); text-align: center;">No new notifications</div>';
             }
         } catch (err) {
             console.error("Error loading inbox:", err);
@@ -144,6 +158,15 @@
             } else {
                 loadInbox();
             }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    async function respondReset(id, action) {
+        try {
+            await fetch(`/password_reset/${action}/${id}`, { method: 'POST' });
+            loadInbox();
         } catch (err) {
             console.error(err);
         }

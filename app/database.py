@@ -50,6 +50,27 @@ def create_db_and_tables():
         except Exception:
             session.rollback()
 
+        try:
+            session.exec(text("ALTER TABLE movie ADD COLUMN content_rating VARCHAR"))
+            session.exec(text("ALTER TABLE tvshow ADD COLUMN content_rating VARCHAR"))
+            session.commit()
+        except Exception:
+            session.rollback()
+            
+        try:
+            session.exec(text("ALTER TABLE user ADD COLUMN kids_mode BOOLEAN"))
+            session.exec(text("UPDATE user SET kids_mode = 0"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
+            session.exec(text("ALTER TABLE movie ADD COLUMN genres VARCHAR"))
+            session.exec(text("ALTER TABLE tvshow ADD COLUMN genres VARCHAR"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
         # Migration to fix malformed TV Show titles (e.g. 'Better Call Saul S03 01' or 'Invincible (2021)')
         from .models import TVShow
         import re
