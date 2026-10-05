@@ -9,3 +9,7 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+*.db
+*.sqlite
+*.sqlite3
+.DS_Store
