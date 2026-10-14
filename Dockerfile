@@ -4,8 +4,13 @@ FROM python:3.11-slim
 # Set the working directory inside the container
 WORKDIR /app
 
-# Install ffmpeg for video transcoding
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+# Install ffmpeg and VA-API hardware acceleration libraries
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    vainfo \
+    mesa-va-drivers \
+    intel-media-va-driver \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy the requirements file into the container
 COPY requirements.txt .

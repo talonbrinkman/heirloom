@@ -412,6 +412,7 @@
                     <option value="software" {% if hw_accel_profile == 'software' %}selected{% endif %}>Software (CPU / libx264)</option>
                     <option value="nvenc" {% if hw_accel_profile == 'nvenc' %}selected{% endif %}>NVIDIA NVENC (h264_nvenc)</option>
                     <option value="qsv" {% if hw_accel_profile == 'qsv' %}selected{% endif %}>Intel QuickSync (h264_qsv)</option>
+                    <option value="vaapi" {% if hw_accel_profile == 'vaapi' %}selected{% endif %}>VA-API (h264_vaapi)</option>
                     <option value="videotoolbox" {% if hw_accel_profile == 'videotoolbox' %}selected{% endif %}>Apple VideoToolbox (h264_videotoolbox)</option>
                 </select>
                 <button type="submit" class="btn m-0" style="min-width: 100px;">Save</button>

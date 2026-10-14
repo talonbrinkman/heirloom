@@ -14,3 +14,4 @@ venv/
 *.sqlite3
 .DS_Store
 app/bin/*.exe
+devtools_options.yaml

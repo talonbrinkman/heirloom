@@ -6,15 +6,17 @@ By leveraging a lightweight, API-first architecture using Python and FastAPI, He
 
 ## 🚀 Premium Features, Zero Cost
 
-- **100% Free & Open Source**: Full transparency and community-driven. No paywalls, no premium tiers, no data harvesting. You own your media, you own the server.
-- **Premium "Watch Together"**: Real-time synchronized playback sessions across different clients using native WebSockets—a feature often gated behind premium subscriptions on other platforms.
-- **Automated Media Management**: Background file watchers automatically scan, organize, and parse metadata for Movies, TV Shows, and Photos.
-- **Role-Based Access Control**: Secure login system with bcrypt password hashing. Admins can generate secure, expiring invite codes and manage permissions for friends and family.
-- **Kids Mode & Filtering**: Granular content filtering based on official content ratings (G, PG, TV-Y, etc.) to ensure a safe viewing environment.
-- **Cross-Platform REST API**: A robust JSON API powering the web frontend, and ready for mobile or third-party client integrations.
-- **Frictionless Deployment**: Fully containerized using Docker and Docker Compose for simple, reproducible deployments.
-- **Stateful Playback**: Tracks watch history, progress, and user-specific watchlists seamlessly.
-- **On-the-Fly Media Handling**: Integrates with FFmpeg for robust media processing and format compatibility.
+- 100% Free & Open Source
+- Watch Together
+- Skip Intro & Credits
+- Download Capability
+- Automated Media Management
+- Role-Based Access Control
+- Kids Mode & Content Filtering
+- Stateful Playback & Watchlists
+- Hardware-Accelerated Transcoding
+- Cross-Platform REST API
+- Frictionless Docker Deployment
 
 ## 🛠️ Tech Stack
 
@@ -38,7 +40,7 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/heirloom.git
+   git clone https://github.com/talonbrinkman/heirloom.git
    cd heirloom
    ```
 
@@ -60,23 +62,66 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
      - /path/to/your/photos:/media/photos:ro
    ```
 
-4. **Start the server:**
+4. **(Optional) Enable Hardware-Accelerated Transcoding (GPU):**
+   Heirloom includes automated GPU detection with universal software fallback. By default, device mounts are commented out so the container starts safely on any system (Windows, Mac, cloud VPS).
+
+   To enable GPU hardware acceleration:
+   - **Synology NAS / Linux with Intel QuickSync or AMD GPU (VA-API)**:
+     Uncomment the `devices:` section in `docker-compose.yml`:
+     ```yaml
+     devices:
+       - /dev/dri:/dev/dri
+     ```
+     *(This mounts `/dev/dri/renderD128` directly into the container, granting access to Intel QuickSync and AMD VA-API encoders).*
+
+   - **Linux with NVIDIA GPU**:
+     Ensure the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) is installed on the host, then uncomment the `deploy:` section in `docker-compose.yml`:
+     ```yaml
+     deploy:
+       resources:
+         reservations:
+           devices:
+             - driver: nvidia
+               count: all
+               capabilities: [gpu]
+     ```
+
+   - **Web UI Profile Selection**:
+     Navigate to **Settings** -> **Hardware Accelerated Transcoding** to keep **Auto** (recommended; probes available hardware and falls back to CPU if not present) or force a specific encoder profile (e.g., `Intel QuickSync`, `VA-API`, `NVIDIA NVENC`, `Apple VideoToolbox`).
+
+5. **Start the server:**
    ```bash
    docker-compose up -d --build
    ```
 
-5. **Access the application:**
+6. **Access the application:**
    Open your browser and navigate to `http://localhost:8000`. The first user to register will automatically become the system admin.
 
 ## 📖 Usage
 
 - **Library Scanning**: The server automatically scans mounted directories on startup and uses file system watchers to detect new content.
 - **Inviting Users**: As an admin, navigate to the dashboard to generate one-time use invite codes for your family and friends.
-- **Watch Together**: Start a session from any media page and share the session invite with another registered user to synchronize your viewing experience.
+- **Watch Together**: Start a session from any media page and share the session invite with another registered user. Heirloom uses real-time WebSockets with **rolling latency compensation** (adapted from the Cinematic Break pilot system) to keep playback in near-perfect lip sync across varying network conditions.
+
+## 🔮 Upcoming Improvements
+
+- Rewind on Resume
+- Smart Remuxing & Direct Stream Optimization
+- Multi-Audio Track Selection
+- Embedded Subtitle Extraction & Subtitle Search
+- Adaptive Bitrate & HLS Streaming
+- Trailers & Extras
+- Fast Profile Switching & PIN Protection
+- Real-Time Stream Dashboard
+- Non-Blocking Async Scanner
+- Actor & Director Filmography Hubs
+- Smart Collections & Recommendations
+- Music Library & Audio Player
+- Mobile Offline Sync
 
 ## 🤝 Contributing
 
-Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/yourusername/heirloom/issues).
+Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/talonbrinkman/heirloom/issues).
 
 ## 📝 License
 

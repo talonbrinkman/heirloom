@@ -71,23 +71,44 @@ def create_db_and_tables():
         except Exception:
             session.rollback()
 
+        # Marker column migrations for Skip Intro and Skip Credits
+        marker_cols = [
+            ("movie", "intro_start", "FLOAT"),
+            ("movie", "intro_end", "FLOAT"),
+            ("movie", "credits_start", "FLOAT"),
+            ("movie", "credits_end", "FLOAT"),
+            ("tvshow", "intro_start", "FLOAT"),
+            ("tvshow", "intro_end", "FLOAT"),
+            ("tvshow", "credits_start", "FLOAT"),
+            ("tvshow", "credits_end", "FLOAT"),
+        ]
+        for tbl, col, dt in marker_cols:
+            try:
+                session.exec(text(f"ALTER TABLE {tbl} ADD COLUMN {col} {dt}"))
+                session.commit()
+            except Exception:
+                session.rollback()
+
         # Migration to fix malformed TV Show titles (e.g. 'Better Call Saul S03 01' or 'Invincible (2021)')
-        from .models import TVShow
-        import re
-        shows = session.exec(select(TVShow)).all()
-        for show in shows:
-            new_title = show.title
-            title_match = re.search(r'^(.*?)\s*[-_]?\s*(?:[Ss]\d+\s*[-_]?\s*[Ee]?\d+|\d+x\d+)', new_title, re.IGNORECASE)
-            if title_match:
-                new_title = title_match.group(1).strip()
-            
-            # Strip trailing year in parentheses, e.g. " (2021)"
-            new_title = re.sub(r'\s*\(\d{4}\)$', '', new_title).strip()
-            
-            if show.title != new_title:
-                show.title = new_title
-                session.add(show)
-        session.commit()
+        try:
+            from .models import TVShow
+            import re
+            shows = session.exec(select(TVShow)).all()
+            for show in shows:
+                new_title = show.title
+                title_match = re.search(r'^(.*?)\s*[-_]?\s*(?:[Ss]\d+\s*[-_]?\s*[Ee]?\d+|\d+x\d+)', new_title, re.IGNORECASE)
+                if title_match:
+                    new_title = title_match.group(1).strip()
+                
+                # Strip trailing year in parentheses, e.g. " (2021)"
+                new_title = re.sub(r'\s*\(\d{4}\)$', '', new_title).strip()
+                
+                if show.title != new_title:
+                    show.title = new_title
+                    session.add(show)
+            session.commit()
+        except Exception:
+            session.rollback()
 
 def get_session():
     with Session(engine) as session:

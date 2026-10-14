@@ -85,6 +85,48 @@ def fetch_additional_details(tmdb_id: int, media_type: str, api_key: str):
         pass
     return None, None, None, None
 
+def extract_chapter_markers(file_path: str):
+    """Extracts (intro_start, intro_end, credits_start, credits_end) from MKV/MP4 chapters."""
+    import subprocess
+    import json
+    from .ffmpeg_setup import get_ffprobe_path
+    try:
+        cmd = [
+            get_ffprobe_path(),
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_chapters",
+            file_path
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if res.returncode != 0:
+            return None, None, None, None
+        
+        data = json.loads(res.stdout)
+        chapters = data.get("chapters", [])
+        
+        intro_start, intro_end = None, None
+        credits_start, credits_end = None, None
+
+        for ch in chapters:
+            tags = ch.get("tags", {})
+            title = tags.get("title", tags.get("TITLE", "")).strip().lower()
+            start = float(ch.get("start_time", 0))
+            end = float(ch.get("end_time", 0))
+            
+            # Common intro patterns
+            if re.search(r"\b(intro|opening|op|theme|title sequence)\b", title):
+                intro_start = start
+                intro_end = end
+            # Common credits patterns
+            elif re.search(r"\b(credits?|end credits?|closing credits?|ending|ed|outro)\b", title):
+                credits_start = start
+                credits_end = end
+
+        return intro_start, intro_end, credits_start, credits_end
+    except Exception:
+        return None, None, None, None
+
 def scan_media_library(session: Session):
     volume_paths = session.exec(select(VolumePath)).all()
     movie_volume_paths = [v.path for v in volume_paths if v.media_type == "movie"]
@@ -152,11 +194,13 @@ def scan_media_library(session: Session):
                                 except Exception:
                                     pass
 
+                            intro_s, intro_e, cred_s, cred_e = extract_chapter_markers(full_path)
                             new_movie = Movie(
                                 title=search_title, file_path=full_path, year=year, 
                                 plot=plot, poster_filename=poster_filename,
                                 backdrop_filename=backdrop_filename, cast=cast, director=director, rating=rating,
-                                content_rating=content_rating, genres=genres_str
+                                content_rating=content_rating, genres=genres_str,
+                                intro_start=intro_s, intro_end=intro_e, credits_start=cred_s, credits_end=cred_e
                             )
                             session.add(new_movie)
                             session.commit()
@@ -227,12 +271,14 @@ def scan_media_library(session: Session):
                                 except Exception as e:
                                     print(f"Error fetching TV show data: {e}")
 
+                            intro_s, intro_e, cred_s, cred_e = extract_chapter_markers(full_path)
                             new_show = TVShow(
                                 title=search_title, file_path=full_path, year=year, 
                                 plot=plot, poster_filename=poster_filename,
                                 backdrop_filename=backdrop_filename, cast=cast, director=director, rating=rating,
                                 season=season, episode=episode, season_poster_filename=season_poster_filename,
-                                content_rating=content_rating, genres=genres_str
+                                content_rating=content_rating, genres=genres_str,
+                                intro_start=intro_s, intro_end=intro_e, credits_start=cred_s, credits_end=cred_e
                             )
                             session.add(new_show)
                             session.commit()

@@ -10,12 +10,14 @@ from sqlmodel import Session, select, func
 import bcrypt
 import os
 import uuid
-from datetime import datetime
+import json
+import time
+from datetime import datetime, timezone, timedelta
 from .database import create_db_and_tables, get_session, engine
 from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest
 from .scanner import scan_media_library
 from .watcher import start_watcher, stop_watcher
-from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path
+from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder
 import subprocess
 
 app = FastAPI(title="Heirloom")
@@ -82,6 +84,14 @@ def on_startup():
             ("photo", "poster_filename", "VARCHAR"),
             ("movie", "runtime", "INTEGER"),
             ("tvshow", "runtime", "INTEGER"),
+            ("movie", "intro_start", "FLOAT"),
+            ("movie", "intro_end", "FLOAT"),
+            ("movie", "credits_start", "FLOAT"),
+            ("movie", "credits_end", "FLOAT"),
+            ("tvshow", "intro_start", "FLOAT"),
+            ("tvshow", "intro_end", "FLOAT"),
+            ("tvshow", "credits_start", "FLOAT"),
+            ("tvshow", "credits_end", "FLOAT"),
         ]
         for table, col, dtype in columns:
             try:
@@ -138,7 +148,7 @@ failed_attempts = {}
 
 def check_rate_limit(request: Request):
     ip = request.client.host
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     # Clean up old entries
     for k in list(failed_attempts.keys()):
         if (now - failed_attempts[k]["last_attempt"]).total_seconds() > 60:
@@ -153,7 +163,7 @@ def check_rate_limit(request: Request):
 
 def record_failed_attempt(request: Request):
     ip = request.client.host
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if ip not in failed_attempts:
         failed_attempts[ip] = {"count": 1, "last_attempt": now}
     else:
@@ -288,8 +298,10 @@ async def view_register(request: Request, invite: str = ""):
 @app.post("/register")
 async def process_register(request: Request, username: str = Form(...), password: str = Form(...), invite_code: str = Form(...), session: Session = Depends(get_session)):
     check_rate_limit(request)
-    invite = session.exec(select(InviteCode).where(InviteCode.code == invite_code)).first()
-    if not invite or invite.used or invite.expires_at < datetime.utcnow():
+    expires = invite.expires_at if invite else None
+    if expires and expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if not invite or invite.used or (expires and expires < datetime.now(timezone.utc)):
         record_failed_attempt(request)
         raise HTTPException(status_code=400, detail="Invalid, used, or expired invite code")
     if session.exec(select(User).where(User.username == username)).first():
@@ -393,7 +405,7 @@ async def root(request: Request, current_user: User = Depends(get_current_user),
         item = session.get(Movie if w.media_type == 'movie' else TVShow, w.item_id)
         if item: watchlist.append({"db_id": w.id, "item": item, "media_type": w.media_type})
 
-    history_db = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).order_by(WatchHistory.last_watched.desc()).limit(15)).all()
+    history_db = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.progress < 95.0).order_by(WatchHistory.last_watched.desc()).limit(15)).all()
     history = []
     for h in history_db:
         if h.media_type == 'movie' and not current_user.movies_access: continue
@@ -686,7 +698,7 @@ async def api_dashboard(current_user: User = Depends(get_current_user), session:
                     item['year'] = f"S{int(m.group(1))} E{int(m.group(2))}"
             watchlist.append({"item": item, "media_type": w.media_type})
         
-    history_db = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).order_by(WatchHistory.last_watched.desc()).limit(15)).all()
+    history_db = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.progress < 95.0).order_by(WatchHistory.last_watched.desc()).limit(15)).all()
     history = []
     for h in history_db:
         if h.media_type == 'movie' and not current_user.movies_access: continue
@@ -1109,7 +1121,7 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
         
     history_entry = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == item_id).where(WatchHistory.media_type == media_type)).first()
     if history_entry:
-        history_entry.last_watched = datetime.utcnow()
+        history_entry.last_watched = datetime.now(timezone.utc)
     else:
         history_entry = WatchHistory(user_id=current_user.id, media_type=media_type, item_id=item_id)
         session.add(history_entry)
@@ -1162,7 +1174,19 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
         duration = float(out)
     except:
         pass
-        
+
+    # On-demand probe for chapters if not yet cached in DB
+    if item.intro_start is None and item.credits_start is None:
+        from .scanner import extract_chapter_markers
+        intro_s, intro_e, cred_s, cred_e = extract_chapter_markers(item.file_path)
+        if intro_s is not None or cred_s is not None:
+            item.intro_start = intro_s
+            item.intro_end = intro_e
+            item.credits_start = cred_s
+            item.credits_end = cred_e
+            session.add(item)
+            session.commit()
+
     token = request.query_params.get("token", "")
     return templates.TemplateResponse(request=request, name="player.html", context={"item": item, "media_type": media_type, "history": history_entry, "season_episode": season_episode, "duration": duration, "next_episode_id": next_episode_id, "subtitle_url": subtitle_url, "sync_session_id": sync, "user": current_user, "token": token, "is_mobile": mobile == "1"})
 
@@ -1194,8 +1218,12 @@ async def update_progress(media_type: str, item_id: int, progress: float = Form(
     
     history_entry = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == item_id).where(WatchHistory.media_type == media_type)).first()
     if history_entry:
+        if progress >= 95.0:
+            session.delete(history_entry)
+            session.commit()
+            return {"status": "completed"}
         history_entry.progress = progress
-        history_entry.last_watched = datetime.utcnow()
+        history_entry.last_watched = datetime.now(timezone.utc)
         session.add(history_entry)
         session.commit()
     return {"status": "success"}
@@ -1214,13 +1242,15 @@ async def stream_video(media_type: str, item_id: int, res: str = "original", sta
     if res == "original" and item.file_path.lower().endswith(".mp4") and start == 0.0:
         return FileResponse(item.file_path, media_type="video/mp4")
         
+    hw_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
+    hw_profile = hw_config.value if hw_config else "auto"
+
     cmd = [get_ffmpeg_path(), "-ss", str(start), "-i", item.file_path]
     if res == "original" and start == 0.0:
         cmd.extend(["-c:v", "copy"])
-    elif res == "original":
-        cmd.extend(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"])
     else:
-        cmd.extend(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-vf", f"scale=-2:{res}"])
+        transcode_args = get_video_transcode_args(res=res, profile=hw_profile)
+        cmd.extend(transcode_args)
     cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ac", "2", "-af", "aresample=async=1", "-f", "mp4", "-movflags", "frag_keyframe+empty_moov", "pipe:1"])
 
     def generate():
@@ -1264,11 +1294,16 @@ async def add_watchlist(request: Request, media_type: str, item_id: int, current
 
 @app.post("/history/remove/{media_type}/{item_id}")
 async def remove_history(request: Request, media_type: str, item_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user: return RedirectResponse(url="/login", status_code=303)
+    if not current_user:
+        if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
+            return Response(content='{"status": "unauthorized"}', media_type="application/json", status_code=401)
+        return RedirectResponse(url="/login", status_code=303)
     history_entry = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == item_id).where(WatchHistory.media_type == media_type)).first()
     if history_entry:
         session.delete(history_entry)
         session.commit()
+    if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
+        return {"status": "success"}
     return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
 
 # ----------------- SETTINGS & USER MANAGEMENT -----------------
@@ -1308,11 +1343,27 @@ async def view_settings(request: Request, current_user: User = Depends(get_curre
     tmdb_key_config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
     tmdb_key = tmdb_key_config.value if tmdb_key_config else os.getenv("TMDB_API_KEY", "")
     
+    hw_accel_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
+    hw_accel_profile = hw_accel_config.value if hw_accel_config else "auto"
+    
     return templates.TemplateResponse(request=request, name="settings.html", context={
         "user": current_user, "invites": invites, "users": users, "volume_paths": volume_paths, 
         "host_url": host_url, "remote_url": remote_url_config.value if remote_url_config else "",
-        "tmdb_key": tmdb_key
+        "tmdb_key": tmdb_key, "hw_accel_profile": hw_accel_profile
     })
+
+@app.post("/settings/transcoding")
+async def save_transcoding_settings(hw_accel_profile: str = Form("auto"), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    if not current_user or not current_user.is_admin: raise HTTPException(status_code=403, detail="Forbidden")
+    config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
+    if not config:
+        config = SystemConfig(key="hw_accel_profile", value=hw_accel_profile.strip())
+        session.add(config)
+    else:
+        config.value = hw_accel_profile.strip()
+        session.add(config)
+    session.commit()
+    return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/change_password")
 async def change_password(new_password: str = Form(...), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
@@ -1467,6 +1518,18 @@ async def websocket_sync(websocket: WebSocket, session_id: str):
     try:
         while True:
             data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if msg.get("action") == "ping":
+                    # Instant pong response for client round-trip latency measurement
+                    await websocket.send_text(json.dumps({
+                        "action": "pong",
+                        "client_time": msg.get("client_time", 0),
+                        "server_time": time.time() * 1000
+                    }))
+                    continue
+            except Exception:
+                pass
             await manager.broadcast(data, session_id, sender=websocket)
     except WebSocketDisconnect:
         manager.disconnect(websocket, session_id)

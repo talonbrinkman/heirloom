@@ -21,4 +21,17 @@ services:
       - ./media/movies:/media/movies:ro
       - ./media/photos:/media/photos:ro
       - ./app:/app/app
+    # --- Hardware Acceleration (Optional) ---
+    # For Synology NAS, Unraid, or Linux hosts with Intel QuickSync / AMD GPU (VA-API), uncomment:
+    # devices:
+    #   - /dev/dri:/dev/dri
+    #
+    # For Linux hosts with NVIDIA GPU (requires NVIDIA Container Toolkit on host), uncomment:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
     restart: unless-stopped

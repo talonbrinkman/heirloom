@@ -13,6 +13,37 @@
             --connected-color: var(--accent-primary);
             --disconnected-color: var(--text-primary);
         }
+        .skip-action-container {
+            position: absolute;
+            bottom: 95px;
+            right: 35px;
+            z-index: 50;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 10px;
+        }
+        .skip-marker-btn {
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(40, 40, 40, 0.7);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            border: none;
+            color: var(--text-primary, #ffffff);
+            padding: 10px 18px;
+            border-radius: 6px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+            transition: background 0.2s ease;
+            user-select: none;
+        }
+        .skip-marker-btn:hover {
+            background: var(--accent-primary, #e50914);
+        }
     </style>
 </head>
 
@@ -49,6 +80,12 @@
             {% endif %}
         </div>
         
+        <!-- Skip Intro & Skip Credits Marker Buttons -->
+        <div class="skip-action-container pointer-events-auto" id="skipActionContainer">
+            <button id="skipIntroBtn" class="skip-marker-btn" onclick="skipIntro()">Skip Intro</button>
+            <button id="skipCreditsBtn" class="skip-marker-btn" onclick="skipCredits()">Skip Credits</button>
+        </div>
+
         <div class="player-controls pointer-events-auto">
             <div class="progress-container" id="progressContainer">
                 <div class="progress-bar-fill" id="progressBarFill"></div>
@@ -259,15 +296,25 @@
             lucide.createIcons();
         });
 
-        // Next Episode Auto-play
-        video.addEventListener('ended', () => {
+        // Playback Ended / Next Episode Auto-play / Exit
+        video.addEventListener('ended', async () => {
             {% if next_episode_id %}
+            let removeUrl = '/history/remove/{{ media_type }}/{{ item.id }}';
+            {% if token %}
+            removeUrl += '?token={{ token }}';
+            {% endif %}
+            try {
+                await fetch(removeUrl, { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            } catch (e) {}
+
             let nextUrl = "/play/tv/{{ next_episode_id }}";
             let params = [];
             {% if token %} params.push("token={{ token }}"); {% endif %}
             {% if is_mobile %} params.push("mobile=1"); {% endif %}
             if (params.length > 0) nextUrl += "?" + params.join("&");
             window.location.href = nextUrl;
+            {% else %}
+            await finishAndExit();
             {% endif %}
         });
 
@@ -310,12 +357,120 @@
             }
         }
 
+        // Chapter Markers (Skip Intro & Skip Credits)
+        const introStart = {{ item.intro_start if item.intro_start is not none else 'null' }};
+        const introEnd = {{ item.intro_end if item.intro_end is not none else 'null' }};
+        const creditsStart = {{ item.credits_start if item.credits_start is not none else 'null' }};
+        const creditsEnd = {{ item.credits_end if item.credits_end is not none else 'null' }};
+        const nextEpisodeId = "{{ next_episode_id or '' }}";
+
+        const skipIntroBtn = document.getElementById('skipIntroBtn');
+        const skipCreditsBtn = document.getElementById('skipCreditsBtn');
+
+        function checkMarkers(currentTime) {
+            // Intro Marker Check
+            if (skipIntroBtn) {
+                if (introStart !== null && introEnd !== null && currentTime >= introStart && currentTime < introEnd) {
+                    if (skipIntroBtn.style.display !== 'inline-flex') {
+                        skipIntroBtn.style.display = 'inline-flex';
+                    }
+                } else {
+                    if (skipIntroBtn.style.display !== 'none') {
+                        skipIntroBtn.style.display = 'none';
+                    }
+                }
+            }
+
+            // Credits Marker Check
+            if (skipCreditsBtn) {
+                if (creditsStart !== null && currentTime >= creditsStart && (creditsEnd === null || currentTime < creditsEnd)) {
+                    if (skipCreditsBtn.style.display !== 'inline-flex') {
+                        skipCreditsBtn.style.display = 'inline-flex';
+                    }
+                } else {
+                    if (skipCreditsBtn.style.display !== 'none') {
+                        skipCreditsBtn.style.display = 'none';
+                    }
+                }
+            }
+        }
+
+        function skipIntro() {
+            if (introEnd !== null) {
+                if (castPlayer && castPlayer.isConnected) {
+                    castPlayer.currentTime = introEnd;
+                    castController.seek();
+                } else {
+                    offsetStart = introEnd;
+                    loadVideoSource();
+                }
+                if (skipIntroBtn) skipIntroBtn.style.display = 'none';
+            }
+        }
+
+        async function finishAndExit() {
+            let removeUrl = '/history/remove/{{ media_type }}/{{ item.id }}';
+            {% if token %}
+            removeUrl += '?token={{ token }}';
+            {% endif %}
+
+            try {
+                await Promise.race([
+                    fetch(removeUrl, {
+                        method: 'POST',
+                        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                    }),
+                    new Promise(resolve => setTimeout(resolve, 600))
+                ]);
+            } catch (err) {
+                console.error("Failed to remove from continue watching:", err);
+            }
+
+            exitPlayer();
+        }
+
+        function exitPlayer() {
+            {% if is_mobile %}
+            if (window.FlutterApp) {
+                window.FlutterApp.postMessage('close');
+                return;
+            }
+            {% endif %}
+            if (document.referrer && document.referrer.includes(window.location.host) && !document.referrer.includes('/play/')) {
+                window.location.href = document.referrer;
+            } else {
+                window.location.href = "/";
+            }
+        }
+
+        async function skipCredits() {
+            if (nextEpisodeId) {
+                let removeUrl = '/history/remove/{{ media_type }}/{{ item.id }}';
+                {% if token %}
+                removeUrl += '?token={{ token }}';
+                {% endif %}
+                try {
+                    await fetch(removeUrl, { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                } catch (e) {}
+
+                let nextUrl = "/play/tv/" + nextEpisodeId;
+                let params = [];
+                {% if token %} params.push("token={{ token }}"); {% endif %}
+                {% if is_mobile %} params.push("mobile=1"); {% endif %}
+                if (params.length > 0) nextUrl += "?" + params.join("&");
+                window.location.href = nextUrl;
+            } else {
+                await finishAndExit();
+            }
+        }
+
         // Update Progress
         video.addEventListener('timeupdate', () => {
             if (castPlayer && castPlayer.isConnected) return;
             const actualTime = offsetStart + video.currentTime;
             const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
             updateProgressUI(actualTime, effectiveDuration);
+            checkMarkers(actualTime);
         });
         
         // Seeking
@@ -626,43 +781,107 @@
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws/sync/{{ sync_session_id }}`);
     let isRemoteUpdate = false;
     
-    ws.onmessage = function(event) {
-        const data = JSON.parse(event.data);
-        isRemoteUpdate = true;
-        if (data.action === 'play') {
-            if (Math.abs(video.currentTime - data.time) > 1.0) {
-                video.currentTime = data.time;
-            }
-            video.play();
-        } else if (data.action === 'pause') {
-            if (Math.abs(video.currentTime - data.time) > 1.0) {
-                video.currentTime = data.time;
-            }
-            video.pause();
-        } else if (data.action === 'seek') {
-            video.currentTime = data.time;
+    // Latency smoothing & measurement (inspired by cinematic break)
+    let latencyHistory = [];
+    const MAX_HISTORY = 5;
+    let avgLatency = 0; // one-way latency in milliseconds
+
+    function pingServer() {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ action: 'ping', client_time: Date.now() }));
         }
-        setTimeout(() => { isRemoteUpdate = false; }, 200);
+    }
+
+    ws.onopen = function() {
+        pingServer();
+    };
+
+    const pingInterval = setInterval(pingServer, 4000);
+
+    function sendSync(action, time) {
+        if (ws.readyState === WebSocket.OPEN && !isRemoteUpdate) {
+            ws.send(JSON.stringify({
+                action: action,
+                time: time,
+                sent_at: Date.now()
+            }));
+        }
+    }
+
+    ws.onmessage = function(event) {
+        try {
+            const data = JSON.parse(event.data);
+            
+            // Handle RTT ping-pong response
+            if (data.action === 'pong') {
+                const requestEnd = Date.now();
+                const rtt = requestEnd - data.client_time;
+                const oneWayLatency = rtt / 2;
+
+                latencyHistory.push(oneWayLatency);
+                if (latencyHistory.length > MAX_HISTORY) latencyHistory.shift();
+                avgLatency = latencyHistory.reduce((a, b) => a + b, 0) / latencyHistory.length;
+
+                console.log(`[Watch Together] RTT: ${rtt}ms | One-Way Latency: ${oneWayLatency}ms | Smoothed Avg Latency: ${Math.round(avgLatency)}ms`);
+                return;
+            }
+
+            isRemoteUpdate = true;
+            
+            // Calculate one-way transit time adjustment
+            let transitSeconds = (avgLatency * 2) / 1000;
+            if (data.sent_at) {
+                const measuredTransit = (Date.now() - data.sent_at) / 1000;
+                if (measuredTransit > 0 && measuredTransit < 2.0) {
+                    transitSeconds = measuredTransit;
+                }
+            }
+
+            const adjustedTime = data.time + (data.action === 'play' || data.action === 'sync' ? transitSeconds : 0);
+
+            if (data.action === 'play') {
+                if (Math.abs(video.currentTime - adjustedTime) > 0.35) {
+                    video.currentTime = adjustedTime;
+                }
+                video.play().catch(e => console.log("Auto-play prevented", e));
+            } else if (data.action === 'pause') {
+                if (Math.abs(video.currentTime - data.time) > 0.35) {
+                    video.currentTime = data.time;
+                }
+                video.pause();
+            } else if (data.action === 'seek') {
+                video.currentTime = data.time;
+            } else if (data.action === 'sync') {
+                if (!video.paused && Math.abs(video.currentTime - adjustedTime) > 0.4) {
+                    console.log(`[Watch Together] Drift detected (${Math.round((video.currentTime - adjustedTime) * 1000)}ms), re-syncing to ${adjustedTime.toFixed(2)}s`);
+                    video.currentTime = adjustedTime;
+                }
+            }
+            
+            setTimeout(() => { isRemoteUpdate = false; }, 250);
+        } catch (e) {
+            console.error("Failed to process sync message", e);
+        }
     };
     
     video.addEventListener('play', () => {
-        if (!isRemoteUpdate) ws.send(JSON.stringify({action: 'play', time: video.currentTime}));
+        sendSync('play', video.currentTime);
     });
     
     video.addEventListener('pause', () => {
-        if (!isRemoteUpdate) ws.send(JSON.stringify({action: 'pause', time: video.currentTime}));
+        sendSync('pause', video.currentTime);
     });
     
     video.addEventListener('seeked', () => {
-        if (!isRemoteUpdate) ws.send(JSON.stringify({action: 'seek', time: video.currentTime}));
+        sendSync('seek', video.currentTime);
     });
     
-    // Periodically sync time if we drift
+    // Periodically broadcast state to catch drift between clients
     setInterval(() => {
         if (!video.paused && !isRemoteUpdate) {
-            ws.send(JSON.stringify({action: 'play', time: video.currentTime}));
+            sendSync('sync', video.currentTime);
         }
-    }, 5000);
+    }, 4000);
 </script>
 {% endif %}
 

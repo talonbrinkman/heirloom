@@ -1,7 +1,7 @@
 from sqlmodel import SQLModel, Field
 from typing import Optional
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -30,6 +30,10 @@ class Movie(SQLModel, table=True):
     genres: Optional[str] = None
     runtime: Optional[int] = None
     content_rating: Optional[str] = None
+    intro_start: Optional[float] = None
+    intro_end: Optional[float] = None
+    credits_start: Optional[float] = None
+    credits_end: Optional[float] = None
 
 class TVShow(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -48,12 +52,16 @@ class TVShow(SQLModel, table=True):
     episode: Optional[int] = None
     season_poster_filename: Optional[str] = None
     content_rating: Optional[str] = None
+    intro_start: Optional[float] = None
+    intro_end: Optional[float] = None
+    credits_start: Optional[float] = None
+    credits_end: Optional[float] = None
 
 class Photo(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     title: str
     file_path: str = Field(unique=True)
-    date_added: datetime = Field(default_factory=datetime.utcnow)
+    date_added: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     album: Optional[str] = None
     poster_filename: Optional[str] = None
 
@@ -68,7 +76,7 @@ class InviteCode(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     code: str = Field(default_factory=generate_short_code, unique=True, index=True)
     used: bool = Field(default=False)
-    expires_at: datetime = Field(default_factory=lambda: datetime.utcnow() + timedelta(days=7))
+    expires_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc) + timedelta(days=7))
 
 class Watchlist(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -82,7 +90,7 @@ class WatchHistory(SQLModel, table=True):
     media_type: str 
     item_id: int
     progress: float = Field(default=0.0) # Percentage from 0 to 100
-    last_watched: datetime = Field(default_factory=datetime.utcnow)
+    last_watched: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class VolumePath(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -98,7 +106,7 @@ class WatchSession(SQLModel, table=True):
     host_id: int = Field(foreign_key="user.id")
     media_type: str
     item_id: int
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class WatchInvite(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -106,11 +114,11 @@ class WatchInvite(SQLModel, table=True):
     sender_id: int = Field(foreign_key="user.id")
     invited_user_id: int = Field(foreign_key="user.id")
     status: str = Field(default="pending")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class PasswordResetRequest(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id")
     status: str = Field(default="pending")  # pending, approved, denied, used
     token: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
