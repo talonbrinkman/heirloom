@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, Form, Request, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, Form, Request, HTTPException, Response, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -17,7 +17,7 @@ from .database import create_db_and_tables, get_session, engine
 from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest
 from .scanner import scan_media_library
 from .watcher import start_watcher, stop_watcher, scanner_debouncer
-from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams
+from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time
 import subprocess
 import shutil
 try:
@@ -1254,13 +1254,6 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
     session.commit()
     
     next_episode_id = None
-    subtitle_url = None
-    
-    base_path = os.path.splitext(item.file_path)[0]
-    if os.path.exists(base_path + ".srt"):
-        subtitle_url = f"/subtitle/{media_type}/{item.id}?ext=srt"
-    elif os.path.exists(base_path + ".vtt"):
-        subtitle_url = f"/subtitle/{media_type}/{item.id}?ext=vtt"
 
     season_episode = ""
     if media_type == "tv":
@@ -1294,6 +1287,21 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
         
     probe = probe_media_streams(item.file_path)
     audio_tracks = probe.get("audio_tracks", [])
+    subtitle_tracks = probe.get("subtitle_tracks", [])
+
+    subtitle_url = None
+    base_path = os.path.splitext(item.file_path)[0]
+    primary_sub = next((s for s in subtitle_tracks if s.get("is_text") and (s.get("is_default") or not s.get("is_forced"))), None)
+    if not primary_sub:
+        primary_sub = next((s for s in subtitle_tracks if s.get("is_text")), None)
+
+    if primary_sub:
+        subtitle_url = f"/subtitle/{media_type}/{item.id}?track_id={primary_sub['id']}"
+    elif os.path.exists(base_path + ".srt"):
+        subtitle_url = f"/subtitle/{media_type}/{item.id}?ext=srt"
+    elif os.path.exists(base_path + ".vtt"):
+        subtitle_url = f"/subtitle/{media_type}/{item.id}?ext=vtt"
+
     duration = probe.get("duration") or 0.0
     if not duration:
         try:
@@ -1371,31 +1379,146 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
     return templates.TemplateResponse(request=request, name="player.html", context={
         "item": item, "media_type": media_type, "history": history_entry, "season_episode": season_episode,
         "duration": duration, "next_episode_id": next_episode_id, "subtitle_url": subtitle_url,
+        "subtitle_tracks": subtitle_tracks,
         "sync_session_id": sync, "is_sync_host": is_sync_host, "sync_initial_time": sync_initial_time,
         "user": current_user, "token": token, "is_mobile": mobile == "1", "audio_tracks": audio_tracks
     })
 
 @app.get("/subtitle/{media_type}/{item_id}")
-async def get_subtitle(media_type: str, item_id: int, ext: str, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user: return Response(status_code=403)
+async def get_subtitle(
+    media_type: str,
+    item_id: int,
+    track_id: Optional[str] = Query(None),
+    start: float = Query(0.0),
+    res: str = Query("original"),
+    ext: Optional[str] = Query(None),
+    stream_idx: Optional[int] = Query(None),
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        return Response(status_code=403)
     item = session.get(Movie if media_type == "movie" else TVShow, item_id)
-    if not item: return Response(status_code=404)
-    
-    sub_file = os.path.splitext(item.file_path)[0] + "." + ext
-    if not os.path.exists(sub_file):
+    if not item or not os.path.exists(item.file_path):
         return Response(status_code=404)
-        
-    if ext == "srt":
+    if current_user.kids_mode and not is_kids_safe(item.content_rating):
+        return Response(status_code=403)
+
+    if stream_idx is not None and not track_id:
+        track_id = f"stream:{stream_idx}"
+    if track_id == "legacy":
+        track_id = None
+
+    probe = probe_media_streams(item.file_path)
+
+    # Frame-accurate sync:
+    # When video is direct-streamed (-c:v copy), FFmpeg snaps to the keyframe at or before start.
+    # Align the subtitle shift to that exact keyframe timestamp so subtitles sync perfectly with video & audio.
+    if start > 0.0:
+        can_direct_stream_video = (res == "original" and probe.get("can_direct_stream_video", False))
+        if can_direct_stream_video:
+            start = get_keyframe_before_time(item.file_path, start)
+
+    # Legacy fallback: ext query parameter without track_id
+    if not track_id and ext:
+        sub_file = os.path.splitext(item.file_path)[0] + "." + ext
+        if not os.path.exists(sub_file):
+            return Response(status_code=404)
+        if ext == "srt":
+            try:
+                with open(sub_file, "r", encoding="utf-8", errors="ignore") as f:
+                    srt_content = f.read()
+                srt_content = srt_content.replace("\r\n", "\n").replace("\r", "\n")
+                vtt_content = "WEBVTT\n\n" + re.sub(r'(\d{2}:\d{2}:\d{2}),(\d{3})', r'\1.\2', srt_content)
+                if start > 0.0:
+                    vtt_content = shift_vtt_timestamps(vtt_content, start)
+                return Response(content=vtt_content, media_type="text/vtt")
+            except Exception:
+                return Response(status_code=500)
+        else:
+            if start > 0.0:
+                with open(sub_file, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                return Response(content=shift_vtt_timestamps(content, start), media_type="text/vtt")
+            return FileResponse(sub_file, media_type="text/vtt")
+
+    # If no track_id and no ext, fallback to first text track
+    if not track_id:
+        sub_tracks = probe.get("subtitle_tracks", [])
+        first_text = next((s for s in sub_tracks if s.get("is_text")), None)
+        if first_text:
+            track_id = first_text["id"]
+        else:
+            return Response(status_code=404)
+
+    # 1. External sidecar subtitle
+    if track_id.startswith("sidecar:"):
+        filename = track_id.split("sidecar:", 1)[1]
+        # Prevent directory traversal
+        if os.path.basename(filename) != filename:
+            return Response(status_code=400)
+        dir_name = os.path.dirname(item.file_path)
+        sub_file = os.path.join(dir_name, filename)
+        if not os.path.exists(sub_file):
+            return Response(status_code=404)
+        if sub_file.lower().endswith(".srt"):
+            try:
+                with open(sub_file, "r", encoding="utf-8", errors="ignore") as f:
+                    srt_content = f.read()
+                srt_content = srt_content.replace("\r\n", "\n").replace("\r", "\n")
+                vtt_content = "WEBVTT\n\n" + re.sub(r'(\d{2}:\d{2}:\d{2}),(\d{3})', r'\1.\2', srt_content)
+                if start > 0.0:
+                    vtt_content = shift_vtt_timestamps(vtt_content, start)
+                return Response(content=vtt_content, media_type="text/vtt")
+            except Exception:
+                return Response(status_code=500)
+        else:
+            if start > 0.0:
+                with open(sub_file, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                return Response(content=shift_vtt_timestamps(content, start), media_type="text/vtt")
+            return FileResponse(sub_file, media_type="text/vtt")
+
+    # 2. Embedded subtitle stream
+    if track_id.startswith("stream:") or track_id.isdigit():
         try:
-            with open(sub_file, "r", encoding="utf-8", errors="ignore") as f:
-                srt_content = f.read()
-            # Convert SRT timestamps to VTT format
-            vtt_content = "WEBVTT\n\n" + re.sub(r'(\d{2}:\d{2}:\d{2}),(\d{3})', r'\1.\2', srt_content)
-            return Response(content=vtt_content, media_type="text/vtt")
-        except:
-            return Response(status_code=500)
-            
-    return FileResponse(sub_file, media_type="text/vtt")
+            s_idx = int(track_id.replace("stream:", ""))
+        except ValueError:
+            return Response(status_code=400)
+
+        cache_dir = get_subtitle_cache_dir()
+        cached_vtt = os.path.join(cache_dir, f"{media_type}_{item_id}_stream{s_idx}.vtt")
+
+        # Cache validation: Check if file exists, non-empty, and newer than media file
+        is_cached_valid = False
+        if os.path.exists(cached_vtt) and os.path.getsize(cached_vtt) > 0:
+            try:
+                media_mtime = os.path.getmtime(item.file_path)
+                cached_mtime = os.path.getmtime(cached_vtt)
+                if cached_mtime >= media_mtime:
+                    is_cached_valid = True
+            except Exception:
+                is_cached_valid = True
+
+        if is_cached_valid:
+            if start > 0.0:
+                with open(cached_vtt, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                return Response(content=shift_vtt_timestamps(content, start), media_type="text/vtt")
+            return FileResponse(cached_vtt, media_type="text/vtt")
+
+        # Extract on demand via FFmpeg
+        success = extract_subtitle_to_vtt(item.file_path, s_idx, cached_vtt)
+        if success and os.path.exists(cached_vtt) and os.path.getsize(cached_vtt) > 0:
+            if start > 0.0:
+                with open(cached_vtt, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                return Response(content=shift_vtt_timestamps(content, start), media_type="text/vtt")
+            return FileResponse(cached_vtt, media_type="text/vtt")
+        else:
+            return Response(status_code=500, content="Failed to extract subtitle track")
+
+    return Response(status_code=400, content="Invalid track identifier")
 
 @app.post("/progress/{media_type}/{item_id}")
 async def update_progress(
@@ -1545,9 +1668,15 @@ async def stream_video(media_type: str, item_id: int, res: str = "original", sta
     # stream-copy the video (-c:v copy). Map the specific chosen audio track (-map 0:a:N).
     can_direct_stream_video = (res == "original" and probe.get("can_direct_stream_video", False))
 
+    actual_start = start
+    if start > 0.0 and can_direct_stream_video:
+        actual_start = get_keyframe_before_time(item.file_path, start)
+
     cmd = [get_ffmpeg_path()]
     if start > 0.0:
         cmd.extend(["-ss", str(start)])
+    if start > 0.0 and can_direct_stream_video:
+        cmd.append("-noaccurate_seek")
     cmd.extend(["-i", item.file_path])
     if start > 0.0 and can_direct_stream_video:
         cmd.extend(["-avoid_negative_ts", "make_zero"])
@@ -1558,6 +1687,7 @@ async def stream_video(media_type: str, item_id: int, res: str = "original", sta
         cmd.extend(["-map", f"0:a:{audio_track}"])
     else:
         cmd.append("-an")
+    cmd.extend(["-sn", "-map_chapters", "-1"])
 
     if can_direct_stream_video:
         cmd.extend(["-c:v", "copy"])
@@ -1622,6 +1752,7 @@ async def stream_video(media_type: str, item_id: int, res: str = "original", sta
         "X-Encoder": encoder_type,
         "X-Play-Type": play_type,
         "X-Audio-Track": str(audio_track),
+        "X-Actual-Start": str(actual_start),
     }
 
     def generate():
@@ -1700,12 +1831,18 @@ async def get_stream_info(media_type: str, item_id: int, res: str = "original", 
         method = f"{base_method} (Audio: {track_label})"
         play_type = "transcode"
 
+    can_direct_stream_video = (res == "original" and probe.get("can_direct_stream_video", False))
+    actual_start = start
+    if start > 0.0 and can_direct_stream_video:
+        actual_start = get_keyframe_before_time(item.file_path, start)
+
     return {
         "media_type": media_type,
         "item_id": item_id,
         "title": item.title,
         "resolution": res,
         "start": start,
+        "actual_start": actual_start,
         "audio_track": audio_track,
         "audio_tracks": audio_tracks,
         "selected_audio_track": selected_track,

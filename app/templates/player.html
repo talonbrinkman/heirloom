@@ -55,9 +55,18 @@
 <body class="player-body">
     <video id="mediaPlayer" class="player-video" playsinline crossorigin="anonymous">
         Your browser does not support HTML video.
-        {% if subtitle_url %}
+        {% if subtitle_tracks and subtitle_tracks|length > 0 %}
+            {% for sub in subtitle_tracks %}
+                {% if sub.is_text %}
+                <track label="{{ sub.label }}" kind="subtitles" srclang="{{ sub.language }}"
+                    data-track-id="{{ sub.id }}"
+                    src="/subtitle/{{ media_type }}/{{ item.id }}?track_id={{ sub.id }}{% if token %}&token={{ token }}{% endif %}">
+                {% endif %}
+            {% endfor %}
+        {% elif subtitle_url %}
         <track label="English" kind="subtitles" srclang="en"
-            src="{{ subtitle_url }}{% if token %}&token={{ token }}{% endif %}" default>
+            data-track-id="legacy"
+            src="{{ subtitle_url }}{% if token %}&token={{ token }}{% endif %}">
         {% endif %}
     </video>
 
@@ -95,12 +104,12 @@
                 {% endif %}
             </div>
             {% if is_mobile %}
-            <a href="javascript:void(0);" onclick="if(window.FlutterApp) window.FlutterApp.postMessage('close');"
+            <a href="javascript:void(0);" onclick="exitPlayer();"
                 class="player-close-btn" title="Close Player">
                 <i data-lucide="x"></i>
             </a>
             {% else %}
-            <a href="/" class="player-close-btn" title="Close Player">
+            <a href="javascript:void(0);" onclick="exitPlayer();" class="player-close-btn" title="Close Player">
                 <i data-lucide="x"></i>
             </a>
             {% endif %}
@@ -164,9 +173,9 @@
                         style="display: none;">
                         <google-cast-launcher></google-cast-launcher>
                     </button>
-                    {% if subtitle_url %}
+                    {% if (subtitle_tracks and subtitle_tracks|length > 0) or subtitle_url %}
                     <button class="control-btn" id="ccBtn" onclick="toggleSubtitles()" title="Toggle Subtitles">
-                        <i data-lucide="subtitles"></i>
+                        <i data-lucide="captions"></i>
                     </button>
                     {% endif %}
                     <div class="settings-container">
@@ -182,6 +191,28 @@
                                 <button class="audio-btn {% if loop.first %}active{% endif %}" data-audio="{{ track.index }}"
                                     onclick="setAudioTrack({{ track.index }})">{{ track.label }}</button>
                                 {% endfor %}
+                            </div>
+                            {% endif %}
+
+                            <!-- Subtitles Selection -->
+                            {% if subtitle_tracks and subtitle_tracks|length > 0 %}
+                            <div class="settings-section" id="subtitleSection">
+                                <div class="settings-header">Subtitles</div>
+                                <button class="sub-btn active" data-sub-id="off" onclick="setSubtitleTrack('off')">Off</button>
+                                {% for track in subtitle_tracks %}
+                                    {% if track.is_text %}
+                                    <button class="sub-btn" data-sub-id="{{ track.id }}"
+                                        onclick="setSubtitleTrack('{{ track.id }}')">{{ track.label }}</button>
+                                    {% else %}
+                                    <button class="sub-btn disabled" disabled title="Bitmap subtitle format (requires burn-in transcode)" style="opacity: 0.45; cursor: not-allowed;">{{ track.label }}</button>
+                                    {% endif %}
+                                {% endfor %}
+                            </div>
+                            {% elif subtitle_url %}
+                            <div class="settings-section" id="subtitleSection">
+                                <div class="settings-header">Subtitles</div>
+                                <button class="sub-btn active" data-sub-id="off" onclick="setSubtitleTrack('off')">Off</button>
+                                <button class="sub-btn" data-sub-id="legacy" onclick="setSubtitleTrack('legacy')">External</button>
                             </div>
                             {% endif %}
 
@@ -274,7 +305,18 @@
         let savedVolume = localStorage.getItem('player_volume');
         savedVolume = savedVolume !== null ? parseFloat(savedVolume) : 1;
 
-        let subtitlesEnabled = localStorage.getItem('player_subtitles') === 'true';
+        let savedSub = localStorage.getItem('player_sub_track_{{ media_type }}_{{ item.id }}') ||
+                       localStorage.getItem('player_preferred_sub');
+        let activeSubtitleId = savedSub || '';
+        if (!activeSubtitleId) {
+            const defaultTrackEl = video.querySelector('track[default]') || video.querySelector('track[data-track-id]');
+            if (defaultTrackEl && localStorage.getItem('player_subtitles') !== 'false') {
+                activeSubtitleId = defaultTrackEl.getAttribute('data-track-id') || '';
+            } else {
+                activeSubtitleId = 'off';
+            }
+        }
+        let subtitlesEnabled = (activeSubtitleId && activeSubtitleId !== 'off');
 
         video.volume = savedVolume;
         volumeSlider.value = savedVolume;
@@ -380,6 +422,16 @@
                     playerStats.audioChannels = data.audio_channels;
                     playerStats.audioTrackName = data.selected_audio_track ? data.selected_audio_track.label : `Track #${data.audio_track + 1}`;
 
+                    // Check if server snapped to keyframe for stream copy
+                    if (typeof data.actual_start === 'number' && !isNaN(data.actual_start)) {
+                        if (Math.abs(offsetStart - data.actual_start) > 0.05 && Math.abs(offsetStart - data.actual_start) < 30.0) {
+                            console.log(`[Playback] Aligning player offsetStart to actual keyframe: ${offsetStart.toFixed(2)}s -> ${data.actual_start.toFixed(2)}s`);
+                            offsetStart = data.actual_start;
+                            const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
+                            updateProgressUI(offsetStart + video.currentTime, effectiveDuration);
+                        }
+                    }
+
                     logPlayerStats();
                 } else {
                     pingLatencyOnly();
@@ -471,12 +523,30 @@
         window.getPlayerStats = () => playerStats;
         window.logPlayerStats = logPlayerStats;
 
+        function syncSubtitleTracks() {
+            const trackEls = video.querySelectorAll('track');
+            trackEls.forEach(trackEl => {
+                const trackId = trackEl.getAttribute('data-track-id');
+                if (trackId) {
+                    let subUrl = `/subtitle/{{ media_type }}/{{ item.id }}?track_id=${encodeURIComponent(trackId)}&start=${offsetStart}&res=${encodeURIComponent(currentRes)}`;
+                    {% if token %}
+                    subUrl += `&token={{ token }}`;
+                    {% endif %}
+                    trackEl.src = subUrl;
+                }
+            });
+            applySubtitlesToVideo();
+        }
+
         function loadVideoSource() {
             let url = `/stream/{{ media_type }}/{{ item.id }}?res=${currentRes}&start=${offsetStart}&audio_track=${currentAudioTrack}`;
             {% if token %}
             url += `&token={{ token }}`;
             {% endif %}
             video.src = url;
+
+            syncSubtitleTracks();
+
             video.load();
             attemptPlay();
             updatePlaybackStats();
@@ -524,6 +594,17 @@
             } else if (e.key.toLowerCase() === 'm') {
                 e.preventDefault();
                 toggleMute();
+            } else if (e.key.toLowerCase() === 'c') {
+                e.preventDefault();
+                toggleSubtitles();
+            } else if (e.key === 'Escape' || e.code === 'Escape') {
+                e.preventDefault();
+                const settingsMenu = document.getElementById('settingsMenu');
+                if (settingsMenu && settingsMenu.classList.contains('show')) {
+                    settingsMenu.classList.remove('show');
+                    return;
+                }
+                exitPlayer();
             } else if (e.code === 'ArrowRight') {
                 e.preventDefault();
                 seekOffset(10);
@@ -767,30 +848,109 @@
             loadVideoSource();
         }
 
-        // Subtitles
-        function updateSubtitles() {
-            if (video.textTracks && video.textTracks.length > 0) {
-                video.textTracks[0].mode = subtitlesEnabled ? 'showing' : 'hidden';
-            }
+        // Subtitle Track Switch and Sync
+        function updateSubtitleUI() {
             const ccBtn = document.getElementById('ccBtn');
             if (ccBtn) {
-                if (subtitlesEnabled) {
+                const isEnabled = subtitlesEnabled && activeSubtitleId && activeSubtitleId !== 'off';
+                if (isEnabled) {
                     ccBtn.style.color = "var(--accent-primary)";
+                    ccBtn.innerHTML = '<i data-lucide="captions-off"></i>';
                 } else {
                     ccBtn.style.color = "";
+                    ccBtn.innerHTML = '<i data-lucide="captions"></i>';
+                }
+                refreshIcons();
+            }
+
+            document.querySelectorAll('.sub-btn').forEach(btn => {
+                const subId = btn.getAttribute('data-sub-id');
+                if ((!subtitlesEnabled || activeSubtitleId === 'off') && subId === 'off') {
+                    btn.classList.add('active');
+                } else if (subtitlesEnabled && subId === activeSubtitleId) {
+                    btn.classList.add('active');
+                } else {
+                    btn.classList.remove('active');
+                }
+            });
+        }
+
+        function applySubtitlesToVideo() {
+            if (!video.textTracks || video.textTracks.length === 0) return;
+            const trackEls = video.querySelectorAll('track');
+            
+            // If activeSubtitleId is not set yet, pick default or first track if subtitlesEnabled
+            if (!activeSubtitleId || activeSubtitleId === '') {
+                if (trackEls.length > 0) {
+                    activeSubtitleId = trackEls[0].getAttribute('data-track-id') || 'legacy';
+                } else {
+                    activeSubtitleId = 'off';
+                    subtitlesEnabled = false;
+                }
+            }
+
+            for (let i = 0; i < video.textTracks.length; i++) {
+                const tt = video.textTracks[i];
+                const el = trackEls[i];
+                const trackId = el ? el.getAttribute('data-track-id') : null;
+
+                if (subtitlesEnabled && activeSubtitleId !== 'off' && trackId === activeSubtitleId) {
+                    tt.mode = 'showing';
+                } else {
+                    tt.mode = 'hidden';
                 }
             }
         }
 
-        function toggleSubtitles() {
-            subtitlesEnabled = !subtitlesEnabled;
-            localStorage.setItem('player_subtitles', subtitlesEnabled);
-            updateSubtitles();
+        function setSubtitleTrack(trackId) {
+            if (!trackId || trackId === 'off') {
+                subtitlesEnabled = false;
+                activeSubtitleId = 'off';
+                localStorage.setItem('player_subtitles', 'false');
+                localStorage.setItem('player_sub_track_{{ media_type }}_{{ item.id }}', 'off');
+                localStorage.setItem('player_preferred_sub', 'off');
+            } else {
+                subtitlesEnabled = true;
+                activeSubtitleId = trackId;
+                localStorage.setItem('player_subtitles', 'true');
+                localStorage.setItem('player_sub_track_{{ media_type }}_{{ item.id }}', trackId);
+                localStorage.setItem('player_preferred_sub', trackId);
+                localStorage.setItem('player_last_active_sub', trackId);
+            }
+            applySubtitlesToVideo();
+            updateSubtitleUI();
+            
+            const settingsMenu = document.getElementById('settingsMenu');
+            if (settingsMenu && settingsMenu.classList.contains('show')) {
+                settingsMenu.classList.remove('show');
+            }
         }
 
-        // Wait for metadata to apply subtitles properly if track loads late
+        function toggleSubtitles() {
+            if (subtitlesEnabled && activeSubtitleId !== 'off') {
+                setSubtitleTrack('off');
+            } else {
+                let targetSub = localStorage.getItem('player_last_active_sub');
+                const trackEls = video.querySelectorAll('track');
+                if (!targetSub || targetSub === 'off') {
+                    if (trackEls.length > 0) {
+                        targetSub = trackEls[0].getAttribute('data-track-id');
+                    }
+                }
+                if (targetSub && targetSub !== 'off') {
+                    setSubtitleTrack(targetSub);
+                } else if (trackEls.length > 0) {
+                    setSubtitleTrack(trackEls[0].getAttribute('data-track-id'));
+                }
+            }
+        }
+
+        function updateSubtitles() {
+            applySubtitlesToVideo();
+            updateSubtitleUI();
+        }
+
         video.addEventListener('loadedmetadata', updateSubtitles);
-        // Call immediately for cached loads
         updateSubtitles();
 
         // Audio Track Switch
@@ -978,7 +1138,33 @@
                 window.location.origin + video.src, 'video/mp4'
             );
 
-            {% if subtitle_url %}
+            {% if subtitle_tracks and subtitle_tracks|length > 0 %}
+            const castTracks = [];
+            let activeCastTrackIds = [];
+            let castTrackIdx = 1;
+            {% for sub in subtitle_tracks %}
+                {% if sub.is_text %}
+                const subTrack_{{ loop.index }} = new chrome.cast.media.Track(castTrackIdx, chrome.cast.media.TrackType.TEXT);
+                subTrack_{{ loop.index }}.trackContentId = window.location.origin + '/subtitle/{{ media_type }}/{{ item.id }}?track_id={{ sub.id }}{% if token %}&token={{ token }}{% endif %}&start=' + offsetStart + '&res=' + encodeURIComponent(currentRes);
+                subTrack_{{ loop.index }}.trackContentType = 'text/vtt';
+                subTrack_{{ loop.index }}.subtype = chrome.cast.media.TextTrackType.SUBTITLES;
+                subTrack_{{ loop.index }}.name = {{ sub.label | tojson }};
+                subTrack_{{ loop.index }}.language = {{ sub.language | tojson }};
+                castTracks.push(subTrack_{{ loop.index }});
+                if (subtitlesEnabled && activeSubtitleId === '{{ sub.id }}') {
+                    activeCastTrackIds.push(castTrackIdx);
+                }
+                castTrackIdx++;
+                {% endif %}
+            {% endfor %}
+            if (castTracks.length > 0) {
+                mediaInfo.tracks = castTracks;
+                mediaInfo.textTrackStyle = new chrome.cast.media.TextTrackStyle();
+                if (activeCastTrackIds.length > 0) {
+                    request.activeTrackIds = activeCastTrackIds;
+                }
+            }
+            {% elif subtitle_url %}
             const subtitle = new chrome.cast.media.Track(1, chrome.cast.media.TrackType.TEXT);
             subtitle.trackContentId = window.location.origin + '{{ subtitle_url }}';
             subtitle.trackContentType = 'text/vtt';
@@ -987,12 +1173,6 @@
             subtitle.language = 'en-US';
             mediaInfo.tracks = [subtitle];
             mediaInfo.textTrackStyle = new chrome.cast.media.TextTrackStyle();
-            {% endif %}
-
-            const request = new chrome.cast.media.LoadRequest(mediaInfo);
-            request.currentTime = offsetStart + video.currentTime;
-
-            {% if subtitle_url %}
             if (subtitlesEnabled) {
                 request.activeTrackIds = [1];
             }

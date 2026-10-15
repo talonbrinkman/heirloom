@@ -1,6 +1,299 @@
 import os
 import subprocess
 import shutil
+import json
+import re
+import time
+
+LANG_MAP = {
+    "eng": "English", "en": "English",
+    "spa": "Spanish", "es": "Spanish",
+    "fra": "French", "fre": "French", "fr": "French",
+    "deu": "German", "ger": "German", "de": "German",
+    "ita": "Italian", "it": "Italian",
+    "por": "Portuguese", "pt": "Portuguese",
+    "rus": "Russian", "ru": "Russian",
+    "jpn": "Japanese", "ja": "Japanese",
+    "zho": "Chinese", "chi": "Chinese", "zh": "Chinese",
+    "kor": "Korean", "ko": "Korean",
+    "ara": "Arabic", "ar": "Arabic",
+    "hin": "Hindi", "hi": "Hindi",
+    "nld": "Dutch", "dut": "Dutch", "nl": "Dutch",
+    "pol": "Polish", "pl": "Polish",
+    "swe": "Swedish", "sv": "Swedish",
+    "nor": "Norwegian", "no": "Norwegian",
+    "dan": "Danish", "da": "Danish",
+    "fin": "Finnish", "fi": "Finnish",
+    "tur": "Turkish", "tr": "Turkish",
+    "vie": "Vietnamese", "vi": "Vietnamese",
+    "tha": "Thai", "th": "Thai",
+    "ukr": "Ukrainian", "uk": "Ukrainian",
+    "ces": "Czech", "cze": "Czech", "cs": "Czech",
+    "hun": "Hungarian", "hu": "Hungarian",
+    "ell": "Greek", "gre": "Greek", "el": "Greek",
+    "heb": "Hebrew", "he": "Hebrew",
+    "ind": "Indonesian", "id": "Indonesian",
+    "fil": "Filipino", "tl": "Tagalog",
+    "msa": "Malay", "may": "Malay", "ms": "Malay",
+    "und": "Unknown"
+}
+
+def get_subtitle_cache_dir() -> str:
+    """Returns the local cache directory for extracted WebVTT subtitles."""
+    base = "/config" if os.path.exists("/config") else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config"))
+    sub_dir = os.path.join(base, "subtitles")
+    os.makedirs(sub_dir, exist_ok=True)
+    return sub_dir
+
+def get_sidecar_subtitles(file_path: str) -> list[dict]:
+    """
+    Finds external sidecar subtitle files (.srt, .vtt) in the same directory as the media file.
+    Matches files with the same base name (e.g., Movie.en.srt, Movie.forced.vtt).
+    """
+    if not file_path or not os.path.exists(file_path):
+        return []
+    
+    dir_name = os.path.dirname(file_path)
+    base_name = os.path.splitext(os.path.basename(file_path))[0]
+    sidecars = []
+    
+    try:
+        if not os.path.isdir(dir_name):
+            return []
+            
+        for fname in sorted(os.listdir(dir_name)):
+            lower_name = fname.lower()
+            if not (lower_name.endswith(".srt") or lower_name.endswith(".vtt")):
+                continue
+            
+            f_base, ext = os.path.splitext(fname)
+            ext_clean = ext.lower().lstrip(".")
+            
+            # Subtitle file must start with the media file's base name
+            if f_base == base_name or f_base.startswith(base_name + ".") or f_base.startswith(base_name + "_"):
+                full_sub_path = os.path.join(dir_name, fname)
+                suffix = f_base[len(base_name):].lower().replace("_", ".").strip(".")
+                parts = [p for p in suffix.split(".") if p]
+                
+                lang_code = "und"
+                is_forced = "forced" in parts
+                is_sdh = "sdh" in parts or "cc" in parts
+                
+                for p in parts:
+                    if p in LANG_MAP or len(p) in (2, 3):
+                        lang_code = p
+                        break
+                        
+                lang_name = LANG_MAP.get(lang_code, lang_code.upper() if lang_code != "und" else "")
+                display_title = lang_name or "Sidecar"
+                
+                tags = []
+                if is_forced:
+                    tags.append("Forced")
+                if is_sdh:
+                    tags.append("SDH")
+                tags.append(ext_clean.upper())
+                
+                label = f"{display_title} ({', '.join(tags)})" if tags else display_title
+                
+                sidecars.append({
+                    "id": f"sidecar:{fname}",
+                    "type": "sidecar",
+                    "file_path": full_sub_path,
+                    "filename": fname,
+                    "codec": ext_clean,
+                    "is_text": True,
+                    "language": lang_code,
+                    "title": fname,
+                    "label": label,
+                    "is_forced": is_forced,
+                    "is_default": False,
+                    "is_hearing_impaired": is_sdh,
+                })
+    except Exception:
+        pass
+        
+    return sidecars
+
+def extract_subtitle_to_vtt(media_path: str, stream_index: int, output_vtt_path: str) -> bool:
+    """
+    Extracts an embedded text subtitle stream from a video container into a WebVTT file using ffmpeg.
+    Uses atomic writes to avoid race conditions.
+    """
+    try:
+        ffmpeg_bin = get_ffmpeg_path()
+        os.makedirs(os.path.dirname(output_vtt_path), exist_ok=True)
+        tmp_vtt = output_vtt_path + f".tmp_{os.getpid()}_{int(time.time())}.vtt"
+        
+        cmd = [
+            ffmpeg_bin,
+            "-v", "error",
+            "-y",
+            "-i", media_path,
+            "-map", f"0:{stream_index}",
+            "-f", "webvtt",
+            tmp_vtt
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if res.returncode == 0 and os.path.exists(tmp_vtt) and os.path.getsize(tmp_vtt) > 0:
+            os.replace(tmp_vtt, output_vtt_path)
+            return True
+        else:
+            if os.path.exists(tmp_vtt):
+                try:
+                    os.remove(tmp_vtt)
+                except OSError:
+                    pass
+            return False
+    except Exception:
+        return False
+
+def shift_vtt_timestamps(vtt_content: str, offset_seconds: float) -> str:
+    """
+    Shifts all WebVTT cue timestamps backwards by offset_seconds to align with video playback.
+    Cues that end before 0.0 are excluded.
+    """
+    if offset_seconds <= 0.0:
+        return vtt_content
+
+    def parse_vtt_time(ts_str: str) -> float:
+        parts = ts_str.strip().split(":")
+        if len(parts) == 3:
+            h, m, s = parts
+            return float(h) * 3600.0 + float(m) * 60.0 + float(s)
+        elif len(parts) == 2:
+            m, s = parts
+            return float(m) * 60.0 + float(s)
+        return float(parts[0])
+
+    def format_vtt_time(sec: float) -> str:
+        sec = max(0.0, sec)
+        h = int(sec // 3600)
+        m = int((sec % 3600) // 60)
+        s = sec % 60
+        return f"{h:02d}:{m:02d}:{s:06.3f}"
+
+    lines = vtt_content.splitlines()
+    output_lines = ["WEBVTT", ""]
+    i = 0
+    while i < len(lines):
+        if "-->" in lines[i]:
+            break
+        i += 1
+
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+
+        cue_id = ""
+        if "-->" not in line and (i + 1) < len(lines) and "-->" in lines[i + 1]:
+            cue_id = line
+            i += 1
+            line = lines[i].strip()
+
+        if "-->" in line:
+            parts = line.split("-->")
+            start_str = parts[0].strip()
+            end_parts = parts[1].strip().split()
+            end_str = end_parts[0]
+            settings_str = " ".join(end_parts[1:]) if len(end_parts) > 1 else ""
+
+            try:
+                start_sec = parse_vtt_time(start_str) - offset_seconds
+                end_sec = parse_vtt_time(end_str) - offset_seconds
+            except Exception:
+                start_sec = None
+                end_sec = None
+
+            cue_text_lines = []
+            i += 1
+            while i < len(lines) and lines[i].strip():
+                cue_text_lines.append(lines[i])
+                i += 1
+
+            if end_sec is not None and end_sec > 0.0:
+                shifted_timing = f"{format_vtt_time(start_sec)} --> {format_vtt_time(end_sec)}"
+                if settings_str:
+                    shifted_timing += f" {settings_str}"
+                if cue_id:
+                    output_lines.append(cue_id)
+                output_lines.append(shifted_timing)
+                output_lines.extend(cue_text_lines)
+                output_lines.append("")
+        else:
+            i += 1
+
+    return "\n".join(output_lines)
+
+_keyframe_cache: dict[str, dict[float, float]] = {}
+
+def get_keyframe_before_time(file_path: str, target_time: float) -> float:
+    """
+    Finds the exact keyframe presentation timestamp (PTS) at or immediately preceding target_time.
+    When video is stream-copied with FFmpeg using -noaccurate_seek, FFmpeg snaps to this keyframe.
+    Synchronizing subtitle shifts to this keyframe ensures subtitles align frame-accurately
+    with the video and audio.
+    """
+    if target_time <= 0.5:
+        return 0.0
+
+    target_rounded = round(target_time, 3)
+
+    if file_path in _keyframe_cache and target_rounded in _keyframe_cache[file_path]:
+        return _keyframe_cache[file_path][target_rounded]
+
+    # Search window [target - 35, target + 0.1]
+    window_start = max(0.0, target_rounded - 35.0)
+    window_end = target_rounded + 0.1
+    cmd = [
+        get_ffprobe_path(),
+        "-v", "error",
+        "-read_intervals", f"{window_start}%{window_end}",
+        "-select_streams", "v:0",
+        "-show_packets",
+        "-show_entries", "packet=pts_time,flags",
+        "-of", "csv=p=0",
+        file_path
+    ]
+    try:
+        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=5).decode()
+        kfs = []
+        for line in out.splitlines():
+            if "K" in line:
+                parts = line.split(",")
+                try:
+                    pts = float(parts[0])
+                    if pts <= target_time + 0.001:
+                        kfs.append(pts)
+                except ValueError:
+                    pass
+        if not kfs and window_start > 0.0:
+            # Fallback wider search window if GOP is unusually long
+            cmd[3] = f"{max(0.0, target_rounded - 90.0)}%{window_end}"
+            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=5).decode()
+            for line in out.splitlines():
+                if "K" in line:
+                    parts = line.split(",")
+                    try:
+                        pts = float(parts[0])
+                        if pts <= target_time + 0.001:
+                            kfs.append(pts)
+                    except ValueError:
+                        pass
+        if kfs:
+            best_kf = max(kfs)
+            if file_path not in _keyframe_cache:
+                _keyframe_cache[file_path] = {}
+            if len(_keyframe_cache[file_path]) > 200:
+                _keyframe_cache[file_path].clear()
+            _keyframe_cache[file_path][target_rounded] = best_kf
+            return best_kf
+    except Exception:
+        pass
+
+    return target_time
 
 _detected_encoders: dict[str, bool] = {}
 
@@ -87,22 +380,10 @@ _media_probe_cache: dict[str, tuple[float, dict]] = {}
 
 def probe_media_streams(file_path: str) -> dict:
     """
-    Probes video and audio streams of a media file using ffprobe.
+    Probes video, audio, and subtitle streams of a media file using ffprobe.
+    Discovers embedded streams and local sidecar subtitles.
     Results are cached based on file mtime.
-    
-    Returns:
-    {
-        "video_codec": str or None,     # e.g., "h264", "hevc", "mpeg4"
-        "audio_codec": str or None,     # e.g., "aac", "ac3", "dts", "mp3"
-        "audio_channels": int or None,  # e.g., 2, 6
-        "width": int or None,
-        "height": int or None,
-        "duration": float or None,
-        "can_direct_stream_video": bool,# True if video codec is web-compatible (h264/avc)
-        "can_direct_stream_audio": bool,# True if audio codec is web-compatible stereo (aac/mp3 <= 2ch)
-    }
     """
-    import json
     global _media_probe_cache
     if not file_path or not os.path.exists(file_path):
         return {
@@ -115,6 +396,7 @@ def probe_media_streams(file_path: str) -> dict:
             "can_direct_stream_video": False,
             "can_direct_stream_audio": False,
             "audio_tracks": [],
+            "subtitle_tracks": [],
         }
 
     try:
@@ -142,25 +424,13 @@ def probe_media_streams(file_path: str) -> dict:
             streams = data.get("streams", [])
             video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
             audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+            sub_streams = [s for s in streams if s.get("codec_type") == "subtitle"]
 
             video_codec = video_stream.get("codec_name", "").lower() if video_stream else None
             width = video_stream.get("width") if video_stream else None
             height = video_stream.get("height") if video_stream else None
 
-            lang_map = {
-                "eng": "English", "en": "English",
-                "jpn": "Japanese", "ja": "Japanese",
-                "spa": "Spanish", "es": "Spanish",
-                "fra": "French", "fr": "French",
-                "deu": "German", "ger": "German", "de": "German",
-                "ita": "Italian", "it": "Italian",
-                "por": "Portuguese", "pt": "Portuguese",
-                "rus": "Russian", "ru": "Russian",
-                "zho": "Chinese", "chi": "Chinese", "zh": "Chinese",
-                "kor": "Korean", "ko": "Korean",
-                "und": "Unknown"
-            }
-
+            # Audio tracks
             audio_tracks = []
             for idx, s in enumerate(audio_streams):
                 c_name = s.get("codec_name", "").lower()
@@ -187,7 +457,7 @@ def probe_media_streams(file_path: str) -> dict:
                     ch_label = f"{ch}ch"
 
                 lang_clean = lang.lower().strip()
-                friendly_lang = lang_map.get(lang_clean, lang.upper() if lang else f"Track {idx + 1}")
+                friendly_lang = LANG_MAP.get(lang_clean, lang.upper() if lang else f"Track {idx + 1}")
 
                 parts = []
                 if title:
@@ -223,6 +493,61 @@ def probe_media_streams(file_path: str) -> dict:
                     "can_direct_stream": can_copy
                 })
 
+            # Subtitle tracks: sidecars + embedded streams
+            sidecar_tracks = get_sidecar_subtitles(file_path)
+            embedded_subtitles = []
+            for idx, s in enumerate(sub_streams):
+                c_name = s.get("codec_name", "").lower()
+                stream_idx = s.get("index")
+                tags = s.get("tags") or {}
+                lang = tags.get("language") or tags.get("LANGUAGE") or ""
+                title = tags.get("title") or tags.get("TITLE") or ""
+                disp = s.get("disposition") or {}
+                is_forced = bool(disp.get("forced"))
+                is_default = bool(disp.get("default"))
+                is_sdh = bool(disp.get("hearing_impaired"))
+                
+                # Check if text-based or bitmap (PGS / DVDsub)
+                is_text = c_name in ("subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text")
+                
+                lang_clean = lang.lower().strip()
+                friendly_lang = LANG_MAP.get(lang_clean, lang.upper() if lang else f"Track {idx + 1}")
+
+                parts = []
+                if title:
+                    parts.append(title)
+                else:
+                    parts.append(friendly_lang)
+
+                details = []
+                if is_forced and "forced" not in (title or "").lower():
+                    details.append("Forced")
+                if is_sdh and "sdh" not in (title or "").lower():
+                    details.append("SDH")
+                if not is_text:
+                    details.append(c_name.upper() if c_name else "Bitmap")
+
+                if details:
+                    label = f"{parts[0]} [{', '.join(details)}]"
+                else:
+                    label = parts[0]
+
+                embedded_subtitles.append({
+                    "id": f"stream:{stream_idx}",
+                    "type": "embedded",
+                    "stream_index": stream_idx,
+                    "codec": c_name,
+                    "is_text": is_text,
+                    "language": lang_clean or "und",
+                    "title": title,
+                    "label": label,
+                    "is_forced": is_forced,
+                    "is_default": is_default,
+                    "is_hearing_impaired": is_sdh,
+                })
+
+            all_subtitles = sidecar_tracks + embedded_subtitles
+
             primary_audio = audio_tracks[0] if audio_tracks else None
             audio_codec = primary_audio["codec"] if primary_audio else None
             audio_channels = primary_audio["channels"] if primary_audio else None
@@ -254,6 +579,7 @@ def probe_media_streams(file_path: str) -> dict:
                 "can_direct_stream_video": can_direct_stream_video,
                 "can_direct_stream_audio": can_direct_stream_audio,
                 "audio_tracks": audio_tracks,
+                "subtitle_tracks": all_subtitles,
             }
             _media_probe_cache[file_path] = (mtime, result)
             return result
@@ -284,6 +610,7 @@ def probe_media_streams(file_path: str) -> dict:
                 "can_direct_stream": is_mp4,
             }
         ],
+        "subtitle_tracks": get_sidecar_subtitles(file_path),
     }
     return fallback_result
 
