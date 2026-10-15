@@ -1,6 +1,8 @@
 <html>
 
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Heirloom</title>
     <link rel="stylesheet" href="/static/style.css">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
@@ -9,7 +11,7 @@
 <body>
     <div class="header">
         <div class="flex gap-15 align-center">
-            <h1 class="m-0">Heirloom</h1>
+            <h1 class="m-0" style="font-size: 1.5rem;">Heirloom</h1>
             <div class="search-box">
                 <input type="text" id="searchInput" class="search-input" placeholder="Search..."
                     oninput="handleGlobalSearch()" autocomplete="off">
@@ -18,6 +20,9 @@
             </div>
         </div>
         <div class="flex gap-15 align-center">
+            <a href="#" class="icon-link mobile-search-toggle" id="mobileSearchBtn" onclick="toggleMobileSearch(event)" title="Search">
+                <i data-lucide="search"></i>
+            </a>
             <!-- Server Dashboard -->
             {% if user.is_admin %}
             <a href="/server-dashboard" class="icon-link" title="Server Dashboard">
@@ -33,7 +38,7 @@
                     <div id="inboxItems">Loading...</div>
                 </div>
             </div>
-            <a href="/settings" class="icon-link">
+            <a href="/settings" class="icon-link" title="Settings">
                 <i data-lucide="settings"></i>
             </a>
         </div>
@@ -472,11 +477,57 @@
             }, 300);
         }
 
+        function toggleMobileSearch(e) {
+            if (e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+            const searchBox = document.querySelector('.search-box');
+            const toggleBtn = document.getElementById('mobileSearchBtn');
+            const input = document.getElementById('searchInput');
+            if (!searchBox) return;
+
+            const isOpen = searchBox.classList.toggle('open');
+            if (toggleBtn) toggleBtn.classList.toggle('active', isOpen);
+
+            if (isOpen && input) {
+                setTimeout(() => input.focus(), 80);
+            } else {
+                const results = document.getElementById('searchResults');
+                if (results) results.style.display = 'none';
+            }
+        }
+
         document.addEventListener('click', function (event) {
             const searchContainer = document.getElementById('searchResults');
             const searchInput = document.getElementById('searchInput');
+            const searchBox = document.querySelector('.search-box');
+            const toggleBtn = document.getElementById('mobileSearchBtn');
+
             if (searchContainer && event.target !== searchInput && !searchContainer.contains(event.target)) {
                 searchContainer.style.display = 'none';
+            }
+
+            if (window.innerWidth <= 768 && searchBox && searchBox.classList.contains('open')) {
+                if (!searchBox.contains(event.target) && (!toggleBtn || !toggleBtn.contains(event.target))) {
+                    if (!searchInput || !searchInput.value.trim()) {
+                        searchBox.classList.remove('open');
+                        if (toggleBtn) toggleBtn.classList.remove('active');
+                    }
+                }
+            }
+        });
+
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') {
+                const searchBox = document.querySelector('.search-box');
+                const toggleBtn = document.getElementById('mobileSearchBtn');
+                const results = document.getElementById('searchResults');
+                if (results) results.style.display = 'none';
+                if (window.innerWidth <= 768 && searchBox && searchBox.classList.contains('open')) {
+                    searchBox.classList.remove('open');
+                    if (toggleBtn) toggleBtn.classList.remove('active');
+                }
             }
         });
 

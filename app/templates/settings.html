@@ -1,6 +1,8 @@
 <html>
 
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Heirloom</title>
     <link rel="stylesheet" href="/static/style.css">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
@@ -331,7 +333,7 @@
             <a href="/" class="icon-link" title="Home">
                 <i data-lucide="arrow-left"></i>
             </a>
-            <h1 class="m-0">Settings</h1>
+            <h1 class="m-0" style="font-size: 1.5rem;">Settings</h1>
         </div>
 
         <div class="card">
@@ -386,20 +388,20 @@
                 </form>
             </div>
 
-            <form action="/settings/add_volume" method="post" class="flex gap-10 align-center mb-20">
-                <div class="flex-1 flex gap-10 align-center">
+            <form action="/settings/add_volume" method="post" class="flex gap-10 align-center mb-20 volume-add-form">
+                <div class="flex-1 flex gap-10 align-center volume-input-browse-group">
                     <input type="text" name="path" id="pathInput" placeholder="/media/movies or custom volume path"
                         required class="m-0 flex-1">
-                    <button type="button" class="btn btn-secondary" onclick="openDirBrowser()"><i
+                    <button type="button" class="btn btn-secondary volume-browse-btn" onclick="openDirBrowser()"><i
                             data-lucide="folder"></i> Browse</button>
                 </div>
-                <div class="custom-select-container" style="position: relative;">
+                <div class="custom-select-container volume-select-container" style="position: relative;">
                     <input type="hidden" name="media_type" id="mediaTypeInput" value="movie">
-                    <button type="button" class="btn btn-secondary" onclick="toggleMediaTypeMenu(event)"
+                    <button type="button" class="btn btn-secondary volume-select-btn" onclick="toggleMediaTypeMenu(event)"
                         id="mediaTypeBtn">
                         Movies <i data-lucide="chevron-down"></i>
                     </button>
-                    <div class="dropdown-menu settings-menu-expanded" id="mediaTypeMenu"
+                    <div class="dropdown-menu settings-menu-expanded volume-select-menu" id="mediaTypeMenu"
                         style="flex-direction: column; top: 100%; bottom: auto; right: auto; left: 0; min-width: 120px; padding: 5px; margin-top: 5px;">
                         <button type="button" class="res-btn active"
                             onclick="selectMediaType('movie', 'Movies')">Movies</button>
@@ -409,13 +411,13 @@
                             onclick="selectMediaType('photo', 'Photos')">Photos</button>
                     </div>
                 </div>
-                <button type="submit" class="btn btn-primary"><i data-lucide="folder-plus"></i> Add Path</button>
+                <button type="submit" class="btn btn-primary volume-add-btn"><i data-lucide="folder-plus"></i> Add Path</button>
             </form>
 
             <ul>
                 {% for vp in volume_paths %}
-                <li class="list-item">
-                    <div class="flex gap-10 align-center">
+                <li class="list-item volume-list-item">
+                    <div class="flex gap-10 align-center volume-info">
                         {% if vp.exists %}
                         <span class="code-text badge-active" style="text-transform: uppercase;" title="Active">{{
                             vp.media_type }}</span>
@@ -425,7 +427,7 @@
                         {% endif %}
                         <strong>{{ vp.display_path }}</strong>
                     </div>
-                    <form action="/settings/delete_volume/{{ vp.id }}" method="post" class="m-0">
+                    <form action="/settings/delete_volume/{{ vp.id }}" method="post" class="m-0 volume-delete-form">
                         <button type="submit" class="btn btn-danger btn-sm"
                             onclick="return confirm('Remove this volume path? Missing media will be removed from library.');"><i
                                 data-lucide="trash-2"></i> Delete</button>
@@ -449,16 +451,24 @@
             </div>
             <ul>
                 {% for u in users %}
-                <li class="list-item">
-                    <div class="flex gap-10 align-center">
-                        <strong>{{ u.username }}</strong> {% if u.is_admin %}(Admin){% endif %}
+                <li class="list-item user-list-item">
+                    <div class="user-header-row">
+                        <div class="user-name-label">
+                            <strong>{{ u.username }}</strong> {% if u.is_admin %}<span style="color: var(--text-muted); font-size: 0.85em; font-weight: normal;">(Admin)</span>{% endif %}
+                        </div>
+                        {% if not u.is_admin %}
+                        <form action="/settings/delete_user/{{ u.id }}" method="post" class="m-0 user-delete-form">
+                            <button type="submit" class="btn btn-danger btn-sm"
+                                onclick="return confirm('Delete this user?');"><i data-lucide="trash-2"></i>
+                                Delete</button>
+                        </form>
+                        {% endif %}
                     </div>
                     {% if not u.is_admin %}
-                    <div class="flex align-center" style="gap: 20px;">
+                    <div class="user-controls-row">
                         <!-- Auto-submit on change removes the need for a button -->
-                        <form action="/settings/update_user/{{ u.id }}" method="post" class="m-0 flex align-center"
-                            style="gap: 20px;">
-                            <div class="flex gap-10 align-center">
+                        <form action="/settings/update_user/{{ u.id }}" method="post" class="m-0 user-permissions-form">
+                            <div class="user-permissions-group">
                                 <label class="toggle-pill"><input type="checkbox" name="movies_access"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         u.movies_access %}checked{% endif %}>
@@ -472,7 +482,7 @@
                                         u.photos_access %}checked{% endif %}>
                                     <span>Photos</span></label>
                             </div>
-                            <div class="flex gap-10 align-center">
+                            <div class="user-permissions-group">
                                 <label class="toggle-pill"><input type="checkbox" name="downloads_access"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         u.downloads_access %}checked{% endif %}>
@@ -487,24 +497,19 @@
                                     <span>Kids Only</span></label>
                             </div>
                         </form>
-                        <form action="/settings/delete_user/{{ u.id }}" method="post" class="m-0">
-                            <button type="submit" class="btn btn-danger btn-sm"
-                                onclick="return confirm('Delete this user?');"><i data-lucide="trash-2"></i>
-                                Delete</button>
-                        </form>
                     </div>
                     {% endif %}
                 </li>
                 {% endfor %}
 
                 {% for invite in invites %}
-                <li class="list-item">
-                    <div>
+                <li class="list-item invite-list-item">
+                    <div class="invite-info">
                         <strong>Pending User Invitation</strong>
                         <div class="share-link">Expires {{ invite.expires_at.strftime('%m/%d/%y') }} (Code: <span
                                 class="code-text">{{ invite.code }}</span>)</div>
                     </div>
-                    <div class="flex gap-10">
+                    <div class="flex gap-10 invite-actions">
                         <button type="button" class="btn btn-secondary btn-sm"
                             onclick="copyToClipboard('{{ host_url }}/register?invite={{ invite.code }}', this)"><i
                                 data-lucide="copy"></i> Copy Link</button>

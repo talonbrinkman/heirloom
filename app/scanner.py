@@ -1,7 +1,9 @@
 import os
 import re
 import requests
+from typing import Optional
 from sqlmodel import Session, select
+from .database import engine
 from .models import Movie, TVShow, Photo, VolumePath, SystemConfig
 
 VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".m4v")
@@ -127,7 +129,24 @@ def extract_chapter_markers(file_path: str):
     except Exception:
         return None, None, None, None
 
-def scan_media_library(session: Session):
+import threading
+
+SCAN_LOCK = threading.Lock()
+
+def scan_media_library(session: Optional[Session] = None):
+    if not SCAN_LOCK.acquire(blocking=False):
+        print("[Scanner] A scan is already running, skipping duplicate trigger.")
+        return
+    try:
+        if session is None:
+            with Session(engine) as s:
+                _perform_scan(s)
+        else:
+            _perform_scan(session)
+    finally:
+        SCAN_LOCK.release()
+
+def _perform_scan(session: Session):
     volume_paths = session.exec(select(VolumePath)).all()
     movie_volume_paths = [v.path for v in volume_paths if v.media_type == "movie"]
     tv_volume_paths = [v.path for v in volume_paths if v.media_type == "tv"]
@@ -154,7 +173,10 @@ def scan_media_library(session: Session):
     for p in session.exec(select(Photo)).all():
         if p.file_path and not is_valid_path(p.file_path, photo_volume_paths):
             session.delete(p)
-    session.commit()
+    try:
+        session.commit()
+    except Exception as e:
+        session.rollback()
 
     # 1. Scan Movies
     for movies_dir in movie_volume_paths:
@@ -203,7 +225,11 @@ def scan_media_library(session: Session):
                                 intro_start=intro_s, intro_end=intro_e, credits_start=cred_s, credits_end=cred_e
                             )
                             session.add(new_movie)
-                            session.commit()
+                            try:
+                                session.commit()
+                            except Exception as e:
+                                session.rollback()
+                                print(f"[Scanner] Skipping duplicate or failed movie {full_path}: {e}")
 
     # 2. Scan TV Shows
     for tv_dir in tv_volume_paths:
@@ -281,7 +307,11 @@ def scan_media_library(session: Session):
                                 intro_start=intro_s, intro_end=intro_e, credits_start=cred_s, credits_end=cred_e
                             )
                             session.add(new_show)
-                            session.commit()
+                            try:
+                                session.commit()
+                            except Exception as e:
+                                session.rollback()
+                                print(f"[Scanner] Skipping duplicate or failed TV show {full_path}: {e}")
 
     # 3. Scan Photos
     for photo_dir in photo_volume_paths:
@@ -299,8 +329,13 @@ def scan_media_library(session: Session):
                             if not existing:
                                 new_photo = Photo(title=raw_title, file_path=full_path, album=album)
                                 session.add(new_photo)
-                                session.commit()
-                                session.refresh(new_photo)
+                                try:
+                                    session.commit()
+                                    session.refresh(new_photo)
+                                except Exception as e:
+                                    session.rollback()
+                                    print(f"[Scanner] Skipping duplicate photo record {full_path}: {e}")
+                                    continue
                             else:
                                 new_photo = existing
                                 new_photo.album = album
@@ -335,6 +370,10 @@ def scan_media_library(session: Session):
                                 session.add(new_photo)
                                 session.commit()
                             except Exception as e:
-                                print(f"Error generating thumbnail for {full_path}: {e}")
+                                session.rollback()
+                                print(f"[Scanner] Error generating thumbnail or saving {full_path}: {e}")
 
-    session.commit()
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()

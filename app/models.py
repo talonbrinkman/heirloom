@@ -91,6 +91,8 @@ class WatchHistory(SQLModel, table=True):
     media_type: str 
     item_id: int
     progress: float = Field(default=0.0) # Percentage from 0 to 100
+    current_time: Optional[float] = Field(default=0.0)
+    duration: Optional[float] = Field(default=0.0)
     last_watched: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class VolumePath(SQLModel, table=True):

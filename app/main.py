@@ -16,7 +16,7 @@ from datetime import datetime, timezone, timedelta
 from .database import create_db_and_tables, get_session, engine
 from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest
 from .scanner import scan_media_library
-from .watcher import start_watcher, stop_watcher
+from .watcher import start_watcher, stop_watcher, scanner_debouncer
 from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams
 import subprocess
 import shutil
@@ -101,6 +101,17 @@ manager = ConnectionManager()
 
 SERVER_START_TIME = time.time()
 
+def format_seconds(seconds: float) -> str:
+    if seconds is None or seconds < 0:
+        return "0:00"
+    sec = int(round(seconds))
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
 class ActiveStreamManager:
     def __init__(self):
         self.streams: dict[str, dict] = {}
@@ -121,6 +132,11 @@ class ActiveStreamManager:
         season_episode: str = "",
         ip: str = ""
     ):
+        cur_sec_int = int(round(current_time or 0.0))
+        dur_sec_int = int(round(duration or 0.0))
+        time_left = max(0, dur_sec_int - cur_sec_int)
+        time_display = f"{format_seconds(cur_sec_int)} / {format_seconds(dur_sec_int)} -{format_seconds(time_left)}" if dur_sec_int > 0 else f"{round(progress, 1)}%"
+
         self.streams[session_key] = {
             "session_key": session_key,
             "user_id": user_id,
@@ -132,6 +148,7 @@ class ActiveStreamManager:
             "progress": round(progress, 1),
             "current_time": round(current_time, 1),
             "duration": round(duration, 1),
+            "time_display": time_display,
             "play_type": play_type,
             "season_episode": season_episode,
             "ip": ip,
@@ -1286,6 +1303,11 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
         except:
             pass
 
+    if history_entry and duration > 0 and (not getattr(history_entry, 'duration', 0.0) or history_entry.duration <= 0):
+        history_entry.duration = float(duration)
+        session.add(history_entry)
+        session.commit()
+
     # On-demand probe for chapters if not yet cached in DB
     if item.intro_start is None and item.credits_start is None:
         from .scanner import extract_chapter_markers
@@ -1399,13 +1421,28 @@ async def update_progress(
             session.commit()
         return {"status": "completed"}
 
+    cur_time_val = float(current_time) if current_time is not None else 0.0
+    dur_val = float(duration) if duration is not None else 0.0
+
     if history_entry:
         history_entry.progress = progress
+        if current_time is not None:
+            history_entry.current_time = cur_time_val
+        if duration is not None and dur_val > 0:
+            history_entry.duration = dur_val
         history_entry.last_watched = datetime.now(timezone.utc)
         session.add(history_entry)
         session.commit()
     else:
-        history_entry = WatchHistory(user_id=current_user.id, media_type=media_type, item_id=item_id, progress=progress, last_watched=datetime.now(timezone.utc))
+        history_entry = WatchHistory(
+            user_id=current_user.id,
+            media_type=media_type,
+            item_id=item_id,
+            progress=progress,
+            current_time=cur_time_val,
+            duration=dur_val,
+            last_watched=datetime.now(timezone.utc)
+        )
         session.add(history_entry)
         session.commit()
 
@@ -1767,22 +1804,6 @@ def get_server_metrics(session: Session) -> dict:
 
     disks = []
     checked_paths = set()
-    try:
-        root_path = "/" if os.name != "nt" else os.path.abspath(os.sep)
-        root_du = shutil.disk_usage(root_path)
-        checked_paths.add(os.path.abspath(root_path).lower())
-        pct = round((root_du.used / root_du.total) * 100, 1) if root_du.total > 0 else 0.0
-        disks.append({
-            "name": f"System Root ({root_path})",
-            "path": root_path,
-            "total_gb": round(root_du.total / (1024**3), 1),
-            "used_gb": round(root_du.used / (1024**3), 1),
-            "free_gb": round(root_du.free / (1024**3), 1),
-            "percent": pct
-        })
-    except Exception:
-        pass
-
     volumes = session.exec(select(VolumePath)).all()
     for vol in volumes:
         if vol.path and os.path.exists(vol.path):
@@ -1792,8 +1813,9 @@ def get_server_metrics(session: Session) -> dict:
                     checked_paths.add(norm_p)
                     du = shutil.disk_usage(vol.path)
                     pct = round((du.used / du.total) * 100, 1) if du.total > 0 else 0.0
+                    display_type = {"movie": "Movies", "tv": "TV Shows", "photo": "Photos"}.get(vol.media_type, vol.media_type.capitalize())
                     disks.append({
-                        "name": f"Media ({vol.media_type.capitalize()}s - {vol.path})",
+                        "name": f"{display_type} ({vol.path})",
                         "path": vol.path,
                         "total_gb": round(du.total / (1024**3), 1),
                         "used_gb": round(du.used / (1024**3), 1),
@@ -1848,6 +1870,8 @@ def get_user_and_watch_stats(session: Session, limit: int = 25) -> dict:
         poster = None
         season_episode = None
         year = ""
+        cur_sec = getattr(h, 'current_time', 0.0) or 0.0
+        dur_sec = getattr(h, 'duration', 0.0) or 0.0
 
         if h.media_type == "movie":
             m = session.get(Movie, h.item_id)
@@ -1855,6 +1879,15 @@ def get_user_and_watch_stats(session: Session, limit: int = 25) -> dict:
                 title = m.title
                 poster = m.poster_filename
                 year = m.year or ""
+                if not dur_sec and m.runtime:
+                    dur_sec = float(m.runtime)
+                elif not dur_sec and m.file_path and os.path.exists(m.file_path):
+                    try:
+                        get_runtime_str(m, session)
+                        if m.runtime:
+                            dur_sec = float(m.runtime)
+                    except Exception:
+                        pass
         elif h.media_type == "tv":
             t = session.get(TVShow, h.item_id)
             if t:
@@ -1864,6 +1897,38 @@ def get_user_and_watch_stats(session: Session, limit: int = 25) -> dict:
                 match = re.search(r'S(\d+)E(\d+)', t.file_path, re.IGNORECASE)
                 if match:
                     season_episode = f"S{int(match.group(1))} • E{int(match.group(2))}"
+                if not dur_sec and t.runtime:
+                    dur_sec = float(t.runtime)
+                elif not dur_sec and t.file_path and os.path.exists(t.file_path):
+                    try:
+                        get_runtime_str(t, session)
+                        if t.runtime:
+                            dur_sec = float(t.runtime)
+                    except Exception:
+                        pass
+
+        if dur_sec > 0 and not cur_sec:
+            cur_sec = dur_sec * (h.progress / 100.0)
+
+        # Cache duration and current_time onto history entry if missing
+        if (getattr(h, 'duration', 0.0) or 0.0) == 0.0 and dur_sec > 0:
+            h.duration = dur_sec
+            h.current_time = cur_sec
+            session.add(h)
+            try:
+                session.commit()
+            except Exception:
+                session.rollback()
+
+        if dur_sec > 0:
+            actual_sec = int(round(cur_sec))
+            dur_sec_int = int(round(dur_sec))
+            time_left = max(0, dur_sec_int - actual_sec)
+            time_display = f"{format_seconds(actual_sec)} / {format_seconds(dur_sec_int)} -{format_seconds(time_left)}"
+        elif cur_sec > 0:
+            time_display = format_seconds(cur_sec)
+        else:
+            time_display = "0:00"
 
         delta = now - h.last_watched if h.last_watched else timedelta(0)
         secs = delta.total_seconds()
@@ -1886,6 +1951,9 @@ def get_user_and_watch_stats(session: Session, limit: int = 25) -> dict:
             "season_episode": season_episode,
             "year": year,
             "progress": round(h.progress, 1),
+            "current_time": round(cur_sec, 1),
+            "duration": round(dur_sec, 1),
+            "time_display": time_display,
             "is_completed": h.progress >= 90.0,
             "time_ago": time_ago,
             "last_watched": h.last_watched.strftime("%Y-%m-%d %H:%M") if h.last_watched else ""
@@ -2027,9 +2095,7 @@ async def save_tmdb_key(tmdb_key: str = Form(""), current_user: User = Depends(g
         session.add(config)
     session.commit()
     # Trigger a rescan to fetch metadata for existing items
-    from .scanner import scan_media_library
-    import threading
-    threading.Thread(target=scan_media_library, args=(session,), daemon=True).start()
+    scanner_debouncer.trigger_scan(delay=0.5)
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/remote_access")
@@ -2054,8 +2120,8 @@ async def add_volume(path: str = Form(...), media_type: str = Form(...), current
         if not existing:
             session.add(VolumePath(path=clean_path, media_type=media_type))
             session.commit()
-            scan_media_library(session)
             start_watcher()
+            scanner_debouncer.trigger_scan(delay=0.5)
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/delete_volume/{volume_id}")
@@ -2065,14 +2131,14 @@ async def delete_volume(volume_id: int, current_user: User = Depends(get_current
     if vol:
         session.delete(vol)
         session.commit()
-        scan_media_library(session)
         start_watcher()
+        scanner_debouncer.trigger_scan(delay=0.5)
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/rescan")
 async def rescan_library(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     if not current_user or not current_user.is_admin: raise HTTPException(status_code=403, detail="Forbidden")
-    scan_media_library(session)
+    scanner_debouncer.trigger_scan(delay=0.1)
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.get("/api/browse")

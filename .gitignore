@@ -15,3 +15,5 @@ venv/
 .DS_Store
 app/bin/*.exe
 devtools_options.yaml
+*.csv
+*.log

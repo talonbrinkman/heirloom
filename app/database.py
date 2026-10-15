@@ -96,6 +96,14 @@ def create_db_and_tables():
             except Exception:
                 session.rollback()
 
+        # Migrations for WatchHistory current_time and duration
+        for col in ["current_time", "duration"]:
+            try:
+                session.exec(text(f"ALTER TABLE watchhistory ADD COLUMN {col} FLOAT DEFAULT 0.0"))
+                session.commit()
+            except Exception:
+                session.rollback()
+
         # Migration to fix malformed TV Show titles (e.g. 'Better Call Saul S03 01' or 'Invincible (2021)')
         try:
             from .models import TVShow

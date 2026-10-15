@@ -19,19 +19,8 @@
                     <i data-lucide="arrow-left"></i>
                 </a>
                 <div class="flex align-center gap-10">
-                    <h1 class="m-0" style="font-size: 1.85rem;">Server Dashboard</h1>
-                    <span class="live-indicator">
-                        <span class="pulse-dot"></span>
-                        LIVE
-                    </span>
+                    <h1 class="m-0" style="font-size: 1.5rem;">Server Dashboard</h1>
                 </div>
-            </div>
-
-            <div class="flex gap-10 align-center">
-                <span id="lastUpdatedText" style="font-size: 0.82rem; color: var(--text-muted);">Updated just now</span>
-                <button type="button" class="btn btn-secondary btn-sm" onclick="fetchLiveStats(true)" id="refreshBtn">
-                    <i data-lucide="refresh-cw" id="refreshIcon"></i> Refresh
-                </button>
             </div>
         </div>
 
@@ -41,11 +30,12 @@
             <div class="kpi-card">
                 <div class="kpi-header">
                     <span>Active Streams</span>
-                    <i data-lucide="tv" style="width: 18px; height: 18px;"></i>
+                    <i data-lucide="monitor-up" style="width: 18px; height: 18px;"></i>
                 </div>
                 <div class="kpi-value" id="kpiActiveStreams">{{ metrics.active_streams_count }}</div>
                 <div class="kpi-subtext" id="kpiTranscodeCount">
-                    {{ metrics.transcodes_count }} Transcoding process{% if metrics.transcodes_count != 1 %}es{% endif %}
+                    {{ metrics.transcodes_count }} Transcoding process{% if metrics.transcodes_count != 1 %}es{% endif
+                    %}
                 </div>
             </div>
 
@@ -66,20 +56,21 @@
             <div class="kpi-card">
                 <div class="kpi-header">
                     <span>Memory (RAM)</span>
-                    <i data-lucide="hard-drive" style="width: 18px; height: 18px;"></i>
+                    <i data-lucide="memory-stick" style="width: 18px; height: 18px;"></i>
                 </div>
                 <div class="kpi-value" id="kpiRam">{{ metrics.memory.percent }}%</div>
                 <div class="kpi-bar-bg">
                     <div class="kpi-bar-fill" id="kpiRamBar" style="width: {{ metrics.memory.percent }}%;"></div>
                 </div>
-                <div class="kpi-subtext" id="kpiRamText">{{ metrics.memory.used_gb }} GB / {{ metrics.memory.total_gb }} GB</div>
+                <div class="kpi-subtext" id="kpiRamText">{{ metrics.memory.used_gb }} GB / {{ metrics.memory.total_gb }}
+                    GB</div>
             </div>
 
             <!-- Server Uptime -->
             <div class="kpi-card">
                 <div class="kpi-header">
                     <span>Server Uptime</span>
-                    <i data-lucide="clock" style="width: 18px; height: 18px;"></i>
+                    <i data-lucide="clock-arrow-up" style="width: 18px; height: 18px;"></i>
                 </div>
                 <div class="kpi-value" id="kpiUptime" style="font-size: 1.55rem;">{{ metrics.uptime_str }}</div>
                 <div class="kpi-subtext">Heirloom Media Server</div>
@@ -91,11 +82,7 @@
             <div class="card-header flex justify-between align-center">
                 <div class="flex align-center gap-10">
                     <h2 class="m-0" style="font-size: 1.25rem;">Now Playing</h2>
-                    <span class="badge" id="activeStreamsBadge" style="background: rgba(229, 9, 20, 0.2); color: var(--accent); font-size: 0.8rem; padding: 2px 8px; border-radius: 9999px;">
-                        {{ metrics.active_streams_count }}
-                    </span>
                 </div>
-                <span style="font-size: 0.82rem; color: var(--text-muted);">Real-time stream telemetry</span>
             </div>
 
             <div id="activeStreamsContainer">
@@ -116,10 +103,12 @@
                             <div class="stream-subinfo">{{ stream.season_episode }}</div>
                             {% endif %}
                             <div class="flex align-center gap-10 mt-5">
-                                <span class="badge-stream-type {% if 'Transcode' in stream.play_type %}badge-transcode{% else %}badge-direct-play{% endif %}">
+                                <span
+                                    class="badge-stream-type {% if 'Transcode' in stream.play_type %}badge-transcode{% else %}badge-direct-play{% endif %}">
                                     {{ stream.play_type }}
                                 </span>
-                                <span class="flex align-center gap-5" style="font-size: 0.8rem; color: var(--text-muted);">
+                                <span class="flex align-center gap-5"
+                                    style="font-size: 0.8rem; color: var(--text-muted);">
                                     <i data-lucide="user" style="width: 13px; height: 13px;"></i>
                                     {{ stream.username }}
                                 </span>
@@ -127,7 +116,8 @@
                             <div class="kpi-bar-bg mt-5">
                                 <div class="kpi-bar-fill" style="width: {{ stream.progress }}%;"></div>
                             </div>
-                            <div class="flex justify-between" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">
+                            <div class="flex justify-between"
+                                style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">
                                 <span>{{ stream.progress }}%</span>
                                 {% if stream.ip %}
                                 <span>IP: {{ stream.ip }}</span>
@@ -142,7 +132,8 @@
                     <i data-lucide="tv"></i>
                     <div style="font-weight: 600; color: var(--text); font-size: 1.05rem;">No Active Streams</div>
                     <div style="font-size: 0.85rem; max-width: 420px;">
-                        When users begin playing movies or episodes, real-time playback progress and transcoding details will stream here live.
+                        When users begin playing movies or episodes, real-time playback progress and transcoding details
+                        will stream here live.
                     </div>
                 </div>
                 {% endif %}
@@ -150,7 +141,8 @@
         </div>
 
         <!-- Section: Storage & System Details -->
-        <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 20px; margin-bottom: 24px;" class="storage-system-grid">
+        <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 20px; margin-bottom: 24px;"
+            class="storage-system-grid">
             <!-- Storage Volumes -->
             <div class="card m-0">
                 <div class="card-header flex justify-between align-center">
@@ -160,25 +152,32 @@
 
                 <div id="disksList" class="flex flex-col gap-15 mt-10">
                     {% for d in metrics.disks %}
-                    <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--surface-hover); border-radius: 6px; padding: 12px 16px;">
+                    <div
+                        style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--surface-hover); border-radius: 6px; padding: 12px 16px; gap: 10px; display: flex; flex-direction: column;">
                         <div class="flex justify-between align-center mb-5">
                             <div class="flex align-center gap-10">
-                                <i data-lucide="folder-archive" style="width: 18px; height: 18px; color: var(--text-muted);"></i>
+                                <i data-lucide="hard-drive"
+                                    style="width: 18px; height: 18px; color: var(--text-muted);"></i>
                                 <span style="font-weight: 600; font-size: 0.95rem;">{{ d.name }}</span>
                             </div>
-                            <span style="font-size: 0.85rem; font-weight: 600; color: {% if d.percent > 90 %}#f44336{% elif d.percent > 75 %}#ff9800{% else %}var(--text){% endif %};">
+                            <span
+                                style="font-size: 0.85rem; font-weight: 600; color: {% if d.percent > 90 %}#f44336{% elif d.percent > 75 %}#ff9800{% else %}var(--text){% endif %};">
                                 {{ d.percent }}% Used
                             </span>
                         </div>
                         <div class="kpi-bar-bg mb-5" style="height: 7px;">
-                            <div class="kpi-bar-fill" style="width: {{ d.percent }}%; background: {% if d.percent > 90 %}#f44336{% elif d.percent > 75 %}#ff9800{% else %}var(--accent){% endif %};"></div>
+                            <div class="kpi-bar-fill"
+                                style="width: {{ d.percent }}%; background: {% if d.percent > 90 %}#f44336{% elif d.percent > 75 %}#ff9800{% else %}var(--accent){% endif %};">
+                            </div>
                         </div>
                         <div class="flex justify-between" style="font-size: 0.78rem; color: var(--text-muted);">
-                            <span>Used: <strong>{{ d.used_gb }} GB</strong></span>
+                            <span>Used: <strong>{{ d.used_gb }} / {{ d.total_gb }} GB</strong></span>
                             <span>Free: <strong>{{ d.free_gb }} GB</strong></span>
-                            <span>Total: <strong>{{ d.total_gb }} GB</strong></span>
                         </div>
                     </div>
+                    {% else %}
+                    <div style="font-size: 0.85rem; color: var(--text-muted); padding: 8px 0;">No mounted media volumes
+                        found.</div>
                     {% endfor %}
                 </div>
             </div>
@@ -190,35 +189,37 @@
                         <h2 class="m-0" style="font-size: 1.25rem;">Library Overview</h2>
                     </div>
                     <div class="flex flex-col gap-12 mt-10">
-                        <div class="flex justify-between align-center" style="padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
-                            <span class="flex align-center gap-10 text-muted"><i data-lucide="film" style="width: 16px; height: 16px;"></i> Movies</span>
-                            <strong style="font-size: 1.05rem;">{{ stats.library.movies }}</strong>
+                        <div class="flex justify-between align-center"
+                            style="padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                            <span class="flex align-center gap-10 text-muted"><i data-lucide="film"
+                                    style="width: 16px; height: 16px;"></i> Movies</span>
+                            <strong style="font-size: 1.05rem;" id="statMovies">{{ stats.library.movies }}</strong>
                         </div>
-                        <div class="flex justify-between align-center" style="padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
-                            <span class="flex align-center gap-10 text-muted"><i data-lucide="tv" style="width: 16px; height: 16px;"></i> TV Shows</span>
-                            <strong style="font-size: 1.05rem;">{{ stats.library.tv_shows }}</strong>
+                        <div class="flex justify-between align-center"
+                            style="padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                            <span class="flex align-center gap-10 text-muted"><i data-lucide="tv"
+                                    style="width: 16px; height: 16px;"></i> TV Shows</span>
+                            <strong style="font-size: 1.05rem;" id="statShows">{{ stats.library.tv_shows }}</strong>
                         </div>
-                        <div class="flex justify-between align-center" style="padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
-                            <span class="flex align-center gap-10 text-muted"><i data-lucide="layers" style="width: 16px; height: 16px;"></i> Total Episodes</span>
-                            <strong style="font-size: 1.05rem;">{{ stats.library.tv_episodes }}</strong>
+                        <div class="flex justify-between align-center"
+                            style="padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                            <span class="flex align-center gap-10 text-muted"><i data-lucide="layers"
+                                    style="width: 16px; height: 16px;"></i> Total Episodes</span>
+                            <strong style="font-size: 1.05rem;" id="statEpisodes">{{ stats.library.tv_episodes
+                                }}</strong>
                         </div>
-                        <div class="flex justify-between align-center" style="padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
-                            <span class="flex align-center gap-10 text-muted"><i data-lucide="image" style="width: 16px; height: 16px;"></i> Photos</span>
-                            <strong style="font-size: 1.05rem;">{{ stats.library.photos }}</strong>
+                        <div class="flex justify-between align-center"
+                            style="padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                            <span class="flex align-center gap-10 text-muted"><i data-lucide="image"
+                                    style="width: 16px; height: 16px;"></i> Photos</span>
+                            <strong style="font-size: 1.05rem;" id="statPhotos">{{ stats.library.photos }}</strong>
                         </div>
                         <div class="flex justify-between align-center" style="padding: 6px 0;">
-                            <span class="flex align-center gap-10 text-muted"><i data-lucide="users" style="width: 16px; height: 16px;"></i> Registered Users</span>
-                            <strong style="font-size: 1.05rem;">{{ stats.total_users }}</strong>
+                            <span class="flex align-center gap-10 text-muted"><i data-lucide="users"
+                                    style="width: 16px; height: 16px;"></i> Registered Users</span>
+                            <strong style="font-size: 1.05rem;" id="statUsers">{{ stats.total_users }}</strong>
                         </div>
                     </div>
-                </div>
-
-                <div style="background: rgba(255,255,255,0.02); border-radius: 6px; padding: 12px; margin-top: 15px; font-size: 0.8rem; color: var(--text-muted);">
-                    <div class="flex align-center gap-5 mb-5">
-                        <i data-lucide="info" style="width: 14px; height: 14px;"></i>
-                        <strong style="color: var(--text);">FFmpeg & Transcoding</strong>
-                    </div>
-                    <span>Active Transcoding Jobs: <strong id="transcodeJobsCount" style="color: var(--text);">{{ metrics.transcodes_count }}</strong></span>
                 </div>
             </div>
         </div>
@@ -228,9 +229,7 @@
             <div class="card-header flex justify-between align-center">
                 <div class="flex align-center gap-10">
                     <h2 class="m-0" style="font-size: 1.25rem;">User Watch Activity</h2>
-                    <span style="font-size: 0.82rem; color: var(--text-muted);">(What users have been watching)</span>
                 </div>
-                <span style="font-size: 0.82rem; color: var(--text-muted);">Latest sessions across all accounts</span>
             </div>
 
             {% if stats.recent_history and stats.recent_history|length > 0 %}
@@ -250,25 +249,25 @@
                         <tr>
                             <td>
                                 <div class="flex align-center gap-8">
-                                    <div style="width: 26px; height: 26px; border-radius: 50%; background: var(--surface-hover); display: flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: bold; color: var(--text);">
-                                        {{ h.username[:1].upper() }}
-                                    </div>
                                     <strong>{{ h.username }}</strong>
                                 </div>
                             </td>
                             <td>
                                 <div class="flex align-center">
                                     {% if h.poster_filename %}
-                                    <img src="/metadata/{{ h.poster_filename }}" class="history-poster-thumb" alt="Poster">
+                                    <img src="/metadata/{{ h.poster_filename }}" class="history-poster-thumb"
+                                        alt="Poster">
                                     {% else %}
                                     <div class="history-poster-thumb flex align-center justify-center">
-                                        <i data-lucide="film" style="width: 14px; height: 14px; color: var(--text-muted);"></i>
+                                        <i data-lucide="film"
+                                            style="width: 14px; height: 14px; color: var(--text-muted);"></i>
                                     </div>
                                     {% endif %}
                                     <div>
                                         <div style="font-weight: 600; color: var(--text);">{{ h.title }}</div>
                                         {% if h.season_episode %}
-                                        <div style="font-size: 0.78rem; color: var(--text-muted);">{{ h.season_episode }}</div>
+                                        <div style="font-size: 0.78rem; color: var(--text-muted);">{{ h.season_episode
+                                            }}</div>
                                         {% elif h.year %}
                                         <div style="font-size: 0.78rem; color: var(--text-muted);">{{ h.year }}</div>
                                         {% endif %}
@@ -276,19 +275,22 @@
                                 </div>
                             </td>
                             <td>
-                                <span style="text-transform: uppercase; font-size: 0.75rem; font-weight: 600; color: var(--text-muted);">
+                                <span
+                                    style="text-transform: uppercase; font-size: 0.75rem; font-weight: 600; color: var(--text-muted);">
                                     {{ h.media_type }}
                                 </span>
                             </td>
                             <td>
-                                <div style="min-width: 140px;">
+                                <div style="min-width: 160px;">
                                     {% if h.is_completed %}
-                                    <span class="badge" style="background: rgba(76, 175, 80, 0.2); color: #4caf50; font-size: 0.75rem; font-weight: 600; padding: 3px 8px; border-radius: 4px;">
+                                    <span class="badge"
+                                        style="background: rgba(76, 175, 80, 0.2); color: #4caf50; font-size: 0.75rem; font-weight: 600; padding: 3px 8px; border-radius: 4px;">
                                         ✓ Finished
                                     </span>
                                     {% else %}
-                                    <div class="flex justify-between" style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 3px;">
-                                        <span>{{ h.progress }}%</span>
+                                    <div class="flex justify-between"
+                                        style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 3px; font-variant-numeric: tabular-nums;">
+                                        <span>{{ h.time_display }}</span>
                                     </div>
                                     <div class="kpi-bar-bg" style="height: 5px;">
                                         <div class="kpi-bar-fill" style="width: {{ h.progress }}%;"></div>
@@ -297,7 +299,8 @@
                                 </div>
                             </td>
                             <td>
-                                <span style="font-size: 0.85rem; color: var(--text-muted);" title="{{ h.last_watched }}">
+                                <span style="font-size: 0.85rem; color: var(--text-muted);"
+                                    title="{{ h.last_watched }}">
                                     {{ h.time_ago }}
                                 </span>
                             </td>
@@ -310,7 +313,8 @@
             <div class="empty-state-box">
                 <i data-lucide="history"></i>
                 <div style="font-weight: 600; color: var(--text);">No Watch History Yet</div>
-                <div style="font-size: 0.85rem;">As users watch movies and shows, their activity will be chronicled here.</div>
+                <div style="font-size: 0.85rem;">As users watch movies and shows, their activity will be chronicled
+                    here.</div>
             </div>
             {% endif %}
         </div>
@@ -319,9 +323,6 @@
         <div class="card mb-24">
             <div class="card-header flex justify-between align-center">
                 <h2 class="m-0" style="font-size: 1.25rem;">User Accounts</h2>
-                <a href="/settings" class="btn btn-secondary btn-sm" style="text-decoration: none;">
-                    <i data-lucide="user-plus"></i> Manage Users
-                </a>
             </div>
 
             <div style="overflow-x: auto;">
@@ -338,25 +339,26 @@
                         <tr>
                             <td>
                                 <div class="flex align-center gap-10">
-                                    <div style="width: 30px; height: 30px; border-radius: 50%; background: var(--accent); display: flex; align-items: center; justify-content: center; font-weight: bold;">
-                                        {{ u.username[:1].upper() }}
-                                    </div>
                                     <span style="font-weight: 600;">{{ u.username }}</span>
                                 </div>
                             </td>
                             <td>
                                 {% if u.is_admin %}
-                                <span class="badge" style="background: rgba(229, 9, 20, 0.2); color: var(--accent); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">ADMIN</span>
+                                <span class="badge"
+                                    style="background: rgba(229, 9, 20, 0.2); color: var(--accent); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">ADMIN</span>
                                 {% endif %}
                                 {% if u.kids_mode %}
-                                <span class="badge" style="background: rgba(33, 150, 243, 0.2); color: #2196f3; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">KIDS MODE</span>
+                                <span class="badge"
+                                    style="background: rgba(33, 150, 243, 0.2); color: #2196f3; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">KIDS
+                                    MODE</span>
                                 {% endif %}
                                 {% if not u.is_admin and not u.kids_mode %}
                                 <span style="font-size: 0.8rem; color: var(--text-muted);">Standard User</span>
                                 {% endif %}
                             </td>
                             <td>
-                                <strong>{{ u.items_watched }}</strong> <span style="color: var(--text-muted); font-size: 0.82rem;">items</span>
+                                <strong>{{ u.items_watched }}</strong> <span
+                                    style="color: var(--text-muted); font-size: 0.82rem;">items</span>
                             </td>
                         </tr>
                         {% endfor %}
@@ -376,22 +378,20 @@
         document.addEventListener('DOMContentLoaded', refreshIcons);
 
         let isFetching = false;
-        async function fetchLiveStats(isManual = false) {
+        async function fetchLiveStats() {
             if (isFetching) return;
             isFetching = true;
-            
-            const refreshIcon = document.getElementById('refreshIcon');
-            if (isManual && refreshIcon) {
-                refreshIcon.style.animation = 'spin 1s linear infinite';
-            }
 
             try {
                 const res = await fetch('/api/server-dashboard/stats');
                 if (!res.ok) throw new Error('Failed to fetch stats');
                 const data = await res.json();
-                
+
                 updateMetricsUI(data.metrics);
-                updateHistoryUI(data.stats.recent_history);
+                if (data.stats) {
+                    updateHistoryUI(data.stats.recent_history);
+                    updateStatsUI(data.stats);
+                }
 
                 const updatedText = document.getElementById('lastUpdatedText');
                 if (updatedText) {
@@ -402,9 +402,6 @@
                 console.debug("[Server Dashboard] Polling update failed:", err);
             } finally {
                 isFetching = false;
-                if (refreshIcon) {
-                    refreshIcon.style.animation = '';
-                }
             }
         }
 
@@ -443,8 +440,52 @@
             const kpiUptime = document.getElementById('kpiUptime');
             if (kpiUptime) kpiUptime.textContent = metrics.uptime_str;
 
+            // Storage & Volumes
+            if (metrics.disks) {
+                renderDisks(metrics.disks);
+            }
+
             // Active Streams cards
             renderActiveStreams(metrics.active_streams);
+        }
+
+        function renderDisks(disks) {
+            const list = document.getElementById('disksList');
+            if (!list || !disks) return;
+
+            if (disks.length === 0) {
+                list.innerHTML = '<div style="font-size: 0.85rem; color: var(--text-muted); padding: 8px 0;">No mounted media volumes found.</div>';
+                return;
+            }
+
+            let html = '';
+            disks.forEach(d => {
+                const color = d.percent > 90 ? '#f44336' : (d.percent > 75 ? '#ff9800' : 'var(--accent)');
+                const textColor = d.percent > 90 ? '#f44336' : (d.percent > 75 ? '#ff9800' : 'var(--text)');
+                html += `
+                    <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--surface-hover); border-radius: 6px; padding: 12px 16px; gap: 10px; display: flex; flex-direction: column;">
+                        <div class="flex justify-between align-center mb-5">
+                            <div class="flex align-center gap-10">
+                                <i data-lucide="hard-drive" style="width: 18px; height: 18px; color: var(--text-muted);"></i>
+                                <span style="font-weight: 600; font-size: 0.95rem;">${escapeHtml(d.name)}</span>
+                            </div>
+                            <span style="font-size: 0.85rem; font-weight: 600; color: ${textColor};">
+                                ${d.percent}% Used
+                            </span>
+                        </div>
+                        <div class="kpi-bar-bg mb-5" style="height: 7px;">
+                            <div class="kpi-bar-fill" style="width: ${d.percent}%; background: ${color};"></div>
+                        </div>
+                        <div class="flex justify-between" style="font-size: 0.78rem; color: var(--text-muted);">
+                            <span>Used: <strong>${d.used_gb} / ${d.total_gb} GB</strong></span>
+                            <span>Free: <strong>${d.free_gb} GB</strong></span>
+                        </div>
+                    </div>
+                `;
+            });
+
+            list.innerHTML = html;
+            refreshIcons();
         }
 
         function renderActiveStreams(streams) {
@@ -467,12 +508,13 @@
 
             let cardsHtml = '<div class="active-streams-grid">';
             streams.forEach(s => {
-                const posterHtml = s.poster_filename 
+                const posterHtml = s.poster_filename
                     ? `<img src="/metadata/${s.poster_filename}" class="stream-poster" alt="Poster">`
                     : `<div class="stream-poster flex align-center justify-center"><i data-lucide="film" style="color: var(--text-muted); width: 24px; height: 24px;"></i></div>`;
-                
+
                 const isTranscode = s.play_type && s.play_type.toLowerCase().includes('transcode');
                 const badgeClass = isTranscode ? 'badge-transcode' : 'badge-direct-play';
+                const timeText = s.time_display || `${s.progress}%`;
 
                 cardsHtml += `
                     <div class="stream-card">
@@ -492,8 +534,8 @@
                             <div class="kpi-bar-bg mt-5">
                                 <div class="kpi-bar-fill" style="width: ${s.progress}%;"></div>
                             </div>
-                            <div class="flex justify-between" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">
-                                <span>${s.progress}%</span>
+                            <div class="flex justify-between" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; font-variant-numeric: tabular-nums;">
+                                <span>${escapeHtml(timeText)}</span>
                                 ${s.ip ? `<span>IP: ${escapeHtml(s.ip)}</span>` : ''}
                             </div>
                         </div>
@@ -506,6 +548,27 @@
             refreshIcons();
         }
 
+        function formatSeconds(seconds) {
+            if (!seconds || isNaN(seconds) || seconds < 0) return "0:00";
+            const sec = Math.floor(seconds);
+            const h = Math.floor(sec / 3600);
+            const m = Math.floor((sec % 3600) / 60);
+            const s = Math.floor(sec % 60);
+            if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+            return `${m}:${s.toString().padStart(2, '0')}`;
+        }
+
+        function getTimeDisplay(h) {
+            if (h.time_display) return h.time_display;
+            if (h.duration && h.duration > 0) {
+                const actualSec = Math.floor(h.current_time || 0);
+                const durSec = Math.floor(h.duration);
+                const timeLeft = Math.max(0, durSec - actualSec);
+                return `${formatSeconds(actualSec)} / ${formatSeconds(durSec)} -${formatSeconds(timeLeft)}`;
+            }
+            return `${h.progress}%`;
+        }
+
         function updateHistoryUI(history) {
             const body = document.getElementById('recentHistoryBody');
             if (!body || !history || history.length === 0) return;
@@ -516,11 +579,12 @@
                     ? `<img src="/metadata/${h.poster_filename}" class="history-poster-thumb" alt="Poster">`
                     : `<div class="history-poster-thumb flex align-center justify-center"><i data-lucide="film" style="width: 14px; height: 14px; color: var(--text-muted);"></i></div>`;
 
+                const timeStr = getTimeDisplay(h);
                 const progressHtml = h.is_completed
                     ? `<span class="badge" style="background: rgba(76, 175, 80, 0.2); color: #4caf50; font-size: 0.75rem; font-weight: 600; padding: 3px 8px; border-radius: 4px;">✓ Finished</span>`
                     : `
-                        <div class="flex justify-between" style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 3px;">
-                            <span>${h.progress}%</span>
+                        <div class="flex justify-between" style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 3px; font-variant-numeric: tabular-nums;">
+                            <span>${escapeHtml(timeStr)}</span>
                         </div>
                         <div class="kpi-bar-bg" style="height: 5px;">
                             <div class="kpi-bar-fill" style="width: ${h.progress}%;"></div>
@@ -531,9 +595,6 @@
                     <tr>
                         <td>
                             <div class="flex align-center gap-8">
-                                <div style="width: 26px; height: 26px; border-radius: 50%; background: var(--surface-hover); display: flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: bold; color: var(--text);">
-                                    ${h.username ? h.username.charAt(0).toUpperCase() : 'U'}
-                                </div>
                                 <strong>${escapeHtml(h.username)}</strong>
                             </div>
                         </td>
@@ -552,7 +613,7 @@
                             </span>
                         </td>
                         <td>
-                            <div style="min-width: 140px;">
+                            <div style="min-width: 160px;">
                                 ${progressHtml}
                             </div>
                         </td>
@@ -569,6 +630,24 @@
             refreshIcons();
         }
 
+        function updateStatsUI(stats) {
+            if (!stats) return;
+            if (stats.library) {
+                const elMovies = document.getElementById('statMovies');
+                const elShows = document.getElementById('statShows');
+                const elEpisodes = document.getElementById('statEpisodes');
+                const elPhotos = document.getElementById('statPhotos');
+                if (elMovies && stats.library.movies !== undefined) elMovies.textContent = stats.library.movies;
+                if (elShows && stats.library.tv_shows !== undefined) elShows.textContent = stats.library.tv_shows;
+                if (elEpisodes && stats.library.tv_episodes !== undefined) elEpisodes.textContent = stats.library.tv_episodes;
+                if (elPhotos && stats.library.photos !== undefined) elPhotos.textContent = stats.library.photos;
+            }
+            if (stats.total_users !== undefined) {
+                const elUsers = document.getElementById('statUsers');
+                if (elUsers) elUsers.textContent = stats.total_users;
+            }
+        }
+
         function escapeHtml(str) {
             if (!str) return '';
             return String(str)
@@ -579,8 +658,8 @@
                 .replace(/'/g, '&#039;');
         }
 
-        // Auto-poll every 4 seconds
-        setInterval(fetchLiveStats, 4000);
+        // Auto-poll live telemetry every 5 seconds (standard dashboard telemetry rate)
+        setInterval(fetchLiveStats, 5000);
     </script>
 </body>
 

@@ -59,8 +59,9 @@
    2. BASE ELEMENTS
    ========================================================================== */
 
-/* Hide scrollbars everywhere (content still scrolls) */
-* {
+/* Universal box-sizing and scrollbar hiding */
+*, *::before, *::after {
+    box-sizing: border-box;
     scrollbar-width: none;
 }
 
@@ -68,12 +69,23 @@
     display: none;
 }
 
+html {
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+}
+
 body {
-    font-family: sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     background-color: var(--bg);
     color: var(--text);
     margin: 0;
     padding: 20px;
+    overflow-x: hidden;
+}
+
+img, video {
+    max-width: 100%;
+    height: auto;
 }
 
 h1,
@@ -749,6 +761,10 @@ input[type="checkbox"]:checked {
 }
 
 /* Header search */
+.mobile-search-toggle {
+    display: none !important;
+}
+
 .search-box {
     position: relative;
 }
@@ -1544,6 +1560,71 @@ google-cast-launcher {
     border-radius: 8px;
 }
 
+.volume-list-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 15px;
+}
+
+.volume-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+}
+
+.volume-delete-form {
+    flex-shrink: 0;
+    margin: 0;
+}
+
+.user-list-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 20px;
+}
+
+.user-header-row {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+}
+
+.user-name-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    text-align: left;
+}
+
+.user-controls-row {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+}
+
+.user-permissions-form {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+}
+
+.user-permissions-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.invite-list-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 20px;
+}
+
 .badge-active,
 .badge-inactive {
     font-size: 0.85em;
@@ -1777,66 +1858,7 @@ google-cast-launcher {
 
 
 /* ==========================================================================
-   14. MOBILE
-   ========================================================================== */
-
-@media (max-width: 768px) {
-    .layout-wrapper {
-        flex-direction: column;
-        padding: 0 10px;
-    }
-
-    .sidebar {
-        width: 100%;
-        margin-right: 0;
-        margin-bottom: 20px;
-        flex-direction: row;
-        overflow-x: auto;
-        padding-bottom: 10px;
-    }
-
-    .header {
-        padding: 15px 10px;
-        flex-direction: column;
-    }
-
-    .search-input {
-        width: 100%;
-    }
-
-    .info-layout {
-        flex-direction: column;
-        align-items: center;
-        gap: 20px;
-    }
-
-    .info-poster {
-        width: 100%;
-        max-width: 300px;
-    }
-
-    .info-title {
-        font-size: 2em;
-        text-align: center;
-    }
-
-    .play-btn {
-        width: 100%;
-        justify-content: center;
-    }
-
-    .flex {
-        flex-wrap: wrap;
-    }
-
-    .grid-row,
-    .carousel-row {
-        justify-content: center;
-    }
-}
-
-/* ==========================================================================
-   15. SERVER DASHBOARD
+   14. SERVER DASHBOARD
    ========================================================================== */
 
 .server-dashboard-container {
@@ -1878,27 +1900,32 @@ google-cast-launcher {
 }
 
 @keyframes livePulse {
-    0% { transform: scale(0.9); opacity: 0.7; }
-    50% { transform: scale(1.25); opacity: 1; }
-    100% { transform: scale(0.9); opacity: 0.7; }
+    0% {
+        transform: scale(0.9);
+        opacity: 0.7;
+    }
+
+    50% {
+        transform: scale(1.25);
+        opacity: 1;
+    }
+
+    100% {
+        transform: scale(0.9);
+        opacity: 0.7;
+    }
 }
 
 .dashboard-kpi-grid {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 16px;
-    margin-bottom: 24px;
+    padding: 20px;
 }
 
 @media (max-width: 1024px) {
     .dashboard-kpi-grid {
         grid-template-columns: repeat(2, 1fr);
-    }
-}
-
-@media (max-width: 600px) {
-    .dashboard-kpi-grid {
-        grid-template-columns: 1fr;
     }
 }
 
@@ -1913,10 +1940,6 @@ google-cast-launcher {
     position: relative;
     overflow: hidden;
     transition: transform 0.2s ease, border-color 0.2s ease;
-}
-
-.kpi-card:hover {
-    border-color: rgba(255, 255, 255, 0.2);
 }
 
 .kpi-header {
@@ -2088,4 +2111,732 @@ google-cast-launcher {
     background: #111;
     vertical-align: middle;
     margin-right: 10px;
+}
+
+/* ==========================================================================
+   15. MOBILE & RESPONSIVE STYLES
+   ========================================================================== */
+
+@media (max-width: 768px) {
+    /* Base Elements */
+    body {
+        padding: 12px 10px;
+        -webkit-text-size-adjust: 100%;
+    }
+
+    input, select, textarea {
+        font-size: 16px !important; /* Prevents auto-zoom on iOS Safari */
+    }
+
+    /* Layout & Containers */
+    .container {
+        padding: 10px 4px;
+        max-width: 100%;
+    }
+
+    .layout-wrapper {
+        flex-direction: column;
+        padding: 0 4px;
+    }
+
+    /* Header Bar */
+    .header {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 4px;
+        margin-bottom: 16px;
+    }
+
+    .header > .flex:first-child {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+    }
+
+    .header:has(.search-box) > .flex:first-child {
+        display: contents;
+    }
+
+    .header h1 {
+        font-size: 1.4rem;
+        order: 1;
+        margin: 0;
+    }
+
+    .header > .flex:last-child {
+        order: 2;
+        gap: 14px;
+        margin-left: auto;
+    }
+
+    .mobile-search-toggle {
+        display: inline-flex !important;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+    }
+
+    .mobile-search-toggle.active {
+        color: var(--accent);
+    }
+
+    .search-box {
+        display: none; /* Collapsed by default on mobile to maximize screen real-estate */
+        order: 3;
+        width: 100%;
+        margin-top: 6px;
+    }
+
+    .search-box.open {
+        display: block !important;
+        animation: searchSlideDown 0.18s ease-out;
+    }
+
+    @keyframes searchSlideDown {
+        from {
+            opacity: 0;
+            transform: translateY(-4px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    .search-input {
+        width: 100%;
+        font-size: 16px;
+        padding: 9px 16px;
+    }
+
+    .search-results {
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
+        max-height: 55vh;
+    }
+
+    /* Sidebar Navigation as horizontal pill-bar */
+    .sidebar {
+        width: 100%;
+        margin-right: 0;
+        margin-bottom: 18px;
+        flex-direction: row;
+        overflow-x: auto;
+        gap: 8px;
+        padding: 2px 2px 8px 2px;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .sidebar-link {
+        padding: 8px 14px;
+        font-size: 13px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--surface-hover);
+        border-radius: 20px;
+        white-space: nowrap;
+        flex-shrink: 0;
+    }
+
+    .sidebar-link.active {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #ffffff;
+    }
+
+    .sidebar-link svg,
+    .sidebar-link i {
+        min-width: 18px;
+        min-height: 18px;
+        width: 18px;
+        height: 18px;
+    }
+
+    /* Cards & Grids */
+    .card {
+        padding: 16px 12px;
+        margin-bottom: 16px;
+        border-radius: var(--radius);
+    }
+
+    .card-header {
+        flex-wrap: wrap;
+        gap: 10px;
+    }
+
+    .carousel-container {
+        margin: 0 -4px;
+    }
+
+    .carousel-row {
+        padding: 10px 4px;
+        gap: 12px;
+        justify-content: flex-start !important; /* CRITICAL: Never center overflow-x to allow left scrolling */
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .carousel-arrow {
+        display: none !important; /* Touch swipe replaces hover arrows on mobile */
+    }
+
+    .grid-row {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(105px, 1fr));
+        gap: 12px;
+        padding-bottom: 20px;
+        justify-content: flex-start;
+    }
+
+    .grid-row .media-card {
+        min-width: 0;
+        width: 100%;
+    }
+
+    .grid-row .poster-container {
+        width: 100%;
+        height: auto;
+        aspect-ratio: 2 / 3;
+    }
+
+    .grid-row .media-title,
+    .grid-row .media-year {
+        max-width: 100%;
+    }
+
+    .photo-card {
+        min-width: 110px;
+    }
+
+    .photo-poster-container {
+        width: 100%;
+        height: auto;
+        aspect-ratio: 1 / 1;
+    }
+
+    /* Movie & Series Detail Pages */
+    .info-layout {
+        flex-direction: column;
+        align-items: center;
+        gap: 20px;
+        margin-bottom: 24px;
+    }
+
+    .info-poster {
+        width: 160px;
+        max-width: 50vw;
+        height: auto;
+        aspect-ratio: 2 / 3;
+    }
+
+    .info-details {
+        width: 100%;
+        text-align: left;
+    }
+
+    .info-title {
+        font-size: 1.6em;
+        text-align: left;
+        word-break: break-word;
+    }
+
+    .info-details .flex.align-center.gap-15.mb-10 {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+    }
+
+    .info-details .flex.gap-15.mb-20 {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+    }
+
+    .info-details .play-btn {
+        padding: 10px 18px;
+        font-size: 1rem;
+    }
+
+    .cast-row {
+        gap: 10px;
+        padding-bottom: 8px;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .cast-member {
+        width: 72px;
+        min-width: 72px;
+    }
+
+    .cast-avatar {
+        width: 56px;
+        height: 56px;
+    }
+
+    .cast-name {
+        font-size: 0.75rem;
+    }
+
+    .cast-character {
+        font-size: 0.7rem;
+    }
+
+    .season-tabs {
+        gap: 8px;
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        padding-bottom: 6px;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .season-tab {
+        padding: 6px 14px;
+        font-size: 0.85rem;
+        flex-shrink: 0;
+    }
+
+    /* Video Player Mobile Controls */
+    .player-controls {
+        padding: 10px 12px 18px 12px;
+    }
+
+    .player-header {
+        padding: 12px 14px;
+    }
+
+    .player-title {
+        font-size: 1.1rem;
+    }
+
+    .player-subtitle {
+        font-size: 0.82rem;
+    }
+
+    .controls-row {
+        flex-wrap: wrap;
+        gap: 10px;
+    }
+
+    .controls-left {
+        order: 1;
+        flex: 1 1 100%;
+        justify-content: center;
+        margin-bottom: 2px;
+    }
+
+    .time-display {
+        font-size: 12px;
+        text-align: center;
+        letter-spacing: 0.02em;
+    }
+
+    .controls-center {
+        order: 2;
+        flex: 1;
+        justify-content: flex-start;
+        gap: 8px;
+    }
+
+    .controls-right {
+        order: 3;
+        flex: 0 0 auto;
+        gap: 6px;
+    }
+
+    .volume-container {
+        display: none !important; /* Mobile hardware buttons handle volume */
+    }
+
+    .control-btn,
+    button.control-btn,
+    a.control-btn,
+    a.player-close-btn,
+    .player-close-btn {
+        width: 38px;
+        height: 38px;
+        min-width: 38px;
+        min-height: 38px;
+    }
+
+    .control-btn svg,
+    .control-btn i,
+    .player-close-btn svg,
+    .player-close-btn i {
+        width: 18px;
+        height: 18px;
+    }
+
+    .play-btn-large,
+    button.play-btn-large {
+        width: 44px;
+        height: 44px;
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    .play-btn-large svg,
+    .play-btn-large i {
+        width: 22px;
+        height: 22px;
+    }
+
+    .skip-marker-btn {
+        padding: 8px 14px;
+        font-size: 0.85rem;
+    }
+
+    /* Server Dashboard */
+    .server-dashboard-container {
+        padding: 12px 6px 40px 6px;
+    }
+
+    .dashboard-header-bar {
+        margin-bottom: 16px;
+        gap: 12px;
+    }
+
+    .dashboard-header-bar h1 {
+        font-size: 1.4rem;
+    }
+
+    .dashboard-kpi-grid {
+        padding: 0;
+        margin-bottom: 16px;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
+    }
+
+    .kpi-card {
+        padding: 12px;
+        gap: 4px;
+    }
+
+    .kpi-header {
+        font-size: 0.72rem;
+    }
+
+    .kpi-value {
+        font-size: 1.4rem;
+    }
+
+    .kpi-subtext {
+        font-size: 0.72rem;
+    }
+
+    .storage-system-grid {
+        grid-template-columns: 1fr !important;
+        gap: 16px;
+        margin-bottom: 16px !important;
+    }
+
+    .active-streams-grid {
+        grid-template-columns: 1fr;
+        gap: 10px;
+    }
+
+    .stream-card {
+        padding: 10px;
+        gap: 10px;
+    }
+
+    .stream-poster {
+        width: 48px;
+        height: 72px;
+    }
+
+    .stream-title {
+        font-size: 0.88rem;
+    }
+
+    .history-table {
+        min-width: 480px;
+    }
+
+    .history-table th,
+    .history-table td {
+        padding: 8px 10px;
+        font-size: 0.8rem;
+    }
+
+    .history-poster-thumb {
+        width: 24px;
+        height: 36px;
+        margin-right: 6px;
+    }
+
+    /* Settings Page */
+    .card-header h2 {
+        font-size: 1.15rem;
+    }
+
+    form.flex.gap-10,
+    .card form.flex {
+        flex-direction: column;
+        align-items: stretch !important;
+        gap: 10px;
+    }
+
+    .card form.flex > * {
+        width: 100% !important;
+    }
+
+    .card form.flex .flex-1 {
+        width: 100% !important;
+    }
+
+    /* 1. Media Volume Paths Form (Stacked & Full Width) */
+    .volume-add-form {
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 10px !important;
+        width: 100% !important;
+    }
+
+    .volume-input-browse-group {
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 10px !important;
+        width: 100% !important;
+    }
+
+    .volume-input-browse-group input#pathInput {
+        width: 100% !important;
+    }
+
+    .volume-browse-btn {
+        width: 100% !important;
+        justify-content: center !important;
+        display: flex !important;
+        align-items: center !important;
+    }
+
+    .volume-select-container {
+        width: 100% !important;
+        position: relative !important;
+    }
+
+    .volume-select-btn {
+        width: 100% !important;
+        display: flex !important;
+        justify-content: space-between !important;
+        align-items: center !important;
+        box-sizing: border-box !important;
+    }
+
+    .volume-select-menu {
+        width: 100% !important;
+        min-width: 100% !important;
+        max-width: 100% !important;
+        left: 0 !important;
+        right: 0 !important;
+        top: calc(100% + 5px) !important;
+        box-sizing: border-box !important;
+    }
+
+    .volume-select-menu .res-btn {
+        width: 100% !important;
+        text-align: left !important;
+        padding: 10px 14px !important;
+        font-size: 15px !important;
+    }
+
+    .volume-add-btn {
+        width: 100% !important;
+        justify-content: center !important;
+        display: flex !important;
+        align-items: center !important;
+    }
+
+    /* 2. Media Volumes (Vertically Centered in Row) */
+    .volume-list-item,
+    li.list-item.volume-list-item {
+        display: flex !important;
+        flex-direction: row !important;
+        justify-content: space-between !important;
+        align-items: center !important;
+        gap: 12px !important;
+        padding: 12px 14px !important;
+        width: 100% !important;
+    }
+
+    .volume-list-item .volume-info {
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+        word-break: break-all !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 10px !important;
+        text-align: left !important;
+        justify-content: flex-start !important;
+    }
+
+    .volume-list-item .volume-delete-form {
+        flex: 0 0 auto !important;
+        width: auto !important;
+        margin: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+    }
+
+    .volume-list-item .volume-delete-form button {
+        white-space: nowrap !important;
+    }
+
+    /* 3. Users & Invitations (User Name Left, Permissions Column) */
+    .user-list-item,
+    li.list-item.user-list-item {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 12px !important;
+        padding: 14px 12px !important;
+        width: 100% !important;
+    }
+
+    .user-header-row {
+        width: 100% !important;
+        display: flex !important;
+        flex-direction: row !important;
+        justify-content: space-between !important;
+        align-items: center !important;
+        gap: 10px !important;
+    }
+
+    .user-name-label {
+        flex: 1 1 auto !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 8px !important;
+        text-align: left !important;
+        justify-content: flex-start !important;
+    }
+
+    .user-name-label strong {
+        text-align: left !important;
+    }
+
+    .user-delete-form {
+        flex: 0 0 auto !important;
+        margin: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+    }
+
+    .user-controls-row {
+        width: 100% !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 10px !important;
+    }
+
+    .user-permissions-form {
+        width: 100% !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 8px !important;
+    }
+
+    .user-permissions-group {
+        width: 100% !important;
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 6px !important;
+    }
+
+    .user-permissions-group .toggle-pill {
+        width: 100% !important;
+    }
+
+    .user-permissions-group .toggle-pill span {
+        display: block !important;
+        width: 100% !important;
+        text-align: center !important;
+        padding: 8px 10px !important;
+        font-size: 13px !important;
+        box-sizing: border-box !important;
+    }
+
+    /* Pending Invitations */
+    .invite-list-item,
+    li.list-item.invite-list-item {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        gap: 10px !important;
+        padding: 14px 12px !important;
+        width: 100% !important;
+    }
+
+    .invite-info {
+        width: 100% !important;
+        text-align: left !important;
+    }
+
+    .invite-actions {
+        width: 100% !important;
+        display: flex !important;
+        justify-content: flex-start !important;
+        gap: 10px !important;
+        flex-wrap: wrap !important;
+    }
+
+    /* Setup & Auth */
+    .setup-box {
+        max-width: 92vw;
+        padding: 24px 18px;
+        margin: 12px auto;
+    }
+
+    /* Modals & Dropdowns */
+    .modal-content {
+        width: 94vw;
+        max-width: 94vw;
+        padding: 18px 14px;
+        margin: 10px;
+    }
+
+    .dropdown-menu {
+        max-width: 90vw;
+    }
+
+    .inbox-menu {
+        right: -10px;
+        min-width: 280px;
+        max-width: 92vw;
+    }
+}
+
+/* Extra breakpoint for compact mobile screens (max-width: 480px) */
+@media (max-width: 480px) {
+    body {
+        padding: 8px 6px;
+    }
+
+    .dashboard-kpi-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .grid-row {
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+    }
+
+    .media-title {
+        font-size: 0.78rem;
+    }
+
+    .media-year {
+        font-size: 0.72rem;
+    }
+
+    .season-tab {
+        padding: 6px 12px;
+        font-size: 0.8rem;
+    }
 }

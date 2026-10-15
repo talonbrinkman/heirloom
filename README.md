@@ -13,6 +13,7 @@ By leveraging a lightweight, API-first architecture using Python and FastAPI, He
 - Download Capability
 - Automated Media Management
 - Real-Time Stream Dashboard
+- Fully Responsive Mobile & Tablet Web UI
 - Role-Based Access Control
 - Kids Mode & Content Filtering
 - Stateful Playback & Watchlists
@@ -109,6 +110,8 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 - **Rewind on Resume**: Configure your preferred rewind buffer (e.g., 5s, 10s) in Settings so playback automatically skips back slightly when resuming interrupted movies or TV episodes, easing you back into context.
 - **Smart Remuxing & Direct Stream**: Media files with web-compatible video streams (H.264/AVC) are repacked on-the-fly into fragmented MP4 streams via zero-overhead stream copy (`-c:v copy`), even across MKV/AVI containers and seeking/resuming. Only audio or incompatible video codecs/resolutions are transcoded, eliminating unnecessary CPU/GPU load while delivering instant playback and bit-for-bit picture quality.
 - **Multi-Audio Track Selection**: Switch between multiple audio tracks (e.g., original language tracks, international dubs, director's commentary) on-the-fly directly from the player settings menu, with persistent per-title track memory and zero buffering loss.
+- **Mobile-First Responsive Interface**: Enjoy a streamlined, touch-optimized experience on smartphones and tablets featuring collapsible on-demand search, horizontal pill navigation, touch carousels, and thumb-friendly controls.
+- **Real-Time Telemetry & Volume Monitoring**: Access live stream health, real-time playback timestamps (`0:00 / 00:00 -00:00`), and mounted media storage metrics directly from the Server Dashboard with automated background telemetry.
 
 ## 🔮 Upcoming Improvements
 

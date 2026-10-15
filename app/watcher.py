@@ -8,14 +8,15 @@ from .models import VolumePath
 from .scanner import scan_media_library, VIDEO_EXTENSIONS
 
 class ScannerDebouncer:
-    def __init__(self, delay=5.0):
+    def __init__(self, delay=3.0):
         self.delay = delay
         self._timer = None
 
-    def trigger_scan(self):
+    def trigger_scan(self, delay=None):
         if self._timer is not None:
             self._timer.cancel()
-        self._timer = threading.Timer(self.delay, self._run_scan)
+        d = delay if delay is not None else self.delay
+        self._timer = threading.Timer(d, self._run_scan)
         self._timer.start()
 
     def _run_scan(self):
