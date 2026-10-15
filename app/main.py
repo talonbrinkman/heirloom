@@ -17,8 +17,13 @@ from .database import create_db_and_tables, get_session, engine
 from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest
 from .scanner import scan_media_library
 from .watcher import start_watcher, stop_watcher
-from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder
+from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams
 import subprocess
+import shutil
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 app = FastAPI(title="Heirloom")
 
@@ -34,30 +39,118 @@ app.add_middleware(
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[str, list[WebSocket]] = {}
+        self.session_clients: dict[str, dict[WebSocket, dict]] = {}
+        self.session_playback: dict[str, dict] = {}
 
-    async def connect(self, websocket: WebSocket, session_id: str):
+    async def connect(self, websocket: WebSocket, session_id: str, user_id: int = None, username: str = None, is_host: bool = False):
         await websocket.accept()
         if session_id not in self.active_connections:
             self.active_connections[session_id] = []
+            self.session_clients[session_id] = {}
+            if session_id not in self.session_playback:
+                self.session_playback[session_id] = {"current_time": 0.0, "is_paused": True, "updated_at": time.time()}
         self.active_connections[session_id].append(websocket)
+        self.session_clients[session_id][websocket] = {
+            "user_id": user_id,
+            "username": username or "Guest",
+            "is_host": is_host,
+            "is_ready": False,
+            "time": 0.0
+        }
 
     def disconnect(self, websocket: WebSocket, session_id: str):
+        was_host = False
+        if session_id in self.session_clients and websocket in self.session_clients[session_id]:
+            was_host = self.session_clients[session_id][websocket].get("is_host", False)
+            del self.session_clients[session_id][websocket]
+
         if session_id in self.active_connections:
             if websocket in self.active_connections[session_id]:
                 self.active_connections[session_id].remove(websocket)
             if not self.active_connections[session_id]:
                 del self.active_connections[session_id]
+                if session_id in self.session_clients:
+                    del self.session_clients[session_id]
+
+        remaining = len(self.active_connections.get(session_id, []))
+        return was_host, remaining
 
     async def broadcast(self, message: str, session_id: str, sender: WebSocket = None):
         if session_id in self.active_connections:
-            for connection in self.active_connections[session_id]:
+            for connection in list(self.active_connections[session_id]):
                 if connection != sender:
                     try:
                         await connection.send_text(message)
                     except Exception:
                         pass
 
+    def check_all_ready(self, session_id: str) -> bool:
+        clients = self.session_clients.get(session_id, {})
+        if not clients:
+            return True
+        return all(c.get("is_ready", False) for c in clients.values())
+
+    def get_waiting_users(self, session_id: str) -> list[str]:
+        clients = self.session_clients.get(session_id, {})
+        return [c.get("username", "User") for c in clients.values() if not c.get("is_ready", False)]
+
+    def get_session_time(self, session_id: str) -> float:
+        return self.session_playback.get(session_id, {}).get("current_time", 0.0)
+
 manager = ConnectionManager()
+
+SERVER_START_TIME = time.time()
+
+class ActiveStreamManager:
+    def __init__(self):
+        self.streams: dict[str, dict] = {}
+
+    def register_or_update(
+        self,
+        session_key: str,
+        user_id: int,
+        username: str,
+        media_type: str,
+        item_id: int,
+        title: str,
+        poster_filename: Optional[str],
+        progress: float,
+        current_time: float = 0.0,
+        duration: float = 0.0,
+        play_type: str = "Direct Play",
+        season_episode: str = "",
+        ip: str = ""
+    ):
+        self.streams[session_key] = {
+            "session_key": session_key,
+            "user_id": user_id,
+            "username": username,
+            "media_type": media_type,
+            "item_id": item_id,
+            "title": title,
+            "poster_filename": poster_filename,
+            "progress": round(progress, 1),
+            "current_time": round(current_time, 1),
+            "duration": round(duration, 1),
+            "play_type": play_type,
+            "season_episode": season_episode,
+            "ip": ip,
+            "last_seen": time.time(),
+            "started_at": self.streams.get(session_key, {}).get("started_at", time.time())
+        }
+
+    def stop_stream(self, session_key: str):
+        if session_key in self.streams:
+            del self.streams[session_key]
+
+    def get_active_streams(self, timeout: float = 20.0) -> list[dict]:
+        now = time.time()
+        expired = [k for k, v in self.streams.items() if now - v.get("last_seen", 0) > timeout]
+        for k in expired:
+            del self.streams[k]
+        return list(self.streams.values())
+
+active_stream_manager = ActiveStreamManager()
 
 os.makedirs("/config/metadata", exist_ok=True)
 app.mount("/metadata", StaticFiles(directory="/config/metadata"), name="metadata")
@@ -92,6 +185,7 @@ def on_startup():
             ("tvshow", "intro_end", "FLOAT"),
             ("tvshow", "credits_start", "FLOAT"),
             ("tvshow", "credits_end", "FLOAT"),
+            ("watchsession", "is_active", "BOOLEAN DEFAULT 1"),
         ]
         for table, col, dtype in columns:
             try:
@@ -170,6 +264,13 @@ def record_failed_attempt(request: Request):
         failed_attempts[ip]["count"] += 1
         failed_attempts[ip]["last_attempt"] = now
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    fav_path = "app/static/favicon.svg"
+    if os.path.exists(fav_path):
+        return FileResponse(fav_path, media_type="image/svg+xml")
+    return Response(status_code=204)
+
 # ----------------- AUTH & REGISTRATION -----------------
 
 @app.get("/login", response_class=HTMLResponse)
@@ -241,7 +342,9 @@ async def view_reset_password(request: Request, token: str, session: Session = D
     return templates.TemplateResponse(request=request, name="reset_password.html", context={"token": token, "username": user.username if user else ""})
 
 @app.post("/reset_password/{token}")
-async def process_reset_password(token: str, password: str = Form(...), session: Session = Depends(get_session)):
+async def process_reset_password(token: str, password: str = Form(...), confirm_password: Optional[str] = Form(None), session: Session = Depends(get_session)):
+    if confirm_password is not None and password != confirm_password:
+        return RedirectResponse(url=f"/reset_password/{token}?error=passwords_mismatch", status_code=303)
     reset_req = session.exec(select(PasswordResetRequest).where(PasswordResetRequest.token == token, PasswordResetRequest.status == "approved")).first()
     if not reset_req:
         return RedirectResponse(url="/login?reset_error=1", status_code=303)
@@ -279,9 +382,11 @@ async def deny_password_reset(request_id: int, current_user: User = Depends(get_
 
 
 @app.post("/setup")
-async def process_setup(username: str = Form(...), password: str = Form(...), session: Session = Depends(get_session)):
+async def process_setup(username: str = Form(...), password: str = Form(...), confirm_password: Optional[str] = Form(None), session: Session = Depends(get_session)):
     if session.exec(select(User)).first(): 
         return RedirectResponse(url="/", status_code=303)
+    if confirm_password is not None and password != confirm_password:
+        return RedirectResponse(url="/login?error=passwords_mismatch", status_code=303)
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
     new_user = User(username=username, password_hash=hashed, is_admin=True, session_token=str(uuid.uuid4()))
@@ -296,8 +401,11 @@ async def view_register(request: Request, invite: str = ""):
     return templates.TemplateResponse(request=request, name="register.html", context={"invite_code": invite})
 
 @app.post("/register")
-async def process_register(request: Request, username: str = Form(...), password: str = Form(...), invite_code: str = Form(...), session: Session = Depends(get_session)):
+async def process_register(request: Request, username: str = Form(...), password: str = Form(...), invite_code: str = Form(...), confirm_password: Optional[str] = Form(None), session: Session = Depends(get_session)):
     check_rate_limit(request)
+    if confirm_password is not None and password != confirm_password:
+        return RedirectResponse(url=f"/register?invite={invite_code}&error=passwords_mismatch", status_code=303)
+    invite = session.exec(select(InviteCode).where(InviteCode.code == invite_code)).first()
     expires = invite.expires_at if invite else None
     if expires and expires.tzinfo is None:
         expires = expires.replace(tzinfo=timezone.utc)
@@ -1167,13 +1275,16 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
                     next_episode_id = sorted_eps[i+1].id
                 break
         
-    duration = 0.0
-    try:
-        cmd = [get_ffprobe_path(), "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", item.file_path]
-        out = subprocess.check_output(cmd).decode().strip()
-        duration = float(out)
-    except:
-        pass
+    probe = probe_media_streams(item.file_path)
+    audio_tracks = probe.get("audio_tracks", [])
+    duration = probe.get("duration") or 0.0
+    if not duration:
+        try:
+            cmd = [get_ffprobe_path(), "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", item.file_path]
+            out = subprocess.check_output(cmd).decode().strip()
+            duration = float(out)
+        except:
+            pass
 
     # On-demand probe for chapters if not yet cached in DB
     if item.intro_start is None and item.credits_start is None:
@@ -1188,7 +1299,59 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
             session.commit()
 
     token = request.query_params.get("token", "")
-    return templates.TemplateResponse(request=request, name="player.html", context={"item": item, "media_type": media_type, "history": history_entry, "season_episode": season_episode, "duration": duration, "next_episode_id": next_episode_id, "subtitle_url": subtitle_url, "sync_session_id": sync, "user": current_user, "token": token, "is_mobile": mobile == "1"})
+    is_sync_host = False
+    sync_initial_time = 0.0
+    if sync:
+        ws_session = session.get(WatchSession, sync)
+        if not ws_session or not ws_session.is_active:
+            return RedirectResponse(url="/?session_ended=1", status_code=303)
+        is_sync_host = (ws_session.host_id == current_user.id)
+        if is_sync_host:
+            host_start = 0.0
+            if history_entry and duration and history_entry.progress > 0 and history_entry.progress < 100:
+                host_start = (history_entry.progress / 100.0) * duration
+                if current_user.rewind_seconds:
+                    host_start = max(0.0, host_start - current_user.rewind_seconds)
+            if sync not in manager.session_playback or manager.session_playback[sync].get("current_time", 0.0) == 0.0:
+                manager.session_playback[sync] = {"current_time": host_start, "is_paused": True, "updated_at": time.time()}
+            sync_initial_time = manager.session_playback[sync]["current_time"]
+        else:
+            sync_initial_time = manager.session_playback.get(sync, {}).get("current_time", 0.0)
+            if sync_initial_time == 0.0:
+                host_hist = session.exec(select(WatchHistory).where(WatchHistory.user_id == ws_session.host_id).where(WatchHistory.item_id == item_id).where(WatchHistory.media_type == media_type)).first()
+                if host_hist and duration and host_hist.progress > 0:
+                    sync_initial_time = (host_hist.progress / 100.0) * duration
+                    if sync not in manager.session_playback:
+                        manager.session_playback[sync] = {"current_time": sync_initial_time, "is_paused": True, "updated_at": time.time()}
+
+    # Register active stream telemetry immediately
+    session_key = f"{current_user.id}_{media_type}_{item_id}"
+    item_title = item.title
+    item_poster = getattr(item, 'season_poster_filename', None) or getattr(item, 'poster_filename', None)
+    season_ep_clean = season_episode.replace("<br>", " - ") if season_episode else ""
+    client_ip = request.client.host if request.client else ""
+    active_stream_manager.register_or_update(
+        session_key=session_key,
+        user_id=current_user.id,
+        username=current_user.username,
+        media_type=media_type,
+        item_id=item_id,
+        title=item_title,
+        poster_filename=item_poster,
+        progress=history_entry.progress if history_entry and history_entry.progress else 0.0,
+        current_time=0.0,
+        duration=duration or 0.0,
+        play_type="Direct Play",
+        season_episode=season_ep_clean,
+        ip=client_ip
+    )
+
+    return templates.TemplateResponse(request=request, name="player.html", context={
+        "item": item, "media_type": media_type, "history": history_entry, "season_episode": season_episode,
+        "duration": duration, "next_episode_id": next_episode_id, "subtitle_url": subtitle_url,
+        "sync_session_id": sync, "is_sync_host": is_sync_host, "sync_initial_time": sync_initial_time,
+        "user": current_user, "token": token, "is_mobile": mobile == "1", "audio_tracks": audio_tracks
+    })
 
 @app.get("/subtitle/{media_type}/{item_id}")
 async def get_subtitle(media_type: str, item_id: int, ext: str, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
@@ -1213,25 +1376,86 @@ async def get_subtitle(media_type: str, item_id: int, ext: str, current_user: Us
     return FileResponse(sub_file, media_type="text/vtt")
 
 @app.post("/progress/{media_type}/{item_id}")
-async def update_progress(media_type: str, item_id: int, progress: float = Form(...), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def update_progress(
+    request: Request,
+    media_type: str,
+    item_id: int,
+    progress: float = Form(...),
+    current_time: Optional[float] = Form(None),
+    duration: Optional[float] = Form(None),
+    play_type: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
     if not current_user: return {"status": "unauthorized"}
     
+    session_key = f"{current_user.id}_{media_type}_{item_id}"
     history_entry = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == item_id).where(WatchHistory.media_type == media_type)).first()
-    if history_entry:
-        if progress >= 95.0:
+    
+    if progress >= 95.0:
+        active_stream_manager.stop_stream(session_key)
+        if history_entry:
             session.delete(history_entry)
             session.commit()
-            return {"status": "completed"}
+        return {"status": "completed"}
+
+    if history_entry:
         history_entry.progress = progress
         history_entry.last_watched = datetime.now(timezone.utc)
         session.add(history_entry)
         session.commit()
+    else:
+        history_entry = WatchHistory(user_id=current_user.id, media_type=media_type, item_id=item_id, progress=progress, last_watched=datetime.now(timezone.utc))
+        session.add(history_entry)
+        session.commit()
+
+    # Track active stream
+    title = "Unknown"
+    poster = None
+    season_episode = ""
+    if media_type == "movie":
+        m = session.get(Movie, item_id)
+        if m:
+            title = m.title
+            poster = m.poster_filename
+    elif media_type == "tv":
+        t = session.get(TVShow, item_id)
+        if t:
+            title = t.title
+            poster = t.season_poster_filename or t.poster_filename
+            match = re.search(r'S(\d+)E(\d+)', t.file_path, re.IGNORECASE)
+            if match:
+                season_episode = f"S{int(match.group(1))} • E{int(match.group(2))}"
+                
+    client_ip = request.client.host if request.client else ""
+    active_stream_manager.register_or_update(
+        session_key=session_key,
+        user_id=current_user.id,
+        username=current_user.username,
+        media_type=media_type,
+        item_id=item_id,
+        title=title,
+        poster_filename=poster,
+        progress=progress,
+        current_time=current_time or 0.0,
+        duration=duration or 0.0,
+        play_type=play_type or "Direct Play",
+        season_episode=season_episode,
+        ip=client_ip
+    )
     return {"status": "success"}
+
+@app.post("/progress/{media_type}/{item_id}/stop")
+async def stop_progress(media_type: str, item_id: int, current_user: User = Depends(get_current_user)):
+    if current_user:
+        session_key = f"{current_user.id}_{media_type}_{item_id}"
+        active_stream_manager.stop_stream(session_key)
+    return {"status": "stopped"}
 
 from fastapi.responses import StreamingResponse
 
 @app.get("/stream/{media_type}/{item_id}")
-async def stream_video(media_type: str, item_id: int, res: str = "original", start: float = 0.0, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def stream_video(media_type: str, item_id: int, res: str = "original", start: float = 0.0, audio_track: int = 0, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
     if media_type == "movie" and not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
     if media_type == "tv" and not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
@@ -1239,19 +1463,129 @@ async def stream_video(media_type: str, item_id: int, res: str = "original", sta
     item = session.get(Movie if media_type == "movie" else TVShow, item_id)
     if not item or not os.path.exists(item.file_path): raise HTTPException(status_code=404, detail="Video file missing")
     
-    if res == "original" and item.file_path.lower().endswith(".mp4") and start == 0.0:
-        return FileResponse(item.file_path, media_type="video/mp4")
-        
     hw_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
     hw_profile = hw_config.value if hw_config else "auto"
 
-    cmd = [get_ffmpeg_path(), "-ss", str(start), "-i", item.file_path]
-    if res == "original" and start == 0.0:
-        cmd.extend(["-c:v", "copy"])
+    file_ext = os.path.splitext(item.file_path)[1].lower().lstrip(".")
+    is_mp4 = (file_ext in ["mp4", "m4v"])
+    probe = probe_media_streams(item.file_path)
+    audio_tracks = probe.get("audio_tracks", [])
+
+    selected_track = None
+    if 0 <= audio_track < len(audio_tracks):
+        selected_track = audio_tracks[audio_track]
+    elif audio_tracks:
+        selected_track = audio_tracks[0]
+        audio_track = 0
+
+    track_can_copy = selected_track.get("can_direct_stream", False) if selected_track else False
+    track_label = selected_track.get("label", f"Track {audio_track + 1}") if selected_track else "None"
+
+    # 1. Native Direct Play:
+    # Requires original resolution, MP4 container, start at 0:00, primary audio track (audio_track == 0),
+    # and web-compatible video & audio codecs.
+    is_direct_play = (
+        res == "original" and
+        is_mp4 and
+        start == 0.0 and
+        audio_track == 0 and
+        probe.get("can_direct_stream_video", True) and
+        track_can_copy
+    )
+    if is_direct_play:
+        headers = {
+            "X-Transcode-Active": "false",
+            "X-Transcode-Method": "Direct Play",
+            "X-Hardware-Accelerated": "false",
+            "X-Encoder": "none",
+            "X-Play-Type": "direct_play",
+            "X-Audio-Track": str(audio_track),
+        }
+        return FileResponse(item.file_path, media_type="video/mp4", headers=headers)
+
+    # 2. Smart Remuxing / Direct Stream:
+    # When video codec is already web-compatible (H.264) and native resolution is requested,
+    # stream-copy the video (-c:v copy). Map the specific chosen audio track (-map 0:a:N).
+    can_direct_stream_video = (res == "original" and probe.get("can_direct_stream_video", False))
+
+    cmd = [get_ffmpeg_path()]
+    if start > 0.0:
+        cmd.extend(["-ss", str(start)])
+    cmd.extend(["-i", item.file_path])
+    if start > 0.0 and can_direct_stream_video:
+        cmd.extend(["-avoid_negative_ts", "make_zero"])
+
+    # Stream mapping: map primary video and chosen audio track
+    cmd.extend(["-map", "0:v:0"])
+    if selected_track:
+        cmd.extend(["-map", f"0:a:{audio_track}"])
     else:
+        cmd.append("-an")
+
+    if can_direct_stream_video:
+        cmd.extend(["-c:v", "copy"])
+        is_transcode = False
+        encoder_type = "copy"
+        hw_accel = False
+        
+        if not selected_track:
+            transcode_method = "Direct Stream (Video Copy, No Audio)"
+            play_type = "remux"
+        elif track_can_copy:
+            cmd.extend(["-c:a", "copy"])
+            transcode_method = f"Direct Stream / Remux (Stream Copy, Audio: {track_label})"
+            play_type = "remux"
+        else:
+            # Video is copied directly; chosen audio track is downmixed/transcoded to stereo AAC
+            cmd.extend(["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-af", "aresample=async=1"])
+            transcode_method = f"Direct Stream (Video Copy, Audio: {track_label} -> AAC)"
+            encoder_type = "copy (audio: aac)"
+            play_type = "direct_stream"
+
+        cmd.extend([
+            "-max_muxing_queue_size", "1024",
+            "-f", "mp4",
+            "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+            "pipe:1"
+        ])
+    else:
+        # 3. Full Video Transcoding:
+        # Required when downscaling resolution (e.g. 720p/480p) or when source video codec
+        # is incompatible with direct browser playback (e.g. MPEG2, VC-1, VP8).
+        encoder_type, _ = get_working_encoder(profile=hw_profile)
         transcode_args = get_video_transcode_args(res=res, profile=hw_profile)
         cmd.extend(transcode_args)
-    cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ac", "2", "-af", "aresample=async=1", "-f", "mp4", "-movflags", "frag_keyframe+empty_moov", "pipe:1"])
+        
+        if selected_track:
+            cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ac", "2", "-af", "aresample=async=1"])
+            
+        cmd.extend([
+            "-max_muxing_queue_size", "1024",
+            "-f", "mp4",
+            "-movflags", "frag_keyframe+empty_moov",
+            "pipe:1"
+        ])
+        is_transcode = True
+        hw_accel = (encoder_type != "software")
+        method_names = {
+            "nvenc": "NVIDIA NVENC (h264_nvenc)",
+            "qsv": "Intel QuickSync (h264_qsv)",
+            "vaapi": "VA-API (h264_vaapi)",
+            "videotoolbox": "Apple VideoToolbox (h264_videotoolbox)",
+            "software": "Software CPU (libx264)"
+        }
+        base_method = method_names.get(encoder_type, encoder_type)
+        transcode_method = f"{base_method} (Audio: {track_label})"
+        play_type = "transcode"
+
+    headers = {
+        "X-Transcode-Active": "true" if is_transcode else "false",
+        "X-Transcode-Method": transcode_method,
+        "X-Hardware-Accelerated": "true" if hw_accel else "false",
+        "X-Encoder": encoder_type,
+        "X-Play-Type": play_type,
+        "X-Audio-Track": str(audio_track),
+    }
 
     def generate():
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -1264,7 +1598,92 @@ async def stream_video(media_type: str, item_id: int, res: str = "original", sta
         finally:
             process.kill()
             
-    return StreamingResponse(generate(), media_type="video/mp4")
+    return StreamingResponse(generate(), media_type="video/mp4", headers=headers)
+
+@app.get("/stream-info/{media_type}/{item_id}")
+async def get_stream_info(media_type: str, item_id: int, res: str = "original", start: float = 0.0, audio_track: int = 0, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    if media_type == "movie" and not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
+    if media_type == "tv" and not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
+    
+    item = session.get(Movie if media_type == "movie" else TVShow, item_id)
+    if not item or not os.path.exists(item.file_path): raise HTTPException(status_code=404, detail="Video file missing")
+    
+    hw_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
+    hw_profile = hw_config.value if hw_config else "auto"
+
+    file_ext = os.path.splitext(item.file_path)[1].lower().lstrip(".")
+    is_mp4 = (file_ext in ["mp4", "m4v"])
+    probe = probe_media_streams(item.file_path)
+    audio_tracks = probe.get("audio_tracks", [])
+
+    selected_track = None
+    if 0 <= audio_track < len(audio_tracks):
+        selected_track = audio_tracks[audio_track]
+    elif audio_tracks:
+        selected_track = audio_tracks[0]
+        audio_track = 0
+
+    track_can_copy = selected_track.get("can_direct_stream", False) if selected_track else False
+    track_label = selected_track.get("label", f"Track {audio_track + 1}") if selected_track else "None"
+
+    if res == "original" and is_mp4 and start == 0.0 and audio_track == 0 and probe.get("can_direct_stream_video", True) and track_can_copy:
+        is_transcode = False
+        method = "Direct Play"
+        encoder = "none"
+        hw_accel = False
+        play_type = "direct_play"
+    elif res == "original" and probe.get("can_direct_stream_video", False):
+        is_transcode = False
+        hw_accel = False
+        if not selected_track:
+            method = "Direct Stream (Video Copy, No Audio)"
+            encoder = "copy"
+            play_type = "remux"
+        elif track_can_copy:
+            method = f"Direct Stream / Remux (Stream Copy, Audio: {track_label})"
+            encoder = "copy"
+            play_type = "remux"
+        else:
+            method = f"Direct Stream (Video Copy, Audio: {track_label} -> AAC)"
+            encoder = "copy (audio: aac)"
+            play_type = "direct_stream"
+    else:
+        encoder, _ = get_working_encoder(profile=hw_profile)
+        is_transcode = True
+        hw_accel = (encoder != "software")
+        method_names = {
+            "nvenc": "NVIDIA NVENC (h264_nvenc)",
+            "qsv": "Intel QuickSync (h264_qsv)",
+            "vaapi": "VA-API (h264_vaapi)",
+            "videotoolbox": "Apple VideoToolbox (h264_videotoolbox)",
+            "software": "Software CPU (libx264)"
+        }
+        base_method = method_names.get(encoder, encoder)
+        method = f"{base_method} (Audio: {track_label})"
+        play_type = "transcode"
+
+    return {
+        "media_type": media_type,
+        "item_id": item_id,
+        "title": item.title,
+        "resolution": res,
+        "start": start,
+        "audio_track": audio_track,
+        "audio_tracks": audio_tracks,
+        "selected_audio_track": selected_track,
+        "is_transcoding": is_transcode,
+        "transcode_method": method,
+        "encoder": encoder,
+        "hardware_accelerated": hw_accel,
+        "play_type": play_type,
+        "container": file_ext,
+        "video_codec": probe.get("video_codec"),
+        "audio_codec": selected_track.get("codec") if selected_track else probe.get("audio_codec"),
+        "audio_channels": selected_track.get("channels") if selected_track else probe.get("audio_channels"),
+        "hw_profile": hw_profile,
+        "server_time": time.time()
+    }
 
 @app.post("/watchlist/remove/{watchlist_id}")
 async def remove_watchlist(request: Request, watchlist_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
@@ -1320,6 +1739,216 @@ async def download_media(media_type: str, item_id: int, current_user: User = Dep
     
     filename = os.path.basename(item.file_path)
     return FileResponse(item.file_path, media_type="application/octet-stream", filename=filename)
+
+def get_server_metrics(session: Session) -> dict:
+    cpu_percent = 0.0
+    cpu_count = os.cpu_count() or 1
+    try:
+        import psutil
+        cpu_percent = psutil.cpu_percent(interval=None)
+        logical_count = psutil.cpu_count(logical=True)
+        if logical_count:
+            cpu_count = logical_count
+    except Exception:
+        pass
+
+    ram_data = {"percent": 0.0, "used_gb": 0.0, "total_gb": 0.0, "free_gb": 0.0}
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        ram_data = {
+            "percent": round(mem.percent, 1),
+            "used_gb": round(mem.used / (1024**3), 2),
+            "total_gb": round(mem.total / (1024**3), 2),
+            "free_gb": round(mem.available / (1024**3), 2)
+        }
+    except Exception:
+        pass
+
+    disks = []
+    checked_paths = set()
+    try:
+        root_path = "/" if os.name != "nt" else os.path.abspath(os.sep)
+        root_du = shutil.disk_usage(root_path)
+        checked_paths.add(os.path.abspath(root_path).lower())
+        pct = round((root_du.used / root_du.total) * 100, 1) if root_du.total > 0 else 0.0
+        disks.append({
+            "name": f"System Root ({root_path})",
+            "path": root_path,
+            "total_gb": round(root_du.total / (1024**3), 1),
+            "used_gb": round(root_du.used / (1024**3), 1),
+            "free_gb": round(root_du.free / (1024**3), 1),
+            "percent": pct
+        })
+    except Exception:
+        pass
+
+    volumes = session.exec(select(VolumePath)).all()
+    for vol in volumes:
+        if vol.path and os.path.exists(vol.path):
+            try:
+                norm_p = os.path.abspath(vol.path).lower()
+                if norm_p not in checked_paths:
+                    checked_paths.add(norm_p)
+                    du = shutil.disk_usage(vol.path)
+                    pct = round((du.used / du.total) * 100, 1) if du.total > 0 else 0.0
+                    disks.append({
+                        "name": f"Media ({vol.media_type.capitalize()}s - {vol.path})",
+                        "path": vol.path,
+                        "total_gb": round(du.total / (1024**3), 1),
+                        "used_gb": round(du.used / (1024**3), 1),
+                        "free_gb": round(du.free / (1024**3), 1),
+                        "percent": pct
+                    })
+            except Exception:
+                pass
+
+    transcode_count = 0
+    try:
+        import psutil
+        for p in psutil.process_iter(['name']):
+            if p.info['name'] and 'ffmpeg' in p.info['name'].lower():
+                transcode_count += 1
+    except Exception:
+        pass
+
+    uptime_seconds = int(time.time() - SERVER_START_TIME)
+    days = uptime_seconds // 86400
+    hours = (uptime_seconds % 86400) // 3600
+    minutes = (uptime_seconds % 3600) // 60
+    uptime_str = f"{days}d {hours}h {minutes}m" if days > 0 else f"{hours}h {minutes}m"
+
+    active_streams = active_stream_manager.get_active_streams()
+
+    return {
+        "cpu": {"percent": round(cpu_percent, 1), "cores": cpu_count},
+        "memory": ram_data,
+        "disks": disks,
+        "transcodes_count": transcode_count,
+        "uptime_str": uptime_str,
+        "active_streams": active_streams,
+        "active_streams_count": len(active_streams)
+    }
+
+def get_user_and_watch_stats(session: Session, limit: int = 25) -> dict:
+    history_records = session.exec(
+        select(WatchHistory).order_by(WatchHistory.last_watched.desc()).limit(limit)
+    ).all()
+
+    user_ids = {h.user_id for h in history_records}
+    users = {u.id: u for u in session.exec(select(User).where(User.id.in_(user_ids))).all()} if user_ids else {}
+
+    recent_history = []
+    now = datetime.now(timezone.utc)
+    for h in history_records:
+        u = users.get(h.user_id)
+        username = u.username if u else "Unknown"
+
+        title = "Unknown Item"
+        poster = None
+        season_episode = None
+        year = ""
+
+        if h.media_type == "movie":
+            m = session.get(Movie, h.item_id)
+            if m:
+                title = m.title
+                poster = m.poster_filename
+                year = m.year or ""
+        elif h.media_type == "tv":
+            t = session.get(TVShow, h.item_id)
+            if t:
+                title = t.title
+                poster = t.season_poster_filename or t.poster_filename
+                year = t.year or ""
+                match = re.search(r'S(\d+)E(\d+)', t.file_path, re.IGNORECASE)
+                if match:
+                    season_episode = f"S{int(match.group(1))} • E{int(match.group(2))}"
+
+        delta = now - h.last_watched if h.last_watched else timedelta(0)
+        secs = delta.total_seconds()
+        if secs < 60:
+            time_ago = "Just now"
+        elif secs < 3600:
+            time_ago = f"{int(secs // 60)}m ago"
+        elif secs < 86400:
+            time_ago = f"{int(secs // 3600)}h ago"
+        else:
+            time_ago = f"{delta.days}d ago"
+
+        recent_history.append({
+            "id": h.id,
+            "username": username,
+            "media_type": h.media_type,
+            "item_id": h.item_id,
+            "title": title,
+            "poster_filename": poster,
+            "season_episode": season_episode,
+            "year": year,
+            "progress": round(h.progress, 1),
+            "is_completed": h.progress >= 90.0,
+            "time_ago": time_ago,
+            "last_watched": h.last_watched.strftime("%Y-%m-%d %H:%M") if h.last_watched else ""
+        })
+
+    all_users = session.exec(select(User)).all()
+    users_list = []
+    for u in all_users:
+        watched_count = session.exec(select(func.count(WatchHistory.id)).where(WatchHistory.user_id == u.id)).one()
+        users_list.append({
+            "id": u.id,
+            "username": u.username,
+            "is_admin": u.is_admin,
+            "kids_mode": u.kids_mode,
+            "items_watched": watched_count
+        })
+
+    total_movies = session.exec(select(func.count(Movie.id))).one()
+    total_tv_episodes = session.exec(select(func.count(TVShow.id))).one()
+    total_tv_shows = session.exec(select(func.count(func.distinct(TVShow.title)))).one()
+    total_photos = session.exec(select(func.count(Photo.id))).one()
+
+    return {
+        "recent_history": recent_history,
+        "users": users_list,
+        "total_users": len(all_users),
+        "library": {
+            "movies": total_movies,
+            "tv_shows": total_tv_shows,
+            "tv_episodes": total_tv_episodes,
+            "photos": total_photos
+        }
+    }
+
+@app.get("/server-dashboard", response_class=HTMLResponse)
+async def server_dashboard_view(request: Request, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    if not current_user: return RedirectResponse(url="/login", status_code=303)
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin privileges required to view server dashboard.")
+    metrics = get_server_metrics(session)
+    user_stats = get_user_and_watch_stats(session)
+    return templates.TemplateResponse(request=request, name="server_dashboard.html", context={
+        "user": current_user, "metrics": metrics, "stats": user_stats
+    })
+
+@app.get("/server")
+async def server_redirect(current_user: User = Depends(get_current_user)):
+    return RedirectResponse(url="/server-dashboard", status_code=303)
+
+@app.get("/activity")
+async def activity_redirect(current_user: User = Depends(get_current_user)):
+    return RedirectResponse(url="/server-dashboard", status_code=303)
+
+@app.get("/api/server-dashboard/stats")
+async def api_server_dashboard_stats(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    if not current_user or not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    metrics = get_server_metrics(session)
+    user_stats = get_user_and_watch_stats(session, limit=15)
+    return {
+        "metrics": metrics,
+        "stats": user_stats
+    }
 
 @app.get("/settings", response_class=HTMLResponse)
 async def view_settings(request: Request, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
@@ -1377,6 +2006,14 @@ async def change_password(new_password: str = Form(...), current_user: User = De
     session.commit()
     
     return RedirectResponse(url="/settings?pw_success=1", status_code=303)
+
+@app.post("/settings/rewind")
+async def save_rewind_settings(rewind_seconds: int = Form(0), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    current_user.rewind_seconds = max(0, min(300, rewind_seconds))
+    session.add(current_user)
+    session.commit()
+    return RedirectResponse(url="/settings?rewind_success=1", status_code=303)
 
 @app.post("/settings/tmdb")
 async def save_tmdb_key(tmdb_key: str = Form(""), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
@@ -1510,57 +2147,208 @@ async def delete_user(user_id: int, current_user: User = Depends(get_current_use
 @app.get("/ping")
 async def ping(response: Response):
     response.headers["Access-Control-Allow-Origin"] = "*"
-    return {"status": "ok", "app": "heirloom"}
+    return {"status": "ok", "app": "heirloom", "server_time": time.time()}
 # --- Watch Together Routes ---
 @app.websocket("/ws/sync/{session_id}")
 async def websocket_sync(websocket: WebSocket, session_id: str):
-    await manager.connect(websocket, session_id)
+    token = websocket.cookies.get("session_token")
+    current_user = None
+    is_host = False
+    with Session(engine) as db:
+        if token:
+            current_user = db.exec(select(User).where(User.session_token == token)).first()
+        ws_session = db.get(WatchSession, session_id)
+        if not ws_session or not ws_session.is_active:
+            await websocket.close(code=1000, reason="Session ended")
+            return
+        if current_user:
+            is_host = (ws_session.host_id == current_user.id)
+
+    await manager.connect(
+        websocket, session_id,
+        user_id=current_user.id if current_user else None,
+        username=current_user.username if current_user else ("Host" if is_host else "Guest"),
+        is_host=is_host
+    )
+
+    # Send initial room state to newly connected client
+    try:
+        playback = manager.session_playback.get(session_id, {"current_time": 0.0, "is_paused": True})
+        await websocket.send_text(json.dumps({
+            "action": "room_state",
+            "time": playback.get("current_time", 0.0),
+            "paused": playback.get("is_paused", True),
+            "all_ready": manager.check_all_ready(session_id),
+            "waiting_users": manager.get_waiting_users(session_id),
+            "is_host": is_host
+        }))
+        if not manager.check_all_ready(session_id):
+            await manager.broadcast(json.dumps({
+                "action": "waiting_for",
+                "users": manager.get_waiting_users(session_id)
+            }), session_id, sender=websocket)
+    except Exception:
+        pass
+
     try:
         while True:
             data = await websocket.receive_text()
             try:
                 msg = json.loads(data)
-                if msg.get("action") == "ping":
-                    # Instant pong response for client round-trip latency measurement
+                action = msg.get("action")
+
+                if action == "ping":
                     await websocket.send_text(json.dumps({
                         "action": "pong",
                         "client_time": msg.get("client_time", 0),
                         "server_time": time.time() * 1000
                     }))
                     continue
+
+                client_info = manager.session_clients.get(session_id, {}).get(websocket, {})
+
+                if action == "ready":
+                    client_info["is_ready"] = True
+                    client_info["time"] = msg.get("time", 0.0)
+                    if client_info.get("is_host"):
+                        manager.session_playback[session_id]["current_time"] = msg.get("time", manager.session_playback[session_id]["current_time"])
+
+                    if manager.check_all_ready(session_id):
+                        playback = manager.session_playback.get(session_id, {"current_time": 0.0, "is_paused": True})
+                        ready_msg = json.dumps({
+                            "action": "all_ready",
+                            "time": playback.get("current_time", 0.0),
+                            "paused": playback.get("is_paused", True)
+                        })
+                        await manager.broadcast(ready_msg, session_id)
+                        await websocket.send_text(ready_msg)
+                    else:
+                        await manager.broadcast(json.dumps({
+                            "action": "waiting_for",
+                            "users": manager.get_waiting_users(session_id)
+                        }), session_id)
+                    continue
+
+                elif action == "loading":
+                    client_info["is_ready"] = False
+                    await manager.broadcast(json.dumps({
+                        "action": "waiting_for",
+                        "users": manager.get_waiting_users(session_id)
+                    }), session_id)
+                    continue
+
+                elif action == "play":
+                    if manager.check_all_ready(session_id):
+                        manager.session_playback[session_id]["is_paused"] = False
+                        if "time" in msg and isinstance(msg["time"], (int, float)):
+                            manager.session_playback[session_id]["current_time"] = float(msg["time"])
+                        if "username" not in msg or not msg["username"]:
+                            msg["username"] = client_info.get("username", "Someone")
+                        await manager.broadcast(json.dumps(msg), session_id, sender=websocket)
+                    else:
+                        await websocket.send_text(json.dumps({
+                            "action": "waiting_for",
+                            "users": manager.get_waiting_users(session_id)
+                        }))
+                    continue
+
+                elif action == "pause":
+                    manager.session_playback[session_id]["is_paused"] = True
+                    if "time" in msg and isinstance(msg["time"], (int, float)):
+                        manager.session_playback[session_id]["current_time"] = float(msg["time"])
+                    if "username" not in msg or not msg["username"]:
+                        msg["username"] = client_info.get("username", "Someone")
+                    await manager.broadcast(json.dumps(msg), session_id, sender=websocket)
+                    continue
+
+                elif action == "seek":
+                    if "time" in msg and isinstance(msg["time"], (int, float)):
+                        manager.session_playback[session_id]["current_time"] = float(msg["time"])
+                    # Seeking requires all participants to re-buffer the new position
+                    for c in manager.session_clients.get(session_id, {}).values():
+                        c["is_ready"] = False
+                    await manager.broadcast(data, session_id, sender=websocket)
+                    await manager.broadcast(json.dumps({
+                        "action": "waiting_for",
+                        "users": manager.get_waiting_users(session_id)
+                    }), session_id)
+                    continue
+
+                elif action == "sync":
+                    if client_info.get("is_host") and "time" in msg and isinstance(msg["time"], (int, float)):
+                        manager.session_playback[session_id]["current_time"] = float(msg["time"])
+                    await manager.broadcast(data, session_id, sender=websocket)
+                    continue
+
             except Exception:
                 pass
-            await manager.broadcast(data, session_id, sender=websocket)
     except WebSocketDisconnect:
-        manager.disconnect(websocket, session_id)
+        was_host, remaining = manager.disconnect(websocket, session_id)
+        if was_host:
+            with Session(engine) as db:
+                ws_session = db.get(WatchSession, session_id)
+                if ws_session:
+                    ws_session.is_active = False
+                    db.add(ws_session)
+                    for inv in db.exec(select(WatchInvite).where(WatchInvite.session_id == session_id)).all():
+                        if inv.status == "pending":
+                            inv.status = "expired"
+                            db.add(inv)
+                    db.commit()
+            await manager.broadcast(json.dumps({
+                "action": "session_ended",
+                "reason": "The host has left or ended the watch session."
+            }), session_id)
+        else:
+            if remaining > 0 and manager.check_all_ready(session_id):
+                playback = manager.session_playback.get(session_id, {"current_time": 0.0, "is_paused": True})
+                await manager.broadcast(json.dumps({
+                    "action": "all_ready",
+                    "time": playback.get("current_time", 0.0),
+                    "paused": playback.get("is_paused", True)
+                }), session_id)
 
 @app.get("/api/inbox")
 async def get_inbox(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     if not current_user: return {"invites": [], "reset_requests": []}
-    # Get pending invites
     invites = session.exec(select(WatchInvite).where(WatchInvite.invited_user_id == current_user.id).where(WatchInvite.status == "pending")).all()
     results = []
+    now = datetime.now(timezone.utc)
     for inv in invites:
         sender = session.get(User, inv.sender_id)
         ws_session = session.get(WatchSession, inv.session_id)
-        if ws_session and sender:
-            # Get media title
-            title = "Unknown Media"
-            if ws_session.media_type == "movie":
-                m = session.get(Movie, ws_session.item_id)
-                if m: title = m.title
-            elif ws_session.media_type == "tv":
-                t = session.get(TVShow, ws_session.item_id)
-                if t: title = t.title
-            
-            results.append({
-                "id": inv.id,
-                "sender": sender.username,
-                "media_type": ws_session.media_type,
-                "title": title
-            })
-    
-    # Get pending password reset requests (admin only)
+        if not ws_session or not sender:
+            inv.status = "expired"
+            session.add(inv)
+            session.commit()
+            continue
+
+        created = ws_session.created_at.replace(tzinfo=timezone.utc) if ws_session.created_at.tzinfo is None else ws_session.created_at
+        grace_period = (now - created).total_seconds() < 90
+        has_active_conns = inv.session_id in manager.active_connections and len(manager.active_connections[inv.session_id]) > 0
+
+        # Discard and expire invites for sessions that have ended or have no active host
+        if not ws_session.is_active or (not has_active_conns and not grace_period):
+            inv.status = "expired"
+            session.add(inv)
+            session.commit()
+            continue
+
+        title = "Unknown Media"
+        if ws_session.media_type == "movie":
+            m = session.get(Movie, ws_session.item_id)
+            if m: title = m.title
+        elif ws_session.media_type == "tv":
+            t = session.get(TVShow, ws_session.item_id)
+            if t: title = t.title
+
+        results.append({
+            "id": inv.id,
+            "sender": sender.username,
+            "media_type": ws_session.media_type,
+            "title": title
+        })
+
     reset_requests = []
     if current_user.is_admin:
         pending_resets = session.exec(select(PasswordResetRequest).where(PasswordResetRequest.status == "pending")).all()
@@ -1572,7 +2360,7 @@ async def get_inbox(current_user: User = Depends(get_current_user), session: Ses
                     "username": req_user.username,
                     "created_at": pr.created_at.strftime("%m/%d/%y %I:%M %p")
                 })
-    
+
     return {"invites": results, "reset_requests": reset_requests}
 
 from pydantic import BaseModel
@@ -1585,16 +2373,16 @@ class WatchTogetherRequest(BaseModel):
 async def create_watch_together(req: WatchTogetherRequest, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     if not current_user or not current_user.watch_together_access:
         raise HTTPException(status_code=403, detail="Forbidden")
-        
-    ws_session = WatchSession(host_id=current_user.id, media_type=req.media_type, item_id=req.item_id)
+
+    ws_session = WatchSession(host_id=current_user.id, media_type=req.media_type, item_id=req.item_id, is_active=True)
     session.add(ws_session)
     session.commit()
-    
+
     for uid in req.invited_user_ids:
         invite = WatchInvite(session_id=ws_session.id, sender_id=current_user.id, invited_user_id=uid)
         session.add(invite)
     session.commit()
-    
+
     return {"session_id": ws_session.id}
 
 @app.post("/watch_together/accept/{invite_id}")
@@ -1602,6 +2390,18 @@ async def accept_watch_together(invite_id: int, current_user: User = Depends(get
     if not current_user: raise HTTPException(status_code=403, detail="Forbidden")
     invite = session.get(WatchInvite, invite_id)
     if invite and invite.invited_user_id == current_user.id:
+        ws_session = session.get(WatchSession, invite.session_id)
+        now = datetime.now(timezone.utc)
+        created = ws_session.created_at.replace(tzinfo=timezone.utc) if ws_session and ws_session.created_at.tzinfo is None else (ws_session.created_at if ws_session else now)
+        grace_period = (now - created).total_seconds() < 90
+        has_active_conns = invite.session_id in manager.active_connections and len(manager.active_connections[invite.session_id]) > 0
+
+        if not ws_session or not ws_session.is_active or (not has_active_conns and not grace_period):
+            invite.status = "expired"
+            session.add(invite)
+            session.commit()
+            return {"success": False, "error": "This watch party has ended."}
+
         invite.status = "accepted"
         session.commit()
         return {"success": True, "session_id": invite.session_id}
@@ -1617,15 +2417,34 @@ async def decline_watch_together(invite_id: int, current_user: User = Depends(ge
         return {"success": True}
     return {"success": False}
 
+@app.post("/watch_together/end/{session_id}")
+async def end_watch_together(session_id: str, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    if not current_user: raise HTTPException(status_code=403, detail="Forbidden")
+    ws_session = session.get(WatchSession, session_id)
+    if ws_session and ws_session.host_id == current_user.id:
+        ws_session.is_active = False
+        session.add(ws_session)
+        for inv in session.exec(select(WatchInvite).where(WatchInvite.session_id == session_id)).all():
+            if inv.status == "pending":
+                inv.status = "expired"
+                session.add(inv)
+        session.commit()
+        await manager.broadcast(json.dumps({
+            "action": "session_ended",
+            "reason": "The host has ended this watch session."
+        }), session_id)
+        return {"success": True}
+    return {"success": False}
+
 @app.get("/play_sync/{session_id}", response_class=HTMLResponse)
 async def play_sync(request: Request, session_id: str, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     if not current_user or not current_user.watch_together_access:
         return RedirectResponse(url="/", status_code=303)
-        
+
     ws_session = session.get(WatchSession, session_id)
-    if not ws_session:
-        return RedirectResponse(url="/", status_code=303)
-        
+    if not ws_session or not ws_session.is_active:
+        return RedirectResponse(url="/?session_ended=1", status_code=303)
+
     return RedirectResponse(url=f"/play/{ws_session.media_type}/{ws_session.item_id}?sync={session_id}", status_code=303)
 
 @app.get("/api/users/eligible", response_model=list[dict])

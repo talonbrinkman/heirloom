@@ -121,28 +121,28 @@
                 badge.style.display = 'block';
                 let html = '';
                 html += items.map(inv => `
-                    <div style="padding: 10px; border-bottom: 1px solid var(--bg-tertiary);">
+                    <div class="inbox-item">
                         <div><strong>${inv.sender}</strong> invited you to watch <em>${inv.title}</em></div>
-                        <div style="display: flex; gap: 10px; margin-top: 10px;">
-                            <button class="btn-small" onclick="respondInvite(${inv.id}, 'accept')">Accept</button>
-                            <button class="btn-small bg-gray" onclick="respondInvite(${inv.id}, 'decline')">Decline</button>
+                        <div class="inbox-actions">
+                            <button class="btn btn-sm" onclick="respondInvite(${inv.id}, 'accept')">Accept</button>
+                            <button class="btn btn-sm btn-secondary" onclick="respondInvite(${inv.id}, 'decline')">Decline</button>
                         </div>
                     </div>
                 `).join('');
                 html += resets.map(pr => `
-                    <div style="padding: 10px; border-bottom: 1px solid var(--bg-tertiary);">
+                    <div class="inbox-item">
                         <div><strong>${pr.username}</strong> is requesting a password reset</div>
-                        <div style="color: var(--text-secondary); font-size: 0.85em; margin-top: 4px;">Requested ${pr.created_at}</div>
-                        <div style="display: flex; gap: 10px; margin-top: 10px;">
-                            <button class="btn-small" onclick="respondReset(${pr.id}, 'approve')">Approve</button>
-                            <button class="btn-small bg-gray" onclick="respondReset(${pr.id}, 'deny')">Deny</button>
+                        <small>Requested ${pr.created_at}</small>
+                        <div class="inbox-actions">
+                            <button class="btn btn-sm" onclick="respondReset(${pr.id}, 'approve')">Approve</button>
+                            <button class="btn btn-sm btn-secondary" onclick="respondReset(${pr.id}, 'deny')">Deny</button>
                         </div>
                     </div>
                 `).join('');
                 container.innerHTML = html;
             } else {
                 badge.style.display = 'none';
-                container.innerHTML = '<div style="color: var(--text-secondary); text-align: center;">No new notifications</div>';
+                container.innerHTML = '<div class="empty-state">No new notifications</div>';
             }
         } catch (err) {
             console.error("Error loading inbox:", err);

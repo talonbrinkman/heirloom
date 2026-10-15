@@ -4,7 +4,10 @@
     <title>Heirloom • {{ item.title }}{% if season_episode %} {{ season_episode | replace('<br>', ' - ') }}{% endif %}
     </title>
     <link rel="stylesheet" href="/static/style.css">
-    <script type="text/javascript" src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <script src="/static/lucide.min.js"></script>
+    <script type="text/javascript"
+        src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
     <style>
         google-cast-launcher {
             width: 24px;
@@ -13,16 +16,15 @@
             --connected-color: var(--accent-primary);
             --disconnected-color: var(--text-primary);
         }
+
         .skip-action-container {
-            position: absolute;
-            bottom: 95px;
-            right: 35px;
-            z-index: 50;
             display: flex;
-            flex-direction: column;
-            align-items: flex-end;
-            gap: 10px;
+            justify-content: right;
+            width: 100%;
+            z-index: 50;
+            padding-bottom: 10px;
         }
+
         .skip-marker-btn {
             display: none;
             align-items: center;
@@ -41,6 +43,7 @@
             transition: background 0.2s ease;
             user-select: none;
         }
+
         .skip-marker-btn:hover {
             background: var(--accent-primary, #e50914);
         }
@@ -51,13 +54,33 @@
     <video id="mediaPlayer" class="player-video" playsinline crossorigin="anonymous">
         Your browser does not support HTML video.
         {% if subtitle_url %}
-        <track label="English" kind="subtitles" srclang="en" src="{{ subtitle_url }}{% if token %}&token={{ token }}{% endif %}" default>
+        <track label="English" kind="subtitles" srclang="en"
+            src="{{ subtitle_url }}{% if token %}&token={{ token }}{% endif %}" default>
         {% endif %}
     </video>
-    
-    <div id="loadingSpinner" class="loading-spinner">
+
+    <div id="loadingSpinner" class="loading-spinner"{% if sync_session_id %} style="opacity: 1;"{% endif %}>
         <i data-lucide="loader-circle"></i>
+        {% if sync_session_id %}
+        <div id="syncLoadingInfo" class="sync-loading-info">
+            <div id="syncLoadingText" class="sync-loading-text">Waiting for all users to load...</div>
+            <div id="syncLoadingSubtext" class="sync-loading-subtext">Connecting to Watch Together session...</div>
+        </div>
+        {% endif %}
     </div>
+
+    {% if sync_session_id %}
+    <div id="sessionEndedOverlay" class="session-ended-overlay" style="display: none;">
+        <i data-lucide="video-off" style="width: 52px; height: 52px; color: var(--accent); margin-bottom: 8px;"></i>
+        <div style="font-size: 20px; font-weight: 600; color: var(--text); margin-bottom: 4px;">Watch Together session has ended</div>
+        <div style="color: var(--text-muted); font-size: 14px; margin-bottom: 20px;">The host has left or ended this session.</div>
+        <a href="/" class="btn btn-primary" style="padding: 10px 24px; text-decoration: none;">Return to Dashboard</a>
+    </div>
+    <div id="syncActionToast" class="sync-action-toast">
+        <i id="syncActionIcon" data-lucide="play" style="width: 16px; height: 16px;"></i>
+        <span id="syncActionText"></span>
+    </div>
+    {% endif %}
 
     <div id="playerOverlay" class="player-overlay pointer-events-none">
         <div class="pointer-events-auto player-header">
@@ -70,7 +93,8 @@
                 {% endif %}
             </div>
             {% if is_mobile %}
-            <a href="javascript:void(0);" onclick="if(window.FlutterApp) window.FlutterApp.postMessage('close');" class="player-close-btn" title="Close Player">
+            <a href="javascript:void(0);" onclick="if(window.FlutterApp) window.FlutterApp.postMessage('close');"
+                class="player-close-btn" title="Close Player">
                 <i data-lucide="x"></i>
             </a>
             {% else %}
@@ -79,27 +103,29 @@
             </a>
             {% endif %}
         </div>
-        
-        <!-- Skip Intro & Skip Credits Marker Buttons -->
-        <div class="skip-action-container pointer-events-auto" id="skipActionContainer">
-            <button id="skipIntroBtn" class="skip-marker-btn" onclick="skipIntro()">Skip Intro</button>
-            <button id="skipCreditsBtn" class="skip-marker-btn" onclick="skipCredits()">Skip Credits</button>
-        </div>
+
+
 
         <div class="player-controls pointer-events-auto">
+            <!-- Skip Intro & Skip Credits Marker Buttons -->
+            <div class="skip-action-container pointer-events-auto" id="skipActionContainer">
+                <button id="skipIntroBtn" class="skip-marker-btn" onclick="skipIntro()">Skip Intro</button>
+                <button id="skipCreditsBtn" class="skip-marker-btn" onclick="skipCredits()">Skip Credits</button>
+            </div>
+
             <div class="progress-container" id="progressContainer">
                 <div class="progress-bar-fill" id="progressBarFill"></div>
                 <div class="progress-hover-time" id="progressHoverTime">0:00</div>
             </div>
-            
+
             <div class="controls-row">
                 <div class="controls-left">
                     <div class="time-display" id="timeDisplay">0:00 / 0:00</div>
                 </div>
-                
+
                 <div class="controls-center">
                     {% if prev_episode_id %}
-                    <a href="/play/tv/{{ prev_episode_id }}" class="control-btn" title="Previous Episode" style="display: flex; align-items: center; justify-content: center;">
+                    <a href="/play/tv/{{ prev_episode_id }}" class="control-btn" title="Previous Episode">
                         <i data-lucide="skip-back"></i>
                     </a>
                     {% endif %}
@@ -113,24 +139,27 @@
                         <i data-lucide="rotate-cw"></i>
                     </button>
                     {% if next_episode_id %}
-                    <a href="/play/tv/{{ next_episode_id }}" class="control-btn" title="Next Episode" style="display: flex; align-items: center; justify-content: center;">
+                    <a href="/play/tv/{{ next_episode_id }}" class="control-btn" title="Next Episode">
                         <i data-lucide="skip-forward"></i>
                     </a>
                     {% endif %}
                 </div>
-                
+
                 <div class="controls-right">
                     <div class="volume-container flex align-center" style="gap: 5px;">
                         <button class="control-btn" id="muteBtn" onclick="toggleMute()">
                             <i data-lucide="volume-2" id="volumeIcon"></i>
                         </button>
-                        <input type="range" id="volumeSlider" class="volume-slider" min="0" max="1" step="0.05" value="1">
+                        <input type="range" id="volumeSlider" class="volume-slider" min="0" max="1" step="0.05"
+                            value="1">
                     </div>
 
-                    <button class="control-btn" id="nativeCastBtn" onclick="requestCast()" title="AirPlay / PiP" style="display: none;">
-                        <i data-lucide="cast"></i>
+                    <button class="control-btn" id="nativeCastBtn" onclick="requestCast()" title="Picture in Picture"
+                        style="display: none;">
+                        <i data-lucide="picture-in-picture-2"></i>
                     </button>
-                    <button class="control-btn" id="googleCastBtn" title="Cast to TV" style="display: none; align-items: center; justify-content: center;">
+                    <button class="control-btn" id="googleCastBtn" title="Cast to TV"
+                        style="display: none;">
                         <google-cast-launcher></google-cast-launcher>
                     </button>
                     {% if subtitle_url %}
@@ -143,31 +172,48 @@
                             <i data-lucide="settings"></i>
                         </button>
                         <div class="dropdown-menu settings-menu-expanded" id="settingsMenu">
+                            <!-- Audio Track Selection -->
+                            {% if audio_tracks and audio_tracks|length > 0 %}
+                            <div class="settings-section" id="audioSection">
+                                <div class="settings-header">Audio</div>
+                                {% for track in audio_tracks %}
+                                <button class="audio-btn {% if loop.first %}active{% endif %}" data-audio="{{ track.index }}"
+                                    onclick="setAudioTrack({{ track.index }})">{{ track.label }}</button>
+                                {% endfor %}
+                            </div>
+                            {% endif %}
+
                             <!-- Resolution -->
                             <div class="settings-section">
                                 <div class="settings-header">Resolution</div>
-                                <button class="res-btn active" data-res="original" onclick="setResolution('original')">Original</button>
+                                <button class="res-btn active" data-res="original"
+                                    onclick="setResolution('original')">Original</button>
                                 <button class="res-btn" data-res="1080" onclick="setResolution('1080')">1080p</button>
                                 <button class="res-btn" data-res="720" onclick="setResolution('720')">720p</button>
                                 <button class="res-btn" data-res="480" onclick="setResolution('480')">480p</button>
                             </div>
-                            
+
                             <!-- Speed -->
                             <div class="settings-section">
                                 <div class="settings-header">Speed</div>
                                 <button class="speed-btn" data-speed="0.5" onclick="setPlaybackSpeed(0.5)">0.5x</button>
-                                <button class="speed-btn active" data-speed="1" onclick="setPlaybackSpeed(1)">1x</button>
-                                <button class="speed-btn" data-speed="1.25" onclick="setPlaybackSpeed(1.25)">1.25x</button>
+                                <button class="speed-btn active" data-speed="1"
+                                    onclick="setPlaybackSpeed(1)">1x</button>
+                                <button class="speed-btn" data-speed="1.25"
+                                    onclick="setPlaybackSpeed(1.25)">1.25x</button>
                                 <button class="speed-btn" data-speed="1.5" onclick="setPlaybackSpeed(1.5)">1.5x</button>
                                 <button class="speed-btn" data-speed="2" onclick="setPlaybackSpeed(2)">2x</button>
                             </div>
-                            
+
                             <!-- Aspect Ratio -->
                             <div class="settings-section">
                                 <div class="settings-header">Aspect Ratio</div>
-                                <button class="aspect-btn active" data-aspect="contain" onclick="setAspectRatio('contain')">Fit</button>
-                                <button class="aspect-btn" data-aspect="cover" onclick="setAspectRatio('cover')">Fill</button>
-                                <button class="aspect-btn" data-aspect="fill" onclick="setAspectRatio('fill')">Stretch</button>
+                                <button class="aspect-btn active" data-aspect="contain"
+                                    onclick="setAspectRatio('contain')">Fit</button>
+                                <button class="aspect-btn" data-aspect="cover"
+                                    onclick="setAspectRatio('cover')">Fill</button>
+                                <button class="aspect-btn" data-aspect="fill"
+                                    onclick="setAspectRatio('fill')">Stretch</button>
                             </div>
                         </div>
                     </div>
@@ -180,17 +226,29 @@
     </div>
 
     <script>
+        function refreshIcons() {
+            if (typeof lucide !== 'undefined' && lucide && typeof lucide.createIcons === 'function') {
+                lucide.createIcons();
+            }
+        }
+        document.addEventListener('DOMContentLoaded', refreshIcons);
+        refreshIcons();
+
         const video = document.getElementById('mediaPlayer');
         const loadingSpinner = document.getElementById('loadingSpinner');
-        
+
         video.addEventListener('waiting', () => {
             loadingSpinner.style.opacity = '1';
         });
         video.addEventListener('playing', () => {
-            loadingSpinner.style.opacity = '0';
+            if (typeof allUsersReady === 'undefined' || allUsersReady) {
+                loadingSpinner.style.opacity = '0';
+            }
         });
         video.addEventListener('canplay', () => {
-            loadingSpinner.style.opacity = '0';
+            if (typeof allUsersReady === 'undefined' || allUsersReady) {
+                loadingSpinner.style.opacity = '0';
+            }
         });
 
         const playBtn = document.getElementById('playPauseBtn');
@@ -201,68 +259,254 @@
         const fullscreenBtn = document.getElementById('fullscreenBtn');
         const volumeSlider = document.getElementById('volumeSlider');
         const muteBtn = document.getElementById('muteBtn');
-        
+
         let totalDuration = Number("{{ duration or 0 }}");
         let savedProgress = Number("{{ history.progress or 0 }}");
+        let rewindSeconds = Number("{{ user.rewind_seconds if user and user.rewind_seconds else 0 }}");
         let offsetStart = 0;
-        
+
         let currentRes = localStorage.getItem('player_res') || 'original';
+        let currentAudioTrack = parseInt(localStorage.getItem('player_audio_{{ media_type }}_{{ item.id }}') || '0', 10);
         let savedSpeed = parseFloat(localStorage.getItem('player_speed')) || 1;
         let savedAspect = localStorage.getItem('player_aspect') || 'contain';
         let savedVolume = localStorage.getItem('player_volume');
         savedVolume = savedVolume !== null ? parseFloat(savedVolume) : 1;
-        
+
         let subtitlesEnabled = localStorage.getItem('player_subtitles') === 'true';
-        
+
         video.volume = savedVolume;
         volumeSlider.value = savedVolume;
         video.playbackRate = savedSpeed;
         video.style.objectFit = savedAspect;
-        
+
+        document.querySelectorAll('.audio-btn').forEach(b => b.classList.toggle('active', parseInt(b.dataset.audio, 10) === currentAudioTrack));
         document.querySelectorAll('.res-btn').forEach(b => b.classList.toggle('active', b.dataset.res === currentRes));
         document.querySelectorAll('.speed-btn').forEach(b => b.classList.toggle('active', parseFloat(b.dataset.speed) === savedSpeed));
         document.querySelectorAll('.aspect-btn').forEach(b => b.classList.toggle('active', b.dataset.aspect === savedAspect));
 
-        
+
+        {% if sync_session_id and not is_sync_host %}
+        // Watch Together: Non-host starts directly from host's current playback position!
+        let hostResumePos = Number("{{ sync_initial_time or 0 }}");
+        offsetStart = hostResumePos;
+        console.log(`[Watch Together] Non-host joining session at host playback position: ${formatTime(offsetStart)} (${offsetStart.toFixed(1)}s)`);
+        {% else %}
         if (totalDuration > 0 && savedProgress > 0 && savedProgress < 100) {
-            offsetStart = (savedProgress / 100) * totalDuration;
+            let resumePos = (savedProgress / 100) * totalDuration;
+            {% if not sync_session_id %}
+            if (rewindSeconds > 0) {
+                resumePos = Math.max(0, resumePos - rewindSeconds);
+                console.log(`[Playback] Rewound ${rewindSeconds}s on resume: starting at ${Math.round(resumePos)}s instead of ${Math.round((savedProgress / 100) * totalDuration)}s`);
+            }
+            {% endif %}
+            offsetStart = resumePos;
+        }
+        {% endif %}
+
+        // Setup Video Source & Autoplay Handling
+        function attemptPlay() {
+            const playPromise = video.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(err => {
+                    if (err.name === 'NotAllowedError') {
+                        // Browser autoplay policy prevented unmuted playback before user interaction.
+                        // Ensure play button icon is visible and start on user's first click anywhere.
+                        playBtn.innerHTML = '<i data-lucide="play" id="playIcon"></i>';
+                        refreshIcons();
+                        const onFirstInteraction = () => {
+                            if (video.paused) {
+                                video.play().catch(() => { });
+                            }
+                        };
+                        document.addEventListener('click', onFirstInteraction, { once: true });
+                        document.addEventListener('keydown', onFirstInteraction, { once: true });
+                    } else if (err.name !== 'AbortError') {
+                        console.debug("Playback deferred:", err.message);
+                    }
+                });
+            }
         }
 
-        // Setup Video Source
+        // --- Network Latency & Transcoding Stats Monitor ---
+        const playerStats = {
+            networkLatencyMs: null,
+            latencyAvgMs: null,
+            latencyHistory: [],
+            isTranscoding: null,
+            transcodeMethod: null,
+            hardwareAccelerated: null,
+            encoder: null,
+            playType: null,
+            resolution: currentRes,
+            container: null,
+            bufferAheadSec: 0,
+            droppedFrames: 0,
+            totalFrames: 0
+        };
+
+        async function updatePlaybackStats() {
+            const startTime = performance.now();
+            let infoUrl = `/stream-info/{{ media_type }}/{{ item.id }}?res=${encodeURIComponent(currentRes)}&start=${offsetStart}&audio_track=${currentAudioTrack}&_t=${Date.now()}`;
+            {% if token %}
+            infoUrl += `&token={{ token }}`;
+            {% endif %}
+
+            try {
+                const response = await fetch(infoUrl, { cache: 'no-store' });
+                const rtt = Math.round(performance.now() - startTime);
+
+                if (response.ok) {
+                    const data = await response.json();
+
+                    // Track latency
+                    playerStats.networkLatencyMs = rtt;
+                    playerStats.latencyHistory.push(rtt);
+                    if (playerStats.latencyHistory.length > 8) playerStats.latencyHistory.shift();
+                    const sum = playerStats.latencyHistory.reduce((a, b) => a + b, 0);
+                    playerStats.latencyAvgMs = Math.round(sum / playerStats.latencyHistory.length);
+
+                    // Transcoding info
+                    playerStats.isTranscoding = data.is_transcoding;
+                    playerStats.transcodeMethod = data.transcode_method;
+                    playerStats.hardwareAccelerated = data.hardware_accelerated;
+                    playerStats.encoder = data.encoder;
+                    playerStats.playType = data.play_type;
+                    playerStats.resolution = data.resolution;
+                    playerStats.container = data.container;
+                    playerStats.audioTrack = data.audio_track;
+                    playerStats.audioCodec = data.audio_codec;
+                    playerStats.audioChannels = data.audio_channels;
+                    playerStats.audioTrackName = data.selected_audio_track ? data.selected_audio_track.label : `Track #${data.audio_track + 1}`;
+
+                    logPlayerStats();
+                } else {
+                    pingLatencyOnly();
+                }
+            } catch (err) {
+                console.debug("[Player Stats] Could not fetch stream stats, falling back to ping:", err);
+                pingLatencyOnly();
+            }
+        }
+
+        async function pingLatencyOnly() {
+            const startTime = performance.now();
+            try {
+                await fetch('/ping?_t=' + Date.now(), { cache: 'no-store' });
+                const rtt = Math.round(performance.now() - startTime);
+                playerStats.networkLatencyMs = rtt;
+                playerStats.latencyHistory.push(rtt);
+                if (playerStats.latencyHistory.length > 8) playerStats.latencyHistory.shift();
+                const sum = playerStats.latencyHistory.reduce((a, b) => a + b, 0);
+                playerStats.latencyAvgMs = Math.round(sum / playerStats.latencyHistory.length);
+                logPlayerStats();
+            } catch (e) { }
+        }
+
+        function calculateBufferAhead() {
+            if (!video.buffered || video.buffered.length === 0) return 0;
+            const current = video.currentTime;
+            for (let i = 0; i < video.buffered.length; i++) {
+                if (video.buffered.start(i) <= current && current <= video.buffered.end(i)) {
+                    return Math.max(0, video.buffered.end(i) - current);
+                }
+            }
+            return 0;
+        }
+
+        function logPlayerStats() {
+            const bufferSec = calculateBufferAhead();
+            playerStats.bufferAheadSec = Number(bufferSec.toFixed(1));
+
+            if (video.getVideoPlaybackQuality) {
+                const q = video.getVideoPlaybackQuality();
+                playerStats.droppedFrames = q.droppedVideoFrames;
+                playerStats.totalFrames = q.totalVideoFrames;
+            }
+
+            const isHW = playerStats.hardwareAccelerated === true;
+            const isTranscoding = playerStats.isTranscoding === true;
+            const lat = playerStats.networkLatencyMs;
+            const avgLat = playerStats.latencyAvgMs;
+
+            const latColor = (lat !== null && lat < 60) ? '#4caf50' : ((lat !== null && lat < 160) ? '#ffb300' : '#f44336');
+            const transcodeColor = isTranscoding ? '#ff9800' : '#4caf50';
+            const hwColor = isHW ? '#4caf50' : (isTranscoding ? '#ff5252' : '#888888');
+
+            console.groupCollapsed(
+                `%c[Heirloom Player]%c Latency: %c${lat !== null ? lat + 'ms' : '--'}%c | Transcode: %c${isTranscoding ? 'YES' : 'NO'}%c | HW Accel: %c${isHW ? 'YES' : (isTranscoding ? 'NO' : 'N/A')}%c`,
+                'color: #e50914; font-weight: bold;',
+                'color: #aaa;',
+                `color: ${latColor}; font-weight: bold;`,
+                'color: #aaa;',
+                `color: ${transcodeColor}; font-weight: bold;`,
+                'color: #aaa;',
+                `color: ${hwColor}; font-weight: bold;`,
+                'color: #aaa;'
+            );
+
+            console.log(
+                `%c  Network Latency:       %c${lat !== null ? lat + ' ms' : 'measuring...'} (avg: ${avgLat !== null ? avgLat + ' ms' : '--'})\n` +
+                `%c  Transcoding Active:    %c${isTranscoding ? 'Yes' : 'No (' + (playerStats.playType || 'Direct Play') + ')'}\n` +
+                `%c  Transcode Method:      %c${playerStats.transcodeMethod || 'Direct Play'}\n` +
+                `%c  Hardware Acceleration: %c${isHW ? 'YES (' + playerStats.encoder + ')' : (isTranscoding ? 'NO (CPU libx264)' : 'None (Direct Play / Stream Copy)')}\n` +
+                `%c  Encoder Profile:       %c${playerStats.encoder || 'none'}\n` +
+                `%c  Selected Resolution:   %c${playerStats.resolution || currentRes}\n` +
+                `%c  Buffer Health:         %c${playerStats.bufferAheadSec}s ahead\n` +
+                `%c  Dropped Frames:        %c${playerStats.droppedFrames} / ${playerStats.totalFrames}`,
+                'font-weight: bold; color: #42a5f5;', 'color: inherit;',
+                'font-weight: bold; color: #ab47bc;', 'color: inherit;',
+                'font-weight: bold; color: #26a69a;', 'color: inherit;',
+                'font-weight: bold; color: #ff7043;', 'color: inherit;',
+                'font-weight: bold; color: #90a4ae;', 'color: inherit;',
+                'font-weight: bold; color: #29b6f6;', 'color: inherit;',
+                'font-weight: bold; color: #66bb6a;', 'color: inherit;',
+                'font-weight: bold; color: #ffa726;', 'color: inherit;'
+            );
+            console.log('%c[Stats Details Object]', 'color: #888; font-style: italic;', playerStats);
+            console.groupEnd();
+        }
+
+        window.getPlayerStats = () => playerStats;
+        window.logPlayerStats = logPlayerStats;
+
         function loadVideoSource() {
-            let url = `/stream/{{ media_type }}/{{ item.id }}?res=${currentRes}&start=${offsetStart}`;
+            let url = `/stream/{{ media_type }}/{{ item.id }}?res=${currentRes}&start=${offsetStart}&audio_track=${currentAudioTrack}`;
             {% if token %}
             url += `&token={{ token }}`;
             {% endif %}
             video.src = url;
             video.load();
-            video.play().catch(e => console.log("Auto-play prevented", e));
+            attemptPlay();
+            updatePlaybackStats();
         }
 
         loadVideoSource();
 
+        // Periodic stats update (every 15s when active)
+        setInterval(() => {
+            if (!document.hidden && !video.paused) {
+                updatePlaybackStats();
+            }
+        }, 15000);
+
         // Play/Pause
         function togglePlay() {
             if (castPlayer && castPlayer.isConnected) {
-                if (castPlayer.isPaused) {
-                    castController.playOrPause();
-                } else {
-                    castController.playOrPause();
-                }
+                castController.playOrPause();
                 return;
             }
             if (video.paused) {
-                video.play();
+                video.play().catch(e => console.debug("Play request deferred:", e));
             } else {
                 video.pause();
             }
         }
         playBtn.addEventListener('click', togglePlay);
         video.addEventListener('click', togglePlay);
-        
+
         document.addEventListener('keydown', (e) => {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-            
+
             if (e.code === 'Space') {
                 e.preventDefault();
                 togglePlay();
@@ -289,11 +533,11 @@
 
         video.addEventListener('play', () => {
             playBtn.innerHTML = '<i data-lucide="pause"></i>';
-            lucide.createIcons();
+            refreshIcons();
         });
         video.addEventListener('pause', () => {
             playBtn.innerHTML = '<i data-lucide="play"></i>';
-            lucide.createIcons();
+            refreshIcons();
         });
 
         // Playback Ended / Next Episode Auto-play / Exit
@@ -305,7 +549,7 @@
             {% endif %}
             try {
                 await fetch(removeUrl, { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-            } catch (e) {}
+            } catch (e) { }
 
             let nextUrl = "/play/tv/{{ next_episode_id }}";
             let params = [];
@@ -348,6 +592,10 @@
                 const currentProgress = (actualTime / effectiveDuration) * 100;
                 const formData = new FormData();
                 formData.append('progress', currentProgress);
+                formData.append('current_time', actualTime);
+                formData.append('duration', effectiveDuration);
+                const playType = (typeof playerStats !== 'undefined' && playerStats.isTranscoding) ? 'Transcoding' : 'Direct Play';
+                formData.append('play_type', playType);
                 let progUrl = '/progress/{{ media_type }}/{{ item.id }}';
                 {% if token %}
                 progUrl += '?token={{ token }}';
@@ -451,7 +699,7 @@
                 {% endif %}
                 try {
                     await fetch(removeUrl, { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-                } catch (e) {}
+                } catch (e) { }
 
                 let nextUrl = "/play/tv/" + nextEpisodeId;
                 let params = [];
@@ -472,27 +720,27 @@
             updateProgressUI(actualTime, effectiveDuration);
             checkMarkers(actualTime);
         });
-        
+
         // Seeking
         progressContainer.addEventListener('mousemove', (e) => {
             const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
             if (effectiveDuration <= 0) return;
-            
+
             const rect = progressContainer.getBoundingClientRect();
             const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-            
+
             const hoverTime = pct * effectiveDuration;
             progressHoverTime.textContent = formatTime(hoverTime);
             progressHoverTime.style.left = `${pct * 100}%`;
         });
-        
+
         progressContainer.addEventListener('click', (e) => {
             const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
             if (effectiveDuration <= 0) return;
-            
+
             const rect = progressContainer.getBoundingClientRect();
             const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-            
+
             const newTime = pct * effectiveDuration;
             if (castPlayer && castPlayer.isConnected) {
                 castPlayer.currentTime = newTime;
@@ -502,7 +750,7 @@
                 loadVideoSource();
             }
         });
-        
+
         function seekOffset(seconds) {
             if (castPlayer && castPlayer.isConnected) {
                 castPlayer.currentTime = castPlayer.currentTime + seconds;
@@ -511,7 +759,7 @@
             }
             const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
             if (effectiveDuration <= 0) return;
-            
+
             const actualTime = offsetStart + video.currentTime;
             offsetStart = Math.max(0, Math.min(effectiveDuration, actualTime + seconds));
             loadVideoSource();
@@ -531,44 +779,57 @@
                 }
             }
         }
-        
+
         function toggleSubtitles() {
             subtitlesEnabled = !subtitlesEnabled;
             localStorage.setItem('player_subtitles', subtitlesEnabled);
             updateSubtitles();
         }
-        
+
         // Wait for metadata to apply subtitles properly if track loads late
         video.addEventListener('loadedmetadata', updateSubtitles);
         // Call immediately for cached loads
         updateSubtitles();
 
+        // Audio Track Switch
+        function setAudioTrack(trackIdx) {
+            document.querySelectorAll('.audio-btn').forEach(b => b.classList.remove('active'));
+            const activeBtn = document.querySelector(`.audio-btn[data-audio="${trackIdx}"]`);
+            if (activeBtn) activeBtn.classList.add('active');
+
+            offsetStart = offsetStart + video.currentTime;
+            currentAudioTrack = trackIdx;
+            localStorage.setItem('player_audio_{{ media_type }}_{{ item.id }}', trackIdx);
+            loadVideoSource();
+            document.getElementById('settingsMenu').classList.remove('show');
+        }
+
         // Resolution Switch
         function setResolution(res) {
             document.querySelectorAll('.res-btn').forEach(b => b.classList.remove('active'));
             document.querySelector(`.res-btn[data-res="${res}"]`).classList.add('active');
-            
+
             offsetStart = offsetStart + video.currentTime;
             currentRes = res;
             localStorage.setItem('player_res', res);
             loadVideoSource();
             document.getElementById('settingsMenu').classList.remove('show');
         }
-        
+
         // Playback Speed
         function setPlaybackSpeed(speed) {
             document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
             document.querySelector(`.speed-btn[data-speed="${speed}"]`).classList.add('active');
-            
+
             video.playbackRate = speed;
             localStorage.setItem('player_speed', speed);
         }
-        
+
         // Aspect Ratio
         function setAspectRatio(aspect) {
             document.querySelectorAll('.aspect-btn').forEach(b => b.classList.remove('active'));
             document.querySelector(`.aspect-btn[data-aspect="${aspect}"]`).classList.add('active');
-            
+
             video.style.objectFit = aspect;
             localStorage.setItem('player_aspect', aspect);
         }
@@ -599,7 +860,7 @@
             if (video.muted || video.volume === 0) icon = 'volume-x';
             else if (video.volume < 0.5) icon = 'volume-1';
             muteBtn.innerHTML = `<i data-lucide="${icon}"></i>`;
-            lucide.createIcons();
+            refreshIcons();
         }
 
         function toggleSettings(event) {
@@ -615,7 +876,7 @@
         // Google Cast Initialization
         let castPlayer = null;
         let castController = null;
-        
+
         // Fallback for Safari/Firefox or HTTP
         setTimeout(() => {
             if (typeof cast === 'undefined' || !cast.framework) {
@@ -636,7 +897,7 @@
                 alert("Casting is not supported on this browser/network. (Use Chrome on HTTPS/localhost for Chromecast)");
             }
         }
-        
+
         async function fallbackPiP() {
             try {
                 if (document.pictureInPictureElement) {
@@ -649,68 +910,72 @@
             }
         }
 
-        window.__onGCastApiAvailable = function(isAvailable) {
-            if (isAvailable) {
-                cast.framework.CastContext.getInstance().setOptions({
-                    receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
-                    autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED
-                });
-                
-                castPlayer = new cast.framework.RemotePlayer();
-                castController = new cast.framework.RemotePlayerController(castPlayer);
-                
-                cast.framework.CastContext.getInstance().addEventListener(
-                    cast.framework.CastContextEventType.CAST_STATE_CHANGED,
-                    function(event) {
-                        if (event.castState === cast.framework.CastState.NO_DEVICES_AVAILABLE) {
-                            document.getElementById('googleCastBtn').style.display = 'none';
-                        } else {
-                            document.getElementById('googleCastBtn').style.display = 'flex';
-                        }
-                    }
-                );
-                
-                castController.addEventListener(
-                    cast.framework.RemotePlayerEventType.IS_CONNECTED_CHANGED,
-                    function() {
-                        if (castPlayer.isConnected) {
-                            loadCastMedia();
-                        } else {
-                            video.currentTime = castPlayer.currentTime;
-                            video.play();
-                        }
-                    }
-                );
-                
-                castController.addEventListener(
-                    cast.framework.RemotePlayerEventType.CURRENT_TIME_CHANGED,
-                    function() {
-                        if (castPlayer.isConnected) {
-                            updateProgressUI(castPlayer.currentTime, castPlayer.duration || video.duration);
-                        }
-                    }
-                );
+        window.__onGCastApiAvailable = function (isAvailable) {
+            if (isAvailable && window.cast && window.cast.framework) {
+                try {
+                    cast.framework.CastContext.getInstance().setOptions({
+                        receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+                        autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED
+                    });
 
-                castController.addEventListener(
-                    cast.framework.RemotePlayerEventType.IS_PAUSED_CHANGED,
-                    function() {
-                        if (castPlayer.isConnected) {
-                            playBtn.innerHTML = castPlayer.isPaused ? '<i data-lucide="play"></i>' : '<i data-lucide="pause"></i>';
-                            lucide.createIcons();
+                    castPlayer = new cast.framework.RemotePlayer();
+                    castController = new cast.framework.RemotePlayerController(castPlayer);
+
+                    cast.framework.CastContext.getInstance().addEventListener(
+                        cast.framework.CastContextEventType.CAST_STATE_CHANGED,
+                        function (event) {
+                            if (event.castState === cast.framework.CastState.NO_DEVICES_AVAILABLE) {
+                                document.getElementById('googleCastBtn').style.display = 'none';
+                            } else {
+                                document.getElementById('googleCastBtn').style.display = 'flex';
+                            }
                         }
-                    }
-                );
+                    );
+
+                    castController.addEventListener(
+                        cast.framework.RemotePlayerEventType.IS_CONNECTED_CHANGED,
+                        function () {
+                            if (castPlayer.isConnected) {
+                                loadCastMedia();
+                            } else {
+                                video.currentTime = castPlayer.currentTime;
+                                video.play().catch(() => { });
+                            }
+                        }
+                    );
+
+                    castController.addEventListener(
+                        cast.framework.RemotePlayerEventType.CURRENT_TIME_CHANGED,
+                        function () {
+                            if (castPlayer.isConnected) {
+                                updateProgressUI(castPlayer.currentTime, castPlayer.duration || video.duration);
+                            }
+                        }
+                    );
+
+                    castController.addEventListener(
+                        cast.framework.RemotePlayerEventType.IS_PAUSED_CHANGED,
+                        function () {
+                            if (castPlayer.isConnected) {
+                                playBtn.innerHTML = castPlayer.isPaused ? '<i data-lucide="play"></i>' : '<i data-lucide="pause"></i>';
+                                refreshIcons();
+                            }
+                        }
+                    );
+                } catch (e) {
+                    console.debug("Cast framework deferred:", e);
+                }
             }
         };
 
         function loadCastMedia() {
             const castSession = cast.framework.CastContext.getInstance().getCurrentSession();
             if (!castSession) return;
-            
+
             const mediaInfo = new chrome.cast.media.MediaInfo(
                 window.location.origin + video.src, 'video/mp4'
             );
-            
+
             {% if subtitle_url %}
             const subtitle = new chrome.cast.media.Track(1, chrome.cast.media.TrackType.TEXT);
             subtitle.trackContentId = window.location.origin + '{{ subtitle_url }}';
@@ -721,21 +986,21 @@
             mediaInfo.tracks = [subtitle];
             mediaInfo.textTrackStyle = new chrome.cast.media.TextTrackStyle();
             {% endif %}
-            
+
             const request = new chrome.cast.media.LoadRequest(mediaInfo);
             request.currentTime = offsetStart + video.currentTime;
-            
+
             {% if subtitle_url %}
             if (subtitlesEnabled) {
                 request.activeTrackIds = [1];
             }
             {% endif %}
-            
+
             castSession.loadMedia(request).then(
-                function() { console.log('Cast load success'); },
-                function(error) { console.error('Cast load error', error); }
+                function () { console.log('Cast load success'); },
+                function (error) { console.error('Cast load error', error); }
             );
-            
+
             video.pause();
         }
 
@@ -747,11 +1012,11 @@
                 document.exitFullscreen();
             }
         });
-        
+
         document.addEventListener('fullscreenchange', () => {
             const icon = document.fullscreenElement ? 'minimize' : 'maximize';
             fullscreenBtn.innerHTML = `<i data-lucide="${icon}"></i>`;
-            lucide.createIcons();
+            refreshIcons();
         });
 
         // Overlay fade logic
@@ -771,119 +1036,352 @@
         document.addEventListener('mousemove', showOverlay);
         video.addEventListener('pause', showOverlay);
         showOverlay();
+
+        // Notify server that active stream stopped on exit
+        window.addEventListener('beforeunload', () => {
+            try {
+                let stopUrl = '/progress/{{ media_type }}/{{ item.id }}/stop';
+                {% if token %}
+                stopUrl += '?token={{ token }}';
+                {% endif %}
+                navigator.sendBeacon(stopUrl);
+            } catch (e) { }
+        });
     </script>
     <script src="/static/lucide.min.js"></script>
     <script>lucide.createIcons();</script>
 
-{% if sync_session_id %}
-<script>
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws/sync/{{ sync_session_id }}`);
-    let isRemoteUpdate = false;
-    
-    // Latency smoothing & measurement (inspired by cinematic break)
-    let latencyHistory = [];
-    const MAX_HISTORY = 5;
-    let avgLatency = 0; // one-way latency in milliseconds
+    {% if sync_session_id %}
+    <script>
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${protocol}//${window.location.host}/ws/sync/{{ sync_session_id }}`);
+        let isRemoteUpdate = false;
+        let isLocalReady = false;
+        var allUsersReady = false;
+        const isSyncHost = {{ 'true' if is_sync_host else 'false' }};
+        const currentUsername = "{{ user.username if user else 'Someone' }}";
 
-    function pingServer() {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ action: 'ping', client_time: Date.now() }));
-        }
-    }
+        const syncInfo = document.getElementById('syncLoadingInfo');
+        const syncText = document.getElementById('syncLoadingText');
+        const syncSubtext = document.getElementById('syncLoadingSubtext');
+        const sessionEndedOverlay = document.getElementById('sessionEndedOverlay');
+        const syncActionToast = document.getElementById('syncActionToast');
+        const syncActionIcon = document.getElementById('syncActionIcon');
+        const syncActionText = document.getElementById('syncActionText');
 
-    ws.onopen = function() {
-        pingServer();
-    };
+        let syncActionTimeout = null;
+        function showSyncAction(username, action) {
+            if (!syncActionToast || !syncActionText) return;
+            const isPaused = action === 'pause';
+            const actionVerb = isPaused ? 'Paused' : 'Resumed';
+            const iconName = isPaused ? 'pause' : 'play';
 
-    const pingInterval = setInterval(pingServer, 4000);
-
-    function sendSync(action, time) {
-        if (ws.readyState === WebSocket.OPEN && !isRemoteUpdate) {
-            ws.send(JSON.stringify({
-                action: action,
-                time: time,
-                sent_at: Date.now()
-            }));
-        }
-    }
-
-    ws.onmessage = function(event) {
-        try {
-            const data = JSON.parse(event.data);
-            
-            // Handle RTT ping-pong response
-            if (data.action === 'pong') {
-                const requestEnd = Date.now();
-                const rtt = requestEnd - data.client_time;
-                const oneWayLatency = rtt / 2;
-
-                latencyHistory.push(oneWayLatency);
-                if (latencyHistory.length > MAX_HISTORY) latencyHistory.shift();
-                avgLatency = latencyHistory.reduce((a, b) => a + b, 0) / latencyHistory.length;
-
-                console.log(`[Watch Together] RTT: ${rtt}ms | One-Way Latency: ${oneWayLatency}ms | Smoothed Avg Latency: ${Math.round(avgLatency)}ms`);
-                return;
+            syncActionText.textContent = `${username || 'Someone'} ${actionVerb}`;
+            if (syncActionIcon) {
+                syncActionIcon.setAttribute('data-lucide', iconName);
+                if (window.lucide) lucide.createIcons();
             }
 
-            isRemoteUpdate = true;
-            
-            // Calculate one-way transit time adjustment
-            let transitSeconds = (avgLatency * 2) / 1000;
-            if (data.sent_at) {
-                const measuredTransit = (Date.now() - data.sent_at) / 1000;
-                if (measuredTransit > 0 && measuredTransit < 2.0) {
-                    transitSeconds = measuredTransit;
+            syncActionToast.style.display = 'flex';
+            requestAnimationFrame(() => {
+                syncActionToast.classList.add('show');
+            });
+
+            if (syncActionTimeout) {
+                clearTimeout(syncActionTimeout);
+            }
+            syncActionTimeout = setTimeout(() => {
+                syncActionToast.classList.remove('show');
+                setTimeout(() => {
+                    if (!syncActionToast.classList.contains('show')) {
+                        syncActionToast.style.display = 'none';
+                    }
+                }, 300);
+            }, 3000);
+        }
+
+        function getActualTime() {
+            return offsetStart + (video.currentTime || 0);
+        }
+
+        function showSyncLoading(title, subtext) {
+            if (sessionEndedOverlay && sessionEndedOverlay.style.display === 'flex') return;
+            if (syncInfo) syncInfo.style.display = 'flex';
+            if (title && syncText) syncText.textContent = title;
+            if (subtext !== undefined && syncSubtext) syncSubtext.textContent = subtext;
+            if (loadingSpinner) loadingSpinner.style.opacity = '1';
+        }
+
+        function hideSyncLoading() {
+            if (syncInfo) {
+                syncInfo.style.display = 'none';
+            }
+            if (loadingSpinner) {
+                loadingSpinner.style.opacity = '0';
+            }
+        }
+
+        // Latency smoothing & measurement (inspired by cinematic break)
+        let latencyHistory = [];
+        const MAX_HISTORY = 5;
+        let avgLatency = 0; // one-way latency in milliseconds
+
+        function pingServer() {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action: 'ping', client_time: Date.now() }));
+            }
+        }
+
+        function notifyReady() {
+            if (ws.readyState === WebSocket.OPEN && !isLocalReady) {
+                isLocalReady = true;
+                ws.send(JSON.stringify({
+                    action: 'ready',
+                    time: getActualTime(),
+                    sent_at: Date.now()
+                }));
+            }
+        }
+
+        function notifyLoading() {
+            if (ws.readyState === WebSocket.OPEN && isLocalReady) {
+                isLocalReady = false;
+                allUsersReady = false;
+                ws.send(JSON.stringify({
+                    action: 'loading',
+                    time: getActualTime(),
+                    sent_at: Date.now()
+                }));
+                showSyncLoading("Waiting for all users to load...", "Buffering video stream...");
+                if (!video.paused) {
+                    video.pause();
                 }
             }
+        }
 
-            const adjustedTime = data.time + (data.action === 'play' || data.action === 'sync' ? transitSeconds : 0);
-
-            if (data.action === 'play') {
-                if (Math.abs(video.currentTime - adjustedTime) > 0.35) {
-                    video.currentTime = adjustedTime;
-                }
-                video.play().catch(e => console.log("Auto-play prevented", e));
-            } else if (data.action === 'pause') {
-                if (Math.abs(video.currentTime - data.time) > 0.35) {
-                    video.currentTime = data.time;
-                }
-                video.pause();
-            } else if (data.action === 'seek') {
-                video.currentTime = data.time;
-            } else if (data.action === 'sync') {
-                if (!video.paused && Math.abs(video.currentTime - adjustedTime) > 0.4) {
-                    console.log(`[Watch Together] Drift detected (${Math.round((video.currentTime - adjustedTime) * 1000)}ms), re-syncing to ${adjustedTime.toFixed(2)}s`);
-                    video.currentTime = adjustedTime;
-                }
+        ws.onopen = function () {
+            pingServer();
+            // Check if video is already ready
+            if (video.readyState >= 3) {
+                notifyReady();
+            } else {
+                showSyncLoading("Waiting for all users to load...", "Loading media stream...");
             }
-            
-            setTimeout(() => { isRemoteUpdate = false; }, 250);
-        } catch (e) {
-            console.error("Failed to process sync message", e);
+        };
+
+        const pingInterval = setInterval(pingServer, 4000);
+
+        function sendSync(action, time) {
+            if (ws.readyState === WebSocket.OPEN && !isRemoteUpdate) {
+                ws.send(JSON.stringify({
+                    action: action,
+                    time: typeof time === 'number' ? time : getActualTime(),
+                    sent_at: Date.now()
+                }));
+            }
         }
-    };
-    
-    video.addEventListener('play', () => {
-        sendSync('play', video.currentTime);
-    });
-    
-    video.addEventListener('pause', () => {
-        sendSync('pause', video.currentTime);
-    });
-    
-    video.addEventListener('seeked', () => {
-        sendSync('seek', video.currentTime);
-    });
-    
-    // Periodically broadcast state to catch drift between clients
-    setInterval(() => {
-        if (!video.paused && !isRemoteUpdate) {
-            sendSync('sync', video.currentTime);
-        }
-    }, 4000);
-</script>
-{% endif %}
+
+        ws.onmessage = function (event) {
+            try {
+                const data = JSON.parse(event.data);
+
+                // Handle RTT ping-pong response
+                if (data.action === 'pong') {
+                    const requestEnd = Date.now();
+                    const rtt = requestEnd - data.client_time;
+                    const oneWayLatency = rtt / 2;
+
+                    latencyHistory.push(oneWayLatency);
+                    if (latencyHistory.length > MAX_HISTORY) latencyHistory.shift();
+                    avgLatency = latencyHistory.reduce((a, b) => a + b, 0) / latencyHistory.length;
+                    return;
+                }
+
+                if (data.action === 'session_ended') {
+                    if (sessionEndedOverlay) {
+                        sessionEndedOverlay.style.display = 'flex';
+                        if (window.lucide) lucide.createIcons();
+                    }
+                    hideSyncLoading();
+                    video.pause();
+                    return;
+                }
+
+                if (data.action === 'waiting_for') {
+                    allUsersReady = false;
+                    const usersList = (data.users && data.users.length > 0) ? data.users.join(', ') : 'participants';
+                    showSyncLoading("Waiting for all users to load...", `Buffering: ${usersList}`);
+                    if (!video.paused) {
+                        isRemoteUpdate = true;
+                        video.pause();
+                        setTimeout(() => { isRemoteUpdate = false; }, 200);
+                    }
+                    return;
+                }
+
+                if (data.action === 'all_ready') {
+                    allUsersReady = true;
+                    hideSyncLoading();
+
+                    isRemoteUpdate = true;
+                    if (typeof data.time === 'number') {
+                        const targetActualTime = data.time;
+                        const current = getActualTime();
+                        const drift = Math.abs(current - targetActualTime);
+                        if (drift > 2.0) {
+                            offsetStart = Math.max(0, targetActualTime);
+                            loadVideoSource();
+                        } else if (drift > 0.35) {
+                            video.currentTime += (targetActualTime - current);
+                        }
+                    }
+
+                    if (!data.paused) {
+                        video.play().catch(e => console.debug("Sync play deferred:", e));
+                    } else {
+                        video.pause();
+                    }
+                    setTimeout(() => { isRemoteUpdate = false; }, 300);
+                    return;
+                }
+
+                if (data.action === 'room_state') {
+                    if (typeof data.time === 'number') {
+                        const current = getActualTime();
+                        if (Math.abs(current - data.time) > 2.0) {
+                            offsetStart = Math.max(0, data.time);
+                            loadVideoSource();
+                        }
+                    }
+                    if (data.all_ready) {
+                        allUsersReady = true;
+                        hideSyncLoading();
+                        if (!data.paused) {
+                            video.play().catch(e => console.debug("Sync play deferred:", e));
+                        }
+                    } else {
+                        allUsersReady = false;
+                        const usersList = (data.waiting_users && data.waiting_users.length > 0) ? data.waiting_users.join(', ') : 'participants';
+                        showSyncLoading("Waiting for all users to load...", `Buffering: ${usersList}`);
+                        video.pause();
+                    }
+                    return;
+                }
+
+                isRemoteUpdate = true;
+
+                // Calculate transit adjustment
+                let transitSeconds = (avgLatency * 2) / 1000;
+                if (data.sent_at) {
+                    const measured = (Date.now() - data.sent_at) / 1000;
+                    if (measured > 0 && measured < 2.0) transitSeconds = measured;
+                }
+
+                const targetActualTime = data.time + (data.action === 'play' || data.action === 'sync' ? transitSeconds : 0);
+                const currentActualTime = getActualTime();
+                const drift = Math.abs(currentActualTime - targetActualTime);
+
+                if (data.action === 'play') {
+                    if (data.username) {
+                        showSyncAction(data.username, 'play');
+                    }
+                    if (drift > 2.0) {
+                        offsetStart = Math.max(0, targetActualTime);
+                        loadVideoSource();
+                    } else if (drift > 0.35) {
+                        video.currentTime += (targetActualTime - currentActualTime);
+                    }
+                    if (allUsersReady) {
+                        video.play().catch(e => console.debug("Sync play deferred:", e));
+                    }
+                } else if (data.action === 'pause') {
+                    if (data.username) {
+                        showSyncAction(data.username, 'pause');
+                    }
+                    if (drift > 2.0) {
+                        offsetStart = Math.max(0, data.time);
+                        loadVideoSource();
+                    } else if (drift > 0.35) {
+                        video.currentTime += (data.time - currentActualTime);
+                    }
+                    video.pause();
+                } else if (data.action === 'seek') {
+                    offsetStart = Math.max(0, data.time);
+                    loadVideoSource();
+                    notifyLoading();
+                } else if (data.action === 'sync') {
+                    if (!video.paused && drift > 0.4) {
+                        console.log(`[Watch Together] Drift detected (${Math.round((currentActualTime - targetActualTime) * 1000)}ms), re-syncing`);
+                        if (drift > 2.0) {
+                            offsetStart = Math.max(0, targetActualTime);
+                            loadVideoSource();
+                        } else {
+                            video.currentTime += (targetActualTime - currentActualTime);
+                        }
+                    }
+                }
+
+                setTimeout(() => { isRemoteUpdate = false; }, 300);
+            } catch (e) {
+                console.error("Failed to process sync message", e);
+            }
+        };
+
+        // Video state handlers for synchronized readiness
+        video.addEventListener('canplay', () => {
+            notifyReady();
+        });
+
+        video.addEventListener('playing', () => {
+            notifyReady();
+        });
+
+        video.addEventListener('waiting', () => {
+            notifyLoading();
+        });
+
+        video.addEventListener('seeking', () => {
+            if (!isRemoteUpdate) {
+                notifyLoading();
+            }
+        });
+
+        video.addEventListener('play', () => {
+            if (!isRemoteUpdate) {
+                if (!allUsersReady) {
+                    video.pause();
+                    showSyncLoading("Waiting for all users to load...", "Please wait until everyone has finished loading.");
+                    return;
+                }
+                sendSync('play', getActualTime());
+                showSyncAction(currentUsername, 'play');
+            }
+        });
+
+        video.addEventListener('pause', () => {
+            if (!isRemoteUpdate && allUsersReady) {
+                sendSync('pause', getActualTime());
+                showSyncAction(currentUsername, 'pause');
+            }
+        });
+
+        // Periodic sync broadcast from host
+        {% if is_sync_host %}
+        setInterval(() => {
+            if (!video.paused && !isRemoteUpdate && allUsersReady) {
+                sendSync('sync', getActualTime());
+            }
+        }, 3000);
+
+        // Host unload beacon to immediately end session
+        window.addEventListener('beforeunload', () => {
+            try {
+                navigator.sendBeacon('/watch_together/end/{{ sync_session_id }}');
+            } catch (e) { }
+        });
+        {% endif %}
+    </script>
+    {% endif %}
 
 </body>
 

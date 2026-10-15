@@ -27,6 +27,11 @@
                 
                 <label for="password">{% if mode == 'login' %}Password{% else %}Choose a Password{% endif %}</label>
                 <input type="password" name="password" id="password" required>
+
+                {% if mode != 'login' %}
+                <label for="confirm_password">Confirm Password</label>
+                <input type="password" name="confirm_password" id="confirm_password" required>
+                {% endif %}
                 
                 <button type="submit" class="btn" style="width: 100%; margin-top: 10px;">
                     {% if mode == 'setup' %}Create Admin Account
@@ -36,5 +41,19 @@
                 </button>
             </form>
         </div>
+
+        {% if mode != 'login' %}
+        <script>
+            document.querySelector('form').addEventListener('submit', function(e) {
+                const p1 = document.getElementById('password').value;
+                const p2 = document.getElementById('confirm_password').value;
+                if (p1 !== p2) {
+                    e.preventDefault();
+                    alert('Passwords do not match. Please try again.');
+                    document.getElementById('confirm_password').focus();
+                }
+            });
+        </script>
+        {% endif %}
     </body>
 </html>

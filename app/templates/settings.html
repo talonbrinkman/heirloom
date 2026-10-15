@@ -3,9 +3,86 @@
 <head>
     <title>Heirloom</title>
     <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <script>
-        function copyToClipboard(text) {
-            navigator.clipboard.writeText(text).catch(err => console.error("Failed to copy:", err));
+        function copyToClipboard(text, btn) {
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(() => {
+                    if (btn) flashButton(btn, "Copied!");
+                }).catch(() => fallbackCopy(text, btn));
+            } else {
+                fallbackCopy(text, btn);
+            }
+        }
+
+        function fallbackCopy(text, btn) {
+            try {
+                const ta = document.createElement("textarea");
+                ta.value = text;
+                ta.style.position = "fixed";
+                ta.style.left = "-9999px";
+                ta.style.top = "-9999px";
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                const successful = document.execCommand('copy');
+                document.body.removeChild(ta);
+                if (successful && btn) {
+                    flashButton(btn, "Copied!");
+                } else if (!successful) {
+                    prompt("Copy invitation link:", text);
+                }
+            } catch (err) {
+                prompt("Copy invitation link:", text);
+            }
+        }
+
+        function flashButton(btn, msg, duration = 2000) {
+            if (btn._flashTimeout) {
+                clearTimeout(btn._flashTimeout);
+            }
+            const orig = btn._origHTML || btn.innerHTML;
+            btn._origHTML = orig;
+            const origWidth = btn.offsetWidth;
+            if (origWidth > 0 && !btn.style.minWidth) {
+                btn.style.minWidth = `${origWidth}px`;
+            }
+            btn.innerHTML = `<i data-lucide="check"></i> ${msg}`;
+            if (window.lucide) lucide.createIcons();
+            btn._flashTimeout = setTimeout(() => {
+                btn.innerHTML = orig;
+                btn.style.minWidth = '';
+                delete btn._origHTML;
+                delete btn._flashTimeout;
+                if (window.lucide) lucide.createIcons();
+            }, duration);
+        }
+
+        async function submitSaveForm(event) {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const btn = form.querySelector('button[type="submit"]') || form.querySelector('.btn-primary');
+            if (!btn || btn.dataset.saving) return;
+            btn.dataset.saving = "true";
+
+            try {
+                const formData = new FormData(form);
+                const res = await fetch(form.action, {
+                    method: form.method || 'POST',
+                    body: formData
+                });
+                if (res.ok) {
+                    flashButton(btn, "Saved!", 3000);
+                } else {
+                    console.error("Save failed:", res.statusText);
+                }
+            } catch (err) {
+                console.error("Save error:", err);
+            } finally {
+                setTimeout(() => {
+                    delete btn.dataset.saving;
+                }, 3000);
+            }
         }
 
         function togglePasswordVisibility() {
@@ -25,14 +102,21 @@
             lucide.createIcons();
         }
 
+        const userFormTimers = new Map();
         function submitUserForm(form) {
-            const formData = new FormData(form);
-            fetch(form.action, {
-                method: form.method,
-                body: formData
-            }).then(response => {
-                // Silent save completed
-            }).catch(err => console.error("Failed to save:", err));
+            const formKey = form.action;
+            if (userFormTimers.has(formKey)) {
+                clearTimeout(userFormTimers.get(formKey));
+            }
+            const timer = setTimeout(() => {
+                userFormTimers.delete(formKey);
+                const formData = new FormData(form);
+                fetch(form.action, {
+                    method: form.method || 'POST',
+                    body: formData
+                }).catch(err => console.error("Failed to save:", err));
+            }, 350);
+            userFormTimers.set(formKey, timer);
         }
 
         let currentDirPath = "";
@@ -89,6 +173,9 @@
             }
         }
 
+        let activeTestId = 0;
+        let testDebounceTimer = null;
+
         async function testRemoteAccess() {
             let url = document.getElementById('remoteUrlInput').value.trim();
             checkHttpsWarning(url);
@@ -101,11 +188,16 @@
 
             if (!url) {
                 statusBox.style.display = 'none';
+                spinner.style.display = 'none';
+                check.style.display = 'none';
+                cross.style.display = 'none';
                 return;
             }
             if (url.endsWith('/')) {
                 url = url.slice(0, -1);
             }
+
+            const currentTestId = ++activeTestId;
 
             statusBox.style.display = 'flex';
             statusBox.className = 'status-box testing';
@@ -115,17 +207,25 @@
             text.textContent = 'Testing...';
 
             try {
-                const res = await fetch(url + '/ping');
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort("timeout"), 6000);
+                const res = await fetch(url + '/ping', { signal: controller.signal });
+                clearTimeout(timeoutId);
+
+                if (currentTestId !== activeTestId) return;
+
                 if (res.ok) {
                     const data = await res.json();
                     if (data.status === 'ok') {
                         statusBox.className = 'status-box success';
                         spinner.style.display = 'none';
                         check.style.display = 'block';
+                        cross.style.display = 'none';
                         text.textContent = 'Online';
                     } else {
                         statusBox.className = 'status-box error';
                         spinner.style.display = 'none';
+                        check.style.display = 'none';
                         cross.style.display = 'block';
                         text.textContent = 'Error';
                         console.warn('Unexpected response:', data);
@@ -133,16 +233,23 @@
                 } else {
                     statusBox.className = 'status-box error';
                     spinner.style.display = 'none';
+                    check.style.display = 'none';
                     cross.style.display = 'block';
                     text.textContent = 'Offline';
-                    console.error('Error:', res.status, res.statusText);
+                    console.warn('Remote Access status check returned:', res.status, res.statusText);
                 }
             } catch (err) {
+                if (currentTestId !== activeTestId) return;
                 statusBox.className = 'status-box error';
                 spinner.style.display = 'none';
+                check.style.display = 'none';
                 cross.style.display = 'block';
                 text.textContent = 'Offline';
-                console.error('Connection Failed:', err.message);
+                if (err.name === 'AbortError' || err === 'timeout' || controller.signal.aborted) {
+                    console.warn('Remote Access Ping: Connection timed out after 6s (URL unreachable from current network)');
+                } else {
+                    console.warn('Remote Access Ping failed:', err.message);
+                }
             }
         }
 
@@ -151,9 +258,40 @@
             if (remoteUrlInput) {
                 testRemoteAccess();
                 remoteUrlInput.addEventListener('input', () => {
-                    testRemoteAccess();
+                    clearTimeout(testDebounceTimer);
+                    testDebounceTimer = setTimeout(testRemoteAccess, 400);
                 });
             }
+
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.get('rewind_success')) {
+                const btn = document.querySelector('form[action="/settings/rewind"] button[type="submit"]');
+                if (btn) flashButton(btn, "Saved!", 3000);
+                window.history.replaceState({}, document.title, window.location.pathname);
+            }
+
+            // Prevent spamming / double-submitting standard forms
+            document.addEventListener('submit', (e) => {
+                const form = e.target;
+                if (e.defaultPrevented) return;
+                if (form.dataset.submitting === "true") {
+                    e.preventDefault();
+                    return;
+                }
+                form.dataset.submitting = "true";
+                const submitBtn = form.querySelector('button[type="submit"]');
+                if (submitBtn) {
+                    submitBtn.style.pointerEvents = 'none';
+                    submitBtn.style.opacity = '0.7';
+                }
+                setTimeout(() => {
+                    delete form.dataset.submitting;
+                    if (submitBtn) {
+                        submitBtn.style.pointerEvents = '';
+                        submitBtn.style.opacity = '';
+                    }
+                }, 3000);
+            });
         });
 
         function toggleMediaTypeMenu(event) {
@@ -164,11 +302,18 @@
 
         function selectMediaType(value, label) {
             document.getElementById('mediaTypeInput').value = value;
-            document.getElementById('mediaTypeBtn').innerHTML = label + ' <i data-lucide="chevron-down" style="width: 16px; height: 16px; margin-left: 5px; vertical-align: middle;"></i>';
+            document.getElementById('mediaTypeBtn').innerHTML = label + ' <i data-lucide="chevron-down"></i>';
             document.getElementById('mediaTypeMenu').classList.remove('show');
             document.querySelectorAll('#mediaTypeMenu .res-btn').forEach(btn => btn.classList.remove('active'));
             event.target.classList.add('active');
-            lucide.createIcons();
+            if (window.lucide) lucide.createIcons();
+        }
+
+        function setRewindPreset(seconds) {
+            const input = document.getElementById('rewindSecondsInput');
+            if (input) {
+                input.value = seconds;
+            }
         }
 
         document.addEventListener('click', function (event) {
@@ -207,7 +352,27 @@
                         <i data-lucide="eye" id="togglePasswordBtn"></i>
                     </div>
                 </div>
-                <button type="submit" class="btn m-0" style="min-width: 140px;">Change Password</button>
+                <button type="submit" class="btn btn-primary"><i data-lucide="rotate-ccw-key"></i> Change
+                    Password</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2 class="m-0">Rewind on Resume</h2>
+            </div>
+
+            <p style="color: var(--text-secondary); font-size: 0.9em;" class="mb-15">Set how many seconds playback will
+                automatically rewind when opening a movie or episode with saved progress. Set to 0 to disable.</p>
+
+            <form action="/settings/rewind" method="post" onsubmit="submitSaveForm(event)"
+                class="flex gap-10 align-center mb-15">
+                <div class="flex-1" style="position: relative;">
+                    <input type="number" name="rewind_seconds" id="rewindSecondsInput" class="no-arrows" min="0"
+                        max="300" step="1" value="{{ user.rewind_seconds if user.rewind_seconds is not none else 0 }}"
+                        placeholder="Seconds (e.g. 5, 10)" required class="w-full m-0" style="box-sizing: border-box;">
+                </div>
+                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
             </form>
         </div>
 
@@ -216,7 +381,8 @@
             <div class="card-header">
                 <h2 class="m-0">Media Volume Paths</h2>
                 <form action="/settings/rescan" method="post" class="m-0">
-                    <button type="submit" class="btn-small">Rescan Library</button>
+                    <button type="submit" class="btn btn-secondary btn-sm"><i data-lucide="refresh-cw"></i> Rescan
+                        Library</button>
                 </form>
             </div>
 
@@ -224,14 +390,14 @@
                 <div class="flex-1 flex gap-10 align-center">
                     <input type="text" name="path" id="pathInput" placeholder="/media/movies or custom volume path"
                         required class="m-0 flex-1">
-                    <button type="button" class="btn m-0 p-12 bg-gray" onclick="openDirBrowser()">Browse</button>
+                    <button type="button" class="btn btn-secondary" onclick="openDirBrowser()"><i
+                            data-lucide="folder"></i> Browse</button>
                 </div>
                 <div class="custom-select-container" style="position: relative;">
                     <input type="hidden" name="media_type" id="mediaTypeInput" value="movie">
-                    <button type="button" class="btn m-0 bg-gray" style="padding: 12px; height: 100%;"
-                        onclick="toggleMediaTypeMenu(event)" id="mediaTypeBtn">
-                        Movies <i data-lucide="chevron-down"
-                            style="width: 16px; height: 16px; margin-left: 5px; vertical-align: middle;"></i>
+                    <button type="button" class="btn btn-secondary" onclick="toggleMediaTypeMenu(event)"
+                        id="mediaTypeBtn">
+                        Movies <i data-lucide="chevron-down"></i>
                     </button>
                     <div class="dropdown-menu settings-menu-expanded" id="mediaTypeMenu"
                         style="flex-direction: column; top: 100%; bottom: auto; right: auto; left: 0; min-width: 120px; padding: 5px; margin-top: 5px;">
@@ -243,7 +409,7 @@
                             onclick="selectMediaType('photo', 'Photos')">Photos</button>
                     </div>
                 </div>
-                <button type="submit" class="btn m-0 nowrap">+ Add Path</button>
+                <button type="submit" class="btn btn-primary"><i data-lucide="folder-plus"></i> Add Path</button>
             </form>
 
             <ul>
@@ -251,15 +417,18 @@
                 <li class="list-item">
                     <div class="flex gap-10 align-center">
                         {% if vp.exists %}
-                        <span class="code-text badge-active" style="text-transform: uppercase;" title="Active">{{ vp.media_type }}</span>
+                        <span class="code-text badge-active" style="text-transform: uppercase;" title="Active">{{
+                            vp.media_type }}</span>
                         {% else %}
-                        <span class="code-text badge-inactive" style="text-transform: uppercase;" title="Inactive">{{ vp.media_type }}</span>
+                        <span class="code-text badge-inactive" style="text-transform: uppercase;" title="Inactive">{{
+                            vp.media_type }}</span>
                         {% endif %}
                         <strong>{{ vp.display_path }}</strong>
                     </div>
                     <form action="/settings/delete_volume/{{ vp.id }}" method="post" class="m-0">
-                        <button type="submit" class="btn-small btn-danger"
-                            onclick="return confirm('Remove this volume path? Missing media will be removed from library.');">Delete</button>
+                        <button type="submit" class="btn btn-danger btn-sm"
+                            onclick="return confirm('Remove this volume path? Missing media will be removed from library.');"><i
+                                data-lucide="trash-2"></i> Delete</button>
                     </form>
                 </li>
                 {% else %}
@@ -271,9 +440,11 @@
         <div class="card">
             <div class="card-header">
                 <h2 class="m-0">Users & Invitations</h2>
-                <form action="/settings/generate_invite" method="post" class="m-0" onsubmit="document.getElementById('hiddenRemoteUrl').value = document.getElementById('remoteUrlInput').value">
+                <form action="/settings/generate_invite" method="post" class="m-0"
+                    onsubmit="document.getElementById('hiddenRemoteUrl').value = document.getElementById('remoteUrlInput').value">
                     <input type="hidden" name="remote_url" id="hiddenRemoteUrl">
-                    <button type="submit" class="btn-small">+ Add User</button>
+                    <button type="submit" class="btn btn-primary btn-sm"><i data-lucide="user-plus"></i> Add
+                        User</button>
                 </form>
             </div>
             <ul>
@@ -285,29 +456,30 @@
                     {% if not u.is_admin %}
                     <div class="flex align-center" style="gap: 20px;">
                         <!-- Auto-submit on change removes the need for a button -->
-                        <form action="/settings/update_user/{{ u.id }}" method="post"
-                            class="m-0 flex align-center" style="gap: 20px;">
+                        <form action="/settings/update_user/{{ u.id }}" method="post" class="m-0 flex align-center"
+                            style="gap: 20px;">
                             <div class="flex gap-10 align-center">
                                 <label class="toggle-pill"><input type="checkbox" name="movies_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.movies_access
-                                        %}checked{% endif %}>
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        u.movies_access %}checked{% endif %}>
                                     <span>Movies</span></label>
-                                <label class="toggle-pill"><input type="checkbox" name="tv_access" class="hidden-checkbox"
-                                        onchange="submitUserForm(this.form)" {% if u.tv_access %}checked{% endif %}>
+                                <label class="toggle-pill"><input type="checkbox" name="tv_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.tv_access
+                                        %}checked{% endif %}>
                                     <span>TV Shows</span></label>
                                 <label class="toggle-pill"><input type="checkbox" name="photos_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.photos_access
-                                        %}checked{% endif %}>
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        u.photos_access %}checked{% endif %}>
                                     <span>Photos</span></label>
                             </div>
                             <div class="flex gap-10 align-center">
                                 <label class="toggle-pill"><input type="checkbox" name="downloads_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.downloads_access
-                                        %}checked{% endif %}>
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        u.downloads_access %}checked{% endif %}>
                                     <span>Downloads</span></label>
                                 <label class="toggle-pill"><input type="checkbox" name="watch_together_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.watch_together_access
-                                        %}checked{% endif %}>
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        u.watch_together_access %}checked{% endif %}>
                                     <span>Watch Together</span></label>
                                 <label class="toggle-pill"><input type="checkbox" name="kids_mode"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.kids_mode
@@ -316,8 +488,9 @@
                             </div>
                         </form>
                         <form action="/settings/delete_user/{{ u.id }}" method="post" class="m-0">
-                            <button type="submit" class="btn-small btn-danger"
-                                onclick="return confirm('Delete this user?');">Delete</button>
+                            <button type="submit" class="btn btn-danger btn-sm"
+                                onclick="return confirm('Delete this user?');"><i data-lucide="trash-2"></i>
+                                Delete</button>
                         </form>
                     </div>
                     {% endif %}
@@ -332,11 +505,12 @@
                                 class="code-text">{{ invite.code }}</span>)</div>
                     </div>
                     <div class="flex gap-10">
-                        <button type="button" class="btn-small"
-                            onclick="copyToClipboard('{{ host_url }}/register?invite={{ invite.code }}')">Copy
-                            Link</button>
+                        <button type="button" class="btn btn-secondary btn-sm"
+                            onclick="copyToClipboard('{{ host_url }}/register?invite={{ invite.code }}', this)"><i
+                                data-lucide="copy"></i> Copy Link</button>
                         <form action="/settings/delete_invite/{{ invite.id }}" method="post" class="m-0">
-                            <button type="submit" class="btn-small btn-danger">Delete</button>
+                            <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i>
+                                Delete</button>
                         </form>
                     </div>
                 </li>
@@ -354,16 +528,17 @@
                     style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i> TMDB API Key is
                 configured and active.</p>
             {% endif %}
-            <form action="/settings/tmdb" method="post" class="flex gap-10 align-center m-0">
+            <form action="/settings/tmdb" method="post" onsubmit="submitSaveForm(event)"
+                class="flex gap-10 align-center m-0">
                 <div class="flex-1" style="position: relative;">
-                    <input type="password" name="tmdb_key" id="tmdbKeyInput" placeholder="Enter TMDB API Key" value="{{ tmdb_key }}"
-                        class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
+                    <input type="password" name="tmdb_key" id="tmdbKeyInput" placeholder="Enter TMDB API Key"
+                        value="{{ tmdb_key }}" class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
                     <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
                         onclick="toggleVisibility('tmdbKeyInput', 'toggleTmdbBtn')">
                         <i data-lucide="eye" id="toggleTmdbBtn"></i>
                     </div>
                 </div>
-                <button type="submit" class="btn m-0" style="min-width: 100px;">Save</button>
+                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
             </form>
         </div>
 
@@ -371,18 +546,19 @@
             <h2 class="mt-0">Network & Remote Access</h2>
             <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Configure your external URL and port if you use DDNS
                 or port forwarding. This ensures invite links work outside your local network.</p>
-            <form action="/settings/remote_access" method="post" class="flex gap-10 align-center m-0">
+            <form action="/settings/remote_access" method="post" onsubmit="submitSaveForm(event)"
+                class="flex gap-10 align-center m-0">
                 <div class="flex-1" style="position: relative;">
                     <input type="password" name="remote_url" id="remoteUrlInput"
-                        placeholder="e.g. http://my-home.duckdns.org:8080" value="{{ remote_url }}" class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
+                        placeholder="e.g. http://my-home.duckdns.org:8080" value="{{ remote_url }}" class="w-full m-0"
+                        style="padding-right: 40px; box-sizing: border-box;">
                     <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
                         onclick="toggleVisibility('remoteUrlInput', 'toggleRemoteUrlBtn')">
                         <i data-lucide="eye" id="toggleRemoteUrlBtn"></i>
                     </div>
                 </div>
 
-                <div id="testStatusBox" class="status-box m-0"
-                    style="display: none; padding: 10px 20px; border-radius: 4px; align-items: center; gap: 8px; font-weight: bold; min-width: 100px; justify-content: center; background-color: var(--bg-secondary);">
+                <div id="testStatusBox" class="status-box m-0">
                     <i id="testSpinner" data-lucide="loader" class="spinner"
                         style="display: none; width: 18px; height: 18px;"></i>
                     <i id="testCheck" data-lucide="check"
@@ -392,7 +568,7 @@
                     <span id="testStatusText" style="font-size: 16px; color: var(--text-primary);">Testing...</span>
                 </div>
 
-                <button type="submit" class="btn m-0" style="min-width: 100px;">Save</button>
+                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
             </form>
             <div id="httpsWarning" style="display: none; color: #ffaa00; font-size: 0.85em; margin-top: 10px;">
                 <i data-lucide="alert-triangle"
@@ -405,23 +581,31 @@
 
         <div class="card">
             <h2 class="mt-0">Hardware Accelerated Transcoding</h2>
-            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Select a hardware encoder if your server supports it to reduce CPU usage when streaming to unsupported devices or at lower resolutions.</p>
-            <form action="/settings/transcoding" method="post" class="flex gap-10 align-center m-0">
-                <select name="hw_accel_profile" class="flex-1 m-0" style="padding: 10px; border-radius: 4px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color);">
-                    <option value="auto" {% if hw_accel_profile == 'auto' or not hw_accel_profile %}selected{% endif %}>Auto (Detect best available)</option>
-                    <option value="software" {% if hw_accel_profile == 'software' %}selected{% endif %}>Software (CPU / libx264)</option>
-                    <option value="nvenc" {% if hw_accel_profile == 'nvenc' %}selected{% endif %}>NVIDIA NVENC (h264_nvenc)</option>
-                    <option value="qsv" {% if hw_accel_profile == 'qsv' %}selected{% endif %}>Intel QuickSync (h264_qsv)</option>
-                    <option value="vaapi" {% if hw_accel_profile == 'vaapi' %}selected{% endif %}>VA-API (h264_vaapi)</option>
-                    <option value="videotoolbox" {% if hw_accel_profile == 'videotoolbox' %}selected{% endif %}>Apple VideoToolbox (h264_videotoolbox)</option>
+            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Select a hardware encoder if your server supports it
+                to reduce CPU usage when streaming to unsupported devices or at lower resolutions.</p>
+            <form action="/settings/transcoding" method="post" onsubmit="submitSaveForm(event)"
+                class="flex gap-10 align-center m-0">
+                <select name="hw_accel_profile" class="select-input flex-1 m-0">
+                    <option value="auto" {% if hw_accel_profile=='auto' or not hw_accel_profile %}selected{% endif %}>
+                        Auto (Detect best available)</option>
+                    <option value="software" {% if hw_accel_profile=='software' %}selected{% endif %}>Software (CPU /
+                        libx264)</option>
+                    <option value="nvenc" {% if hw_accel_profile=='nvenc' %}selected{% endif %}>NVIDIA NVENC
+                        (h264_nvenc)</option>
+                    <option value="qsv" {% if hw_accel_profile=='qsv' %}selected{% endif %}>Intel QuickSync (h264_qsv)
+                    </option>
+                    <option value="vaapi" {% if hw_accel_profile=='vaapi' %}selected{% endif %}>VA-API (h264_vaapi)
+                    </option>
+                    <option value="videotoolbox" {% if hw_accel_profile=='videotoolbox' %}selected{% endif %}>Apple
+                        VideoToolbox (h264_videotoolbox)</option>
                 </select>
-                <button type="submit" class="btn m-0" style="min-width: 100px;">Save</button>
+                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
             </form>
         </div>
 
         <div class="card">
             <form action="/logout" method="post" class="m-0">
-                <button type="submit" class="btn w-full">Logout</button>
+                <button type="submit" class="btn btn-danger btn-block"><i data-lucide="log-out"></i> Logout</button>
             </form>
         </div>
         <div style="text-align: center; color: #888; font-size: 0.8em; margin-top: 10px;">
@@ -435,15 +619,17 @@
             <h3 class="mt-0">Select Directory</h3>
             <div class="flex gap-10 mb-10">
                 <input type="text" id="modalPath" class="m-0 flex-1" readonly>
-                <button type="button" class="btn m-0" onclick="loadDir('..')">Up</button>
+                <button type="button" class="btn btn-secondary" style="min-width: 80px;" onclick="loadDir('..')"><i
+                        data-lucide="arrow-up"></i> Up</button>
             </div>
             <div id="dirList" class="dir-list">
                 <!-- dirs loaded here -->
             </div>
             <div class="flex justify-end gap-10">
-                <button type="button" class="btn bg-gray m-0"
+                <button type="button" class="btn btn-secondary"
                     onclick="document.getElementById('dirModal').style.display='none'">Cancel</button>
-                <button type="button" class="btn m-0" onclick="selectDir()">Select</button>
+                <button type="button" class="btn btn-primary" onclick="selectDir()"><i data-lucide="check"></i>
+                    Select</button>
             </div>
         </div>
     </div>

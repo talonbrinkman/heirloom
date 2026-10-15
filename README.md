@@ -9,11 +9,15 @@ By leveraging a lightweight, API-first architecture using Python and FastAPI, He
 - 100% Free & Open Source
 - Watch Together
 - Skip Intro & Credits
+- Rewind on Resume
 - Download Capability
 - Automated Media Management
+- Real-Time Stream Dashboard
 - Role-Based Access Control
 - Kids Mode & Content Filtering
 - Stateful Playback & Watchlists
+- Smart Remuxing & Direct Stream
+- Multi-Audio Track Selection
 - Hardware-Accelerated Transcoding
 - Cross-Platform REST API
 - Frictionless Docker Deployment
@@ -101,21 +105,18 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 
 - **Library Scanning**: The server automatically scans mounted directories on startup and uses file system watchers to detect new content.
 - **Inviting Users**: As an admin, navigate to the dashboard to generate one-time use invite codes for your family and friends.
-- **Watch Together**: Start a session from any media page and share the session invite with another registered user. Heirloom uses real-time WebSockets with **rolling latency compensation** (adapted from the Cinematic Break pilot system) to keep playback in near-perfect lip sync across varying network conditions.
+- **Watch Together**: Start a session from any media page and share the session invite with another registered user.
+- **Rewind on Resume**: Configure your preferred rewind buffer (e.g., 5s, 10s) in Settings so playback automatically skips back slightly when resuming interrupted movies or TV episodes, easing you back into context.
+- **Smart Remuxing & Direct Stream**: Media files with web-compatible video streams (H.264/AVC) are repacked on-the-fly into fragmented MP4 streams via zero-overhead stream copy (`-c:v copy`), even across MKV/AVI containers and seeking/resuming. Only audio or incompatible video codecs/resolutions are transcoded, eliminating unnecessary CPU/GPU load while delivering instant playback and bit-for-bit picture quality.
+- **Multi-Audio Track Selection**: Switch between multiple audio tracks (e.g., original language tracks, international dubs, director's commentary) on-the-fly directly from the player settings menu, with persistent per-title track memory and zero buffering loss.
 
 ## 🔮 Upcoming Improvements
 
-- Rewind on Resume
-- Smart Remuxing & Direct Stream Optimization
-- Multi-Audio Track Selection
 - Embedded Subtitle Extraction & Subtitle Search
 - Adaptive Bitrate & HLS Streaming
-- Trailers & Extras
 - Fast Profile Switching & PIN Protection
-- Real-Time Stream Dashboard
 - Non-Blocking Async Scanner
 - Actor & Director Filmography Hubs
-- Smart Collections & Recommendations
 - Music Library & Audio Player
 - Mobile Offline Sync
 

@@ -3,27 +3,33 @@
 <head>
     <title>Heirloom</title>
     <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 </head>
 
 <body>
-    <div class="header-full">
+    <div class="header">
         <div class="flex gap-15 align-center">
             <h1 class="m-0">Heirloom</h1>
-            <div style="position: relative;">
+            <div class="search-box">
                 <input type="text" id="searchInput" class="search-input" placeholder="Search..."
                     oninput="handleGlobalSearch()" autocomplete="off">
-                <div id="searchResults" class="dropdown-menu"
-                    style="top: 100%; left: 0; min-width: 350px; max-height: 400px; overflow-y: auto; display: none;">
+                <div id="searchResults" class="dropdown-menu search-results">
                 </div>
             </div>
         </div>
         <div class="flex gap-15 align-center">
-            <div style="position: relative;">
+            <!-- Server Dashboard -->
+            {% if user.is_admin %}
+            <a href="/server-dashboard" class="icon-link" title="Server Dashboard">
+                <i data-lucide="activity"></i>
+            </a>
+            {% endif %}
+            <div class="inbox">
                 <a href="#" class="icon-link" id="inboxBtn" onclick="toggleInbox(event)" title="Inbox">
                     <i data-lucide="inbox"></i>
-                    <span id="inboxBadge" style="display: none; position: absolute; top: -2px; right: -2px; background: red; width: 10px; height: 10px; border-radius: 50%;"></span>
+                    <span id="inboxBadge" class="inbox-badge" style="display: none;"></span>
                 </a>
-                <div id="inboxMenu" class="dropdown-menu" style="top: 100%; right: 0; left: auto; min-width: 300px; max-height: 400px; overflow-y: auto; display: none; padding: 10px;">
+                <div id="inboxMenu" class="dropdown-menu inbox-menu" style="display: none;">
                     <div id="inboxItems">Loading...</div>
                 </div>
             </div>
@@ -58,7 +64,7 @@
             <div class="card">
                 <h2>Recently Watching</h2>
                 <div class="carousel-container">
-                    <button class="carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
+                    <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
                             data-lucide="chevron-left"></i></button>
                     <div class="carousel-row">
                         {% for h in history %}
@@ -75,34 +81,33 @@
                                         <div class="progress-fill" style="width: {{ h.progress or 0 }}%;"></div>
                                     </div>
                                 </a>
-                                <a href="/play/{{ h.media_type }}/{{ h.item.id }}" class="hover-play">
+                                <a href="/play/{{ h.media_type }}/{{ h.item.id }}" class="icon-btn hover-play">
                                     <i data-lucide="play" fill="currentColor"></i>
                                 </a>
-                                <button class="three-dots-btn"
+                                <button class="icon-btn three-dots-btn"
                                     onclick="toggleMenu(event, 'menu-history-{{ loop.index }}')">
                                     <i data-lucide="more-vertical" fill="white"></i>
                                 </button>
                                 <div class="dropdown-menu" id="menu-history-{{ loop.index }}">
-                                    {% if user.watch_together_access %}<div class="m-0"><button type="button" onclick="openWatchTogether('{{ h.media_type }}', {{ h.item.id }})">Watch Together</button></div>{% endif %}
+                                    {% if user.watch_together_access %}<button type="button"
+                                        onclick="openWatchTogether('{{ h.media_type }}', {{ h.item.id }})">Watch
+                                        Together</button>{% endif %}
                                     {% if user.downloads_access %}
-                                    <form action="/download/{{ h.media_type }}/{{ h.item.id }}" method="get"
-                                        class="m-0">
+                                    <form action="/download/{{ h.media_type }}/{{ h.item.id }}" method="get">
                                         <button type="submit">Download</button>
                                     </form>
                                     {% endif %}
-                                    <form action="/history/remove/{{ h.media_type }}/{{ h.item.id }}" method="post"
-                                        class="m-0">
+                                    <form action="/history/remove/{{ h.media_type }}/{{ h.item.id }}" method="post">
                                         <button type="submit">Remove from Continue Watching</button>
                                     </form>
                                     {% if (h.media_type == 'movie' and h.item.id in user_watchlist_movies) or
                                     (h.media_type == 'tv' and h.item.id in user_watchlist_tv) %}
                                     <form action="/watchlist/remove_by_item/{{ h.media_type }}/{{ h.item.id }}"
-                                        method="post" class="m-0">
+                                        method="post">
                                         <button type="submit">Remove from Watchlist</button>
                                     </form>
                                     {% else %}
-                                    <form action="/watchlist/add/{{ h.media_type }}/{{ h.item.id }}" method="post"
-                                        class="m-0">
+                                    <form action="/watchlist/add/{{ h.media_type }}/{{ h.item.id }}" method="post">
                                         <button type="submit">Add to Watchlist</button>
                                     </form>
                                     {% endif %}
@@ -113,7 +118,7 @@
                         </div>
                         {% endfor %}
                     </div>
-                    <button class="carousel-arrow right" onclick="scrollCarousel(this, 1)"><i
+                    <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i
                             data-lucide="chevron-right"></i></button>
                 </div>
             </div>
@@ -123,7 +128,7 @@
             <div class="card">
                 <h2>Recommended for You</h2>
                 <div class="carousel-container">
-                    <button class="carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
+                    <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
                             data-lucide="chevron-left"></i></button>
                     <div class="carousel-row">
                         {% for r in recommended %}
@@ -137,26 +142,28 @@
                                     <div class="poster-placeholder"></div>
                                     {% endif %}
                                 </a>
-                                <a href="/play/{{ r.media_type }}/{{ r.item.id }}" class="hover-play">
+                                <a href="/play/{{ r.media_type }}/{{ r.item.id }}" class="icon-btn hover-play">
                                     <i data-lucide="play" fill="currentColor"></i>
                                 </a>
-                                <button class="three-dots-btn"
+                                <button class="icon-btn three-dots-btn"
                                     onclick="toggleMenu(event, 'menu-recommended-{{ loop.index }}')">
                                     <i data-lucide="more-vertical" fill="white"></i>
                                 </button>
                                 <div class="dropdown-menu" id="menu-recommended-{{ loop.index }}">
-                                    {% if user.watch_together_access %}<div class="m-0"><button type="button" onclick="openWatchTogether('{{ r.media_type }}', {{ r.item.id }})">Watch Together</button></div>{% endif %}
+                                    {% if user.watch_together_access %}<button type="button"
+                                        onclick="openWatchTogether('{{ r.media_type }}', {{ r.item.id }})">Watch
+                                        Together</button>{% endif %}
                                     {% if user.downloads_access %}
-                                    <form action="/download/{{ r.media_type }}/{{ r.item.id }}" method="get"
-                                        class="m-0">
+                                    <form action="/download/{{ r.media_type }}/{{ r.item.id }}" method="get">
                                         <button type="submit">Download</button>
                                     </form>
                                     {% endif %}
-                                    <form action="/watchlist/toggle" method="post" class="m-0">
+                                    <form action="/watchlist/toggle" method="post">
                                         <input type="hidden" name="media_type" value="{{ r.media_type }}">
                                         <input type="hidden" name="item_id" value="{{ r.item.id }}">
                                         <button type="submit">
-                                            {% if (r.media_type == 'movie' and r.item.id in user_watchlist_movies) or (r.media_type == 'tv' and r.item.id in user_watchlist_tv) %}
+                                            {% if (r.media_type == 'movie' and r.item.id in user_watchlist_movies) or
+                                            (r.media_type == 'tv' and r.item.id in user_watchlist_tv) %}
                                             Remove from Watchlist
                                             {% else %}
                                             Add to Watchlist
@@ -170,7 +177,7 @@
                         </div>
                         {% endfor %}
                     </div>
-                    <button class="carousel-arrow right" onclick="scrollCarousel(this, 1)"><i
+                    <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i
                             data-lucide="chevron-right"></i></button>
                 </div>
             </div>
@@ -180,7 +187,7 @@
             <div class="card">
                 <h2>Watchlist</h2>
                 <div class="carousel-container">
-                    <button class="carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
+                    <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
                             data-lucide="chevron-left"></i></button>
                     <div class="carousel-row">
                         {% for w in watchlist %}
@@ -194,22 +201,23 @@
                                     <div class="poster-placeholder"></div>
                                     {% endif %}
                                 </a>
-                                <a href="/play/{{ w.media_type }}/{{ w.item.id }}" class="hover-play">
+                                <a href="/play/{{ w.media_type }}/{{ w.item.id }}" class="icon-btn hover-play">
                                     <i data-lucide="play" fill="currentColor"></i>
                                 </a>
-                                <button class="three-dots-btn"
+                                <button class="icon-btn three-dots-btn"
                                     onclick="toggleMenu(event, 'menu-watchlist-{{ loop.index }}')">
                                     <i data-lucide="more-vertical" fill="white"></i>
                                 </button>
                                 <div class="dropdown-menu" id="menu-watchlist-{{ loop.index }}">
-                                    {% if user.watch_together_access %}<div class="m-0"><button type="button" onclick="openWatchTogether('{{ w.media_type }}', {{ w.item.id }})">Watch Together</button></div>{% endif %}
+                                    {% if user.watch_together_access %}<button type="button"
+                                        onclick="openWatchTogether('{{ w.media_type }}', {{ w.item.id }})">Watch
+                                        Together</button>{% endif %}
                                     {% if user.downloads_access %}
-                                    <form action="/download/{{ w.media_type }}/{{ w.item.id }}" method="get"
-                                        class="m-0">
+                                    <form action="/download/{{ w.media_type }}/{{ w.item.id }}" method="get">
                                         <button type="submit">Download</button>
                                     </form>
                                     {% endif %}
-                                    <form action="/watchlist/remove/{{ w.db_id }}" method="post" class="m-0">
+                                    <form action="/watchlist/remove/{{ w.db_id }}" method="post">
                                         <button type="submit">Remove from Watchlist</button>
                                     </form>
                                 </div>
@@ -219,7 +227,7 @@
                         </div>
                         {% endfor %}
                     </div>
-                    <button class="carousel-arrow right" onclick="scrollCarousel(this, 1)"><i
+                    <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i
                             data-lucide="chevron-right"></i></button>
                 </div>
             </div>
@@ -229,7 +237,7 @@
             <div class="card">
                 <h2>Recently Added Movies</h2>
                 <div class="carousel-container">
-                    <button class="carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
+                    <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
                             data-lucide="chevron-left"></i></button>
                     <div class="carousel-row">
                         {% for m in recent_movies %}
@@ -242,26 +250,28 @@
                                     <div class="poster-placeholder"></div>
                                     {% endif %}
                                 </a>
-                                <a href="/play/movie/{{ m.id }}" class="hover-play">
+                                <a href="/play/movie/{{ m.id }}" class="icon-btn hover-play">
                                     <i data-lucide="play" fill="currentColor"></i>
                                 </a>
-                                <button class="three-dots-btn"
+                                <button class="icon-btn three-dots-btn"
                                     onclick="toggleMenu(event, 'menu-recent-movies-{{ loop.index }}')">
                                     <i data-lucide="more-vertical" fill="white"></i>
                                 </button>
                                 <div class="dropdown-menu" id="menu-recent-movies-{{ loop.index }}">
-                                    {% if user.watch_together_access %}<div class="m-0"><button type="button" onclick="openWatchTogether('movie', {{ m.id }})">Watch Together</button></div>{% endif %}
+                                    {% if user.watch_together_access %}<button type="button"
+                                        onclick="openWatchTogether('movie', {{ m.id }})">Watch Together</button>{% endif
+                                    %}
                                     {% if user.downloads_access %}
-                                    <form action="/download/movie/{{ m.id }}" method="get" class="m-0">
+                                    <form action="/download/movie/{{ m.id }}" method="get">
                                         <button type="submit">Download</button>
                                     </form>
                                     {% endif %}
                                     {% if m.id in user_watchlist_movies %}
-                                    <form action="/watchlist/remove_by_item/movie/{{ m.id }}" method="post" class="m-0">
+                                    <form action="/watchlist/remove_by_item/movie/{{ m.id }}" method="post">
                                         <button type="submit">Remove from Watchlist</button>
                                     </form>
                                     {% else %}
-                                    <form action="/watchlist/add/movie/{{ m.id }}" method="post" class="m-0">
+                                    <form action="/watchlist/add/movie/{{ m.id }}" method="post">
                                         <button type="submit">Add to Watchlist</button>
                                     </form>
                                     {% endif %}
@@ -272,7 +282,7 @@
                         </div>
                         {% endfor %}
                     </div>
-                    <button class="carousel-arrow right" onclick="scrollCarousel(this, 1)"><i
+                    <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i
                             data-lucide="chevron-right"></i></button>
                 </div>
             </div>
@@ -282,7 +292,7 @@
             <div class="card">
                 <h2>Recently Added TV Shows</h2>
                 <div class="carousel-container">
-                    <button class="carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
+                    <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
                             data-lucide="chevron-left"></i></button>
                     <div class="carousel-row">
                         {% for t in recent_tv %}
@@ -295,26 +305,27 @@
                                     <div class="poster-placeholder"></div>
                                     {% endif %}
                                 </a>
-                                <a href="/play/tv/{{ t.id }}" class="hover-play">
+                                <a href="/play/tv/{{ t.id }}" class="icon-btn hover-play">
                                     <i data-lucide="play" fill="currentColor"></i>
                                 </a>
-                                <button class="three-dots-btn"
+                                <button class="icon-btn three-dots-btn"
                                     onclick="toggleMenu(event, 'menu-recent-tv-{{ loop.index }}')">
                                     <i data-lucide="more-vertical" fill="white"></i>
                                 </button>
                                 <div class="dropdown-menu" id="menu-recent-tv-{{ loop.index }}">
-                                    {% if user.watch_together_access %}<div class="m-0"><button type="button" onclick="openWatchTogether('tv', {{ t.id }})">Watch Together</button></div>{% endif %}
+                                    {% if user.watch_together_access %}<button type="button"
+                                        onclick="openWatchTogether('tv', {{ t.id }})">Watch Together</button>{% endif %}
                                     {% if user.downloads_access %}
-                                    <form action="/download/tv/{{ t.id }}" method="get" class="m-0">
+                                    <form action="/download/tv/{{ t.id }}" method="get">
                                         <button type="submit">Download</button>
                                     </form>
                                     {% endif %}
                                     {% if t.id in user_watchlist_tv %}
-                                    <form action="/watchlist/remove_by_item/tv/{{ t.id }}" method="post" class="m-0">
+                                    <form action="/watchlist/remove_by_item/tv/{{ t.id }}" method="post">
                                         <button type="submit">Remove from Watchlist</button>
                                     </form>
                                     {% else %}
-                                    <form action="/watchlist/add/tv/{{ t.id }}" method="post" class="m-0">
+                                    <form action="/watchlist/add/tv/{{ t.id }}" method="post">
                                         <button type="submit">Add to Watchlist</button>
                                     </form>
                                     {% endif %}
@@ -325,7 +336,7 @@
                         </div>
                         {% endfor %}
                     </div>
-                    <button class="carousel-arrow right" onclick="scrollCarousel(this, 1)"><i
+                    <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i
                             data-lucide="chevron-right"></i></button>
                 </div>
             </div>
@@ -335,7 +346,7 @@
             <div class="card">
                 <h2>Recently Added Photos</h2>
                 <div class="carousel-container">
-                    <button class="carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
+                    <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
                             data-lucide="chevron-left"></i></button>
                     <div class="carousel-row">
                         {% for p in recent_photos %}
@@ -345,23 +356,21 @@
                                     {% if p.poster_filename %}
                                     <img src="/metadata/{{ p.poster_filename }}" class="poster">
                                     {% else %}
-                                    <div class="poster-placeholder"
-                                        style="display: flex; align-items: center; justify-content: center;">
-                                        <i data-lucide="image"
-                                            style="width: 48px; height: 48px; color: var(--text-quaternary);"></i>
+                                    <div class="poster-placeholder">
+                                        <i data-lucide="image"></i>
                                     </div>
                                     {% endif %}
                                 </a>
-                                <a href="/photo/{{ p.id }}" class="hover-play">
+                                <a href="/photo/{{ p.id }}" class="icon-btn hover-play">
                                     <i data-lucide="play" fill="currentColor"></i>
                                 </a>
-                                <button class="three-dots-btn"
+                                <button class="icon-btn three-dots-btn"
                                     onclick="toggleMenu(event, 'menu-recent-photos-{{ loop.index }}')">
                                     <i data-lucide="more-vertical" fill="white"></i>
                                 </button>
                                 <div class="dropdown-menu" id="menu-recent-photos-{{ loop.index }}">
                                     {% if user.downloads_access %}
-                                    <form action="/photo_file/{{ p.id }}" method="get" class="m-0">
+                                    <form action="/photo_file/{{ p.id }}" method="get">
                                         <button type="submit">Download</button>
                                     </form>
                                     {% endif %}
@@ -372,7 +381,7 @@
                         </div>
                         {% endfor %}
                     </div>
-                    <button class="carousel-arrow right" onclick="scrollCarousel(this, 1)"><i
+                    <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i
                             data-lucide="chevron-right"></i></button>
                 </div>
             </div>
@@ -443,14 +452,14 @@
                     const data = await res.json();
 
                     if (data.items.length === 0) {
-                        resultsContainer.innerHTML = '<div style="padding: 10px; color: var(--text-secondary); text-align: center;">No results found</div>';
+                        resultsContainer.innerHTML = '<div class="empty-state">No results found</div>';
                     } else {
                         resultsContainer.innerHTML = data.items.map(item => `
-                            <a href="${item.url}" style="display: flex; align-items: center; gap: 10px; padding: 10px; text-decoration: none; color: inherit; border-bottom: 1px solid var(--bg-tertiary);" onmouseover="this.style.backgroundColor='var(--bg-tertiary)'" onmouseout="this.style.backgroundColor='transparent'">
-                                ${item.poster ? `<img src="/metadata/${item.poster}" style="width: 40px; height: 60px; object-fit: cover; border-radius: 4px;">` : `<div style="width: 40px; height: 60px; background: var(--bg-tertiary); border-radius: 4px; display: flex; align-items: center; justify-content: center;"><i data-lucide="${item.type === 'photo' ? 'image' : (item.type === 'tv' ? 'tv' : 'film')}" style="width: 20px; height: 20px; color: var(--text-quaternary);"></i></div>`}
+                            <a href="${item.url}" class="search-result">
+                                ${item.poster ? `<img src="/metadata/${item.poster}" class="search-result-thumb">` : `<div class="search-result-thumb"><i data-lucide="${item.type === 'photo' ? 'image' : (item.type === 'tv' ? 'tv' : 'film')}"></i></div>`}
                                 <div>
-                                    <div style="font-weight: bold; font-size: 14px;">${item.title}</div>
-                                    <div style="font-size: 12px; color: var(--text-quaternary);">${item.year ? item.year + ' • ' : ''}${item.type === 'movie' ? 'Movie' : (item.type === 'tv' ? 'TV Show' : 'Photo')}</div>
+                                    <strong>${item.title}</strong>
+                                    <small>${item.year ? item.year + ' • ' : ''}${item.type === 'movie' ? 'Movie' : (item.type === 'tv' ? 'TV Show' : 'Photo')}</small>
                                 </div>
                             </a>
                         `).join('');
@@ -515,166 +524,167 @@
     <script src="/static/lucide.min.js"></script>
     <script>lucide.createIcons();</script>
 
-<script>
-    async function loadInbox() {
-        try {
-            const res = await fetch('/api/inbox');
-            const data = await res.json();
-            const items = data.invites;
-            const resets = data.reset_requests || [];
-            const badge = document.getElementById('inboxBadge');
-            const container = document.getElementById('inboxItems');
-            if(!badge || !container) return;
-            
-            const totalCount = items.length + resets.length;
-            if (totalCount > 0) {
-                badge.style.display = 'block';
-                let html = '';
-                html += items.map(inv => `
-                    <div style="padding: 10px; border-bottom: 1px solid var(--bg-tertiary);">
+    <script>
+        async function loadInbox() {
+            try {
+                const res = await fetch('/api/inbox');
+                const data = await res.json();
+                const items = data.invites;
+                const resets = data.reset_requests || [];
+                const badge = document.getElementById('inboxBadge');
+                const container = document.getElementById('inboxItems');
+                if (!badge || !container) return;
+
+                const totalCount = items.length + resets.length;
+                if (totalCount > 0) {
+                    badge.style.display = 'block';
+                    let html = '';
+                    html += items.map(inv => `
+                    <div class="inbox-item">
                         <div><strong>${inv.sender}</strong> invited you to watch <em>${inv.title}</em></div>
-                        <div style="display: flex; gap: 10px; margin-top: 10px;">
-                            <button class="btn-small" onclick="respondInvite(${inv.id}, 'accept')">Accept</button>
-                            <button class="btn-small bg-gray" onclick="respondInvite(${inv.id}, 'decline')">Decline</button>
+                        <div class="inbox-actions">
+                            <button class="btn btn-sm" style="text-align: center;" onclick="respondInvite(${inv.id}, 'accept')">Accept</button>
+                            <button class="btn btn-sm btn-secondary" style="text-align: center;" onclick="respondInvite(${inv.id}, 'decline')">Decline</button>
                         </div>
                     </div>
                 `).join('');
-                html += resets.map(pr => `
-                    <div style="padding: 10px; border-bottom: 1px solid var(--bg-tertiary);">
+                    html += resets.map(pr => `
+                    <div class="inbox-item">
                         <div><strong>${pr.username}</strong> is requesting a password reset</div>
-                        <div style="color: var(--text-secondary); font-size: 0.85em; margin-top: 4px;">Requested ${pr.created_at}</div>
-                        <div style="display: flex; gap: 10px; margin-top: 10px;">
-                            <button class="btn-small" onclick="respondReset(${pr.id}, 'approve')">Approve</button>
-                            <button class="btn-small bg-gray" onclick="respondReset(${pr.id}, 'deny')">Deny</button>
+                        <small>Requested ${pr.created_at}</small>
+                        <div class="inbox-actions">
+                            <button class="btn btn-sm" onclick="respondReset(${pr.id}, 'approve')">Approve</button>
+                            <button class="btn btn-sm btn-secondary" onclick="respondReset(${pr.id}, 'deny')">Deny</button>
                         </div>
                     </div>
                 `).join('');
-                container.innerHTML = html;
-            } else {
-                badge.style.display = 'none';
-                container.innerHTML = '<div style="color: var(--text-secondary); text-align: center;">No new notifications</div>';
+                    container.innerHTML = html;
+                } else {
+                    badge.style.display = 'none';
+                    container.innerHTML = '<div class="empty-state">No new notifications</div>';
+                }
+            } catch (err) {
+                console.error("Error loading inbox:", err);
             }
-        } catch (err) {
-            console.error("Error loading inbox:", err);
         }
-    }
-    
-    async function respondInvite(id, action) {
-        try {
-            const res = await fetch(`/watch_together/${action}/${id}`, { method: 'POST' });
-            const data = await res.json();
-            if (data.success && action === 'accept') {
-                window.location.href = `/play_sync/${data.session_id}`;
-            } else {
+
+        async function respondInvite(id, action) {
+            try {
+                const res = await fetch(`/watch_together/${action}/${id}`, { method: 'POST' });
+                const data = await res.json();
+                if (data.success && action === 'accept') {
+                    window.location.href = `/play_sync/${data.session_id}`;
+                } else {
+                    loadInbox();
+                }
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        async function respondReset(id, action) {
+            try {
+                await fetch(`/password_reset/${action}/${id}`, { method: 'POST' });
                 loadInbox();
+            } catch (err) {
+                console.error(err);
             }
-        } catch (err) {
-            console.error(err);
         }
-    }
 
-    async function respondReset(id, action) {
-        try {
-            await fetch(`/password_reset/${action}/${id}`, { method: 'POST' });
-            loadInbox();
-        } catch (err) {
-            console.error(err);
-        }
-    }
-    
-    function toggleInbox(e) {
-        e.preventDefault();
-        const menu = document.getElementById('inboxMenu');
-        if (menu.style.display === 'none') {
-            menu.style.display = 'block';
-            loadInbox();
-        } else {
-            menu.style.display = 'none';
-        }
-    }
-    
-    document.addEventListener('click', function(event) {
-        const menu = document.getElementById('inboxMenu');
-        const btn = document.getElementById('inboxBtn');
-        if (menu && btn && event.target !== btn && !btn.contains(event.target) && !menu.contains(event.target)) {
-            menu.style.display = 'none';
-        }
-    });
-    
-    setInterval(loadInbox, 10000);
-    document.addEventListener('DOMContentLoaded', loadInbox);
-</script>
-
-
-<!-- Watch Together Modal -->
-<div id="wtModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center;">
-    <div class="card" style="width: 400px; max-width: 90%;">
-        <div class="card-header">
-            <h2 class="m-0">Watch Together</h2>
-            <button class="btn-small bg-gray" onclick="document.getElementById('wtModal').style.display='none'">Close</button>
-        </div>
-        <p style="color: var(--text-secondary);">Select users to invite to this session:</p>
-        <div id="wtUserList" style="margin-bottom: 20px; max-height: 200px; overflow-y: auto;">
-            Loading users...
-        </div>
-        <button class="btn w-full" onclick="startWatchTogether()">Start Session</button>
-    </div>
-</div>
-
-<script>
-    let wtCurrentMedia = { type: null, id: null };
-    
-    async function openWatchTogether(mediaType, itemId) {
-        wtCurrentMedia = { type: mediaType, id: itemId };
-        const modal = document.getElementById('wtModal');
-        const userList = document.getElementById('wtUserList');
-        modal.style.display = 'flex';
-        userList.innerHTML = 'Loading users...';
-        
-        try {
-            const res = await fetch(`/api/users/eligible?media_type=${mediaType}`);
-            const users = await res.json();
-            
-            if (users.length === 0) {
-                userList.innerHTML = '<div style="color: var(--text-secondary);">No eligible users found. Make sure they have Watch Together and library access enabled in settings.</div>';
+        function toggleInbox(e) {
+            e.preventDefault();
+            const menu = document.getElementById('inboxMenu');
+            if (menu.style.display === 'none') {
+                menu.style.display = 'block';
+                loadInbox();
             } else {
-                userList.innerHTML = users.map(u => `
-                    <label class="toggle-pill" style="display: flex; width: 100%; margin-bottom: 5px;">
+                menu.style.display = 'none';
+            }
+        }
+
+        document.addEventListener('click', function (event) {
+            const menu = document.getElementById('inboxMenu');
+            const btn = document.getElementById('inboxBtn');
+            if (menu && btn && event.target !== btn && !btn.contains(event.target) && !menu.contains(event.target)) {
+                menu.style.display = 'none';
+            }
+        });
+
+        setInterval(loadInbox, 10000);
+        document.addEventListener('DOMContentLoaded', loadInbox);
+    </script>
+
+
+    <!-- Watch Together Modal -->
+    <div id="wtModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <div class="card-header">
+                <h2 class="m-0">Watch Together</h2>
+                <button class="btn btn-sm btn-light"
+                    onclick="document.getElementById('wtModal').style.display='none'">Close</button>
+            </div>
+            <p>Select users to invite to this session:</p>
+            <div id="wtUserList" class="modal-list">
+                Loading users...
+            </div>
+            <button class="btn btn-block" onclick="startWatchTogether()">Start Session</button>
+        </div>
+    </div>
+
+    <script>
+        let wtCurrentMedia = { type: null, id: null };
+
+        async function openWatchTogether(mediaType, itemId) {
+            wtCurrentMedia = { type: mediaType, id: itemId };
+            const modal = document.getElementById('wtModal');
+            const userList = document.getElementById('wtUserList');
+            modal.style.display = 'flex';
+            userList.innerHTML = 'Loading users...';
+
+            try {
+                const res = await fetch(`/api/users/eligible?media_type=${mediaType}`);
+                const users = await res.json();
+
+                if (users.length === 0) {
+                    userList.innerHTML = '<div class="empty-state">No eligible users found. Make sure they have Watch Together and library access enabled in settings.</div>';
+                } else {
+                    userList.innerHTML = users.map(u => `
+                    <label class="toggle-pill">
                         <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
                         <span>${u.username}</span>
                     </label>
                 `).join('');
+                }
+            } catch (err) {
+                console.error(err);
+                userList.innerHTML = 'Error loading users.';
             }
-        } catch (err) {
-            console.error(err);
-            userList.innerHTML = 'Error loading users.';
         }
-    }
-    
-    async function startWatchTogether() {
-        const checkboxes = document.querySelectorAll('.wt-user-checkbox:checked');
-        const userIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
-        
-        try {
-            const res = await fetch('/watch_together/create', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    media_type: wtCurrentMedia.type,
-                    item_id: wtCurrentMedia.id,
-                    invited_user_ids: userIds
-                })
-            });
-            const data = await res.json();
-            if (data.session_id) {
-                window.location.href = `/play_sync/${data.session_id}`;
+
+        async function startWatchTogether() {
+            const checkboxes = document.querySelectorAll('.wt-user-checkbox:checked');
+            const userIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+
+            try {
+                const res = await fetch('/watch_together/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        media_type: wtCurrentMedia.type,
+                        item_id: wtCurrentMedia.id,
+                        invited_user_ids: userIds
+                    })
+                });
+                const data = await res.json();
+                if (data.session_id) {
+                    window.location.href = `/play_sync/${data.session_id}`;
+                }
+            } catch (err) {
+                console.error(err);
+                alert("Error creating session.");
             }
-        } catch (err) {
-            console.error(err);
-            alert("Error creating session.");
         }
-    }
-</script>
+    </script>
 
 </body>
 

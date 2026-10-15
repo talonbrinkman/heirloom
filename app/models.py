@@ -14,6 +14,7 @@ class User(SQLModel, table=True):
     downloads_access: bool = Field(default=True)
     watch_together_access: bool = Field(default=True)
     kids_mode: bool = Field(default=False)
+    rewind_seconds: int = Field(default=0)
     session_token: Optional[str] = Field(default=None, index=True)
 
 class Movie(SQLModel, table=True):
@@ -107,6 +108,7 @@ class WatchSession(SQLModel, table=True):
     media_type: str
     item_id: int
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    is_active: bool = Field(default=True)
 
 class WatchInvite(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

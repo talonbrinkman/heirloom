@@ -65,6 +65,13 @@ def create_db_and_tables():
             session.rollback()
 
         try:
+            session.exec(text("ALTER TABLE user ADD COLUMN rewind_seconds INTEGER DEFAULT 0"))
+            session.exec(text("UPDATE user SET rewind_seconds = 0 WHERE rewind_seconds IS NULL"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
             session.exec(text("ALTER TABLE movie ADD COLUMN genres VARCHAR"))
             session.exec(text("ALTER TABLE tvshow ADD COLUMN genres VARCHAR"))
             session.commit()

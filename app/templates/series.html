@@ -4,20 +4,20 @@
         <link rel="stylesheet" href="/static/style.css">
     </head>
     <body {% if series.backdrop_filename %}class="has-backdrop" style="--backdrop-url: url('/metadata/{{ series.backdrop_filename }}');"{% endif %}>
-        <div class="header-full">
+        <div class="header">
             <div class="flex gap-15 align-center">
-                <a href="/" class="text-white flex align-center" title="Home">
+                <a href="/" class="icon-link" title="Home">
                     <i data-lucide="arrow-left"></i>
                 </a>
                 <h1 class="m-0">Heirloom</h1>
             </div>
             <div class="flex gap-15 align-center">
-                <div style="position: relative;">
+                <div class="inbox">
                     <a href="#" class="icon-link" id="inboxBtn" onclick="toggleInbox(event)" title="Inbox">
                         <i data-lucide="inbox"></i>
-                        <span id="inboxBadge" style="display: none; position: absolute; top: -2px; right: -2px; background: red; width: 10px; height: 10px; border-radius: 50%;"></span>
+                        <span id="inboxBadge" class="inbox-badge" style="display: none;"></span>
                     </a>
-                    <div id="inboxMenu" class="dropdown-menu" style="top: 100%; right: 0; left: auto; min-width: 300px; max-height: 400px; overflow-y: auto; display: none; padding: 10px;">
+                    <div id="inboxMenu" class="dropdown-menu inbox-menu" style="display: none;">
                         <div id="inboxItems">Loading...</div>
                     </div>
                 </div>
@@ -73,13 +73,13 @@
                             </a>
                             
                             {% if in_watchlist %}
-                            <form action="/watchlist/remove_by_item/tv/{{ series.id }}" method="post" class="m-0">
+                            <form action="/watchlist/remove_by_item/tv/{{ series.id }}" method="post">
                                 <button type="submit" class="play-btn m-0">
                                     <i data-lucide="bookmark" fill="currentColor"></i>
                                 </button>
                             </form>
                             {% else %}
-                            <form action="/watchlist/add/tv/{{ series.id }}" method="post" class="m-0">
+                            <form action="/watchlist/add/tv/{{ series.id }}" method="post">
                                 <button type="submit" class="play-btn m-0">
                                     <i data-lucide="bookmark" fill="none"></i>
                                 </button>
@@ -134,7 +134,7 @@
                     </div>
 
                     <div class="carousel-container">
-                        <button class="carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
+                        <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
                         <div class="carousel-row" id="episodesGrid">
                             {% for ep in episodes %}
                             <div class="media-card episode-card {% if selected_ep_id == ep.id %}selected-episode{% endif %}" data-season="{{ ep.season }}">
@@ -147,7 +147,7 @@
                                         {% else %}
                                         <div class="poster-placeholder"></div>
                                         {% endif %}
-                                        <div class="hover-play">
+                                        <div class="icon-btn hover-play">
                                             <i data-lucide="play" fill="currentColor"></i>
                                         </div>
                                     </a>
@@ -158,7 +158,7 @@
                             </div>
                             {% endfor %}
                         </div>
-                        <button class="carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
+                        <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
                     </div>
                 </div>
             </div>
@@ -269,28 +269,28 @@
                 badge.style.display = 'block';
                 let html = '';
                 html += items.map(inv => `
-                    <div style="padding: 10px; border-bottom: 1px solid var(--bg-tertiary);">
+                    <div class="inbox-item">
                         <div><strong>${inv.sender}</strong> invited you to watch <em>${inv.title}</em></div>
-                        <div style="display: flex; gap: 10px; margin-top: 10px;">
-                            <button class="btn-small" onclick="respondInvite(${inv.id}, 'accept')">Accept</button>
-                            <button class="btn-small bg-gray" onclick="respondInvite(${inv.id}, 'decline')">Decline</button>
+                        <div class="inbox-actions">
+                            <button class="btn btn-sm" onclick="respondInvite(${inv.id}, 'accept')">Accept</button>
+                            <button class="btn btn-sm btn-secondary" onclick="respondInvite(${inv.id}, 'decline')">Decline</button>
                         </div>
                     </div>
                 `).join('');
                 html += resets.map(pr => `
-                    <div style="padding: 10px; border-bottom: 1px solid var(--bg-tertiary);">
+                    <div class="inbox-item">
                         <div><strong>${pr.username}</strong> is requesting a password reset</div>
-                        <div style="color: var(--text-secondary); font-size: 0.85em; margin-top: 4px;">Requested ${pr.created_at}</div>
-                        <div style="display: flex; gap: 10px; margin-top: 10px;">
-                            <button class="btn-small" onclick="respondReset(${pr.id}, 'approve')">Approve</button>
-                            <button class="btn-small bg-gray" onclick="respondReset(${pr.id}, 'deny')">Deny</button>
+                        <small>Requested ${pr.created_at}</small>
+                        <div class="inbox-actions">
+                            <button class="btn btn-sm" onclick="respondReset(${pr.id}, 'approve')">Approve</button>
+                            <button class="btn btn-sm btn-secondary" onclick="respondReset(${pr.id}, 'deny')">Deny</button>
                         </div>
                     </div>
                 `).join('');
                 container.innerHTML = html;
             } else {
                 badge.style.display = 'none';
-                container.innerHTML = '<div style="color: var(--text-secondary); text-align: center;">No new notifications</div>';
+                container.innerHTML = '<div class="empty-state">No new notifications</div>';
             }
         } catch (err) {
             console.error("Error loading inbox:", err);
@@ -345,17 +345,17 @@
 
 
 <!-- Watch Together Modal -->
-<div id="wtModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center;">
-    <div class="card" style="width: 400px; max-width: 90%;">
+<div id="wtModal" class="modal-overlay" style="display: none;">
+    <div class="modal-content">
         <div class="card-header">
             <h2 class="m-0">Watch Together</h2>
-            <button class="btn-small bg-gray" onclick="document.getElementById('wtModal').style.display='none'">Close</button>
+            <button class="btn btn-sm btn-secondary" onclick="document.getElementById('wtModal').style.display='none'">Close</button>
         </div>
-        <p style="color: var(--text-secondary);">Select users to invite to this session:</p>
-        <div id="wtUserList" style="margin-bottom: 20px; max-height: 200px; overflow-y: auto;">
+        <p>Select users to invite to this session:</p>
+        <div id="wtUserList" class="modal-list">
             Loading users...
         </div>
-        <button class="btn w-full" onclick="startWatchTogether()">Start Session</button>
+        <button class="btn btn-block" onclick="startWatchTogether()">Start Session</button>
     </div>
 </div>
 
@@ -374,10 +374,10 @@
             const users = await res.json();
             
             if (users.length === 0) {
-                userList.innerHTML = '<div style="color: var(--text-secondary);">No eligible users found. Make sure they have Watch Together and library access enabled in settings.</div>';
+                userList.innerHTML = '<div class="empty-state">No eligible users found. Make sure they have Watch Together and library access enabled in settings.</div>';
             } else {
                 userList.innerHTML = users.map(u => `
-                    <label class="toggle-pill" style="display: flex; width: 100%; margin-bottom: 5px;">
+                    <label class="toggle-pill">
                         <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
                         <span>${u.username}</span>
                     </label>

@@ -2,21 +2,47 @@
     <head>
         <title>Heirloom</title>
         <link rel="stylesheet" href="/static/style.css">
+        <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     </head>
     <body class="center-screen">
         <div class="setup-box">
             <h1>Welcome to Heirloom</h1>
             <p class="mb-30" style="color: #bbb;">Create your admin account to get started.</p>
+            <div id="errorNotice" style="display: none; text-align: center; margin-bottom: 20px; padding: 10px 15px; border-radius: 8px; background: rgba(229, 9, 20, 0.15); border: 1px solid rgba(229, 9, 20, 0.4); color: var(--accent-primary); font-size: 0.9em;"></div>
             
-            <form action="/setup" method="post" class="text-left">
+            <form action="/setup" method="post" class="text-left" id="setupForm" onsubmit="return validatePasswords()">
                 <label for="username">Username</label>
                 <input type="text" name="username" id="username" required autocomplete="off">
                 
                 <label for="password">Password</label>
                 <input type="password" name="password" id="password" required>
+
+                <label for="confirm_password">Confirm Password</label>
+                <input type="password" name="confirm_password" id="confirm_password" required>
                 
-                <button type="submit" class="btn w-full">Create Admin Account</button>
+                <button type="submit" class="btn w-full" style="margin-top: 10px;">Create Admin Account</button>
             </form>
         </div>
+
+        <script>
+            const params = new URLSearchParams(window.location.search);
+            const notice = document.getElementById('errorNotice');
+            if (params.get('error') === 'passwords_mismatch') {
+                notice.textContent = 'Passwords do not match. Please try again.';
+                notice.style.display = 'block';
+            }
+
+            function validatePasswords() {
+                const p1 = document.getElementById('password').value;
+                const p2 = document.getElementById('confirm_password').value;
+                if (p1 !== p2) {
+                    notice.textContent = 'Passwords do not match. Please try again.';
+                    notice.style.display = 'block';
+                    document.getElementById('confirm_password').focus();
+                    return false;
+                }
+                return true;
+            }
+        </script>
     </body>
 </html>
