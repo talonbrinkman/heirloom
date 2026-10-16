@@ -17,7 +17,7 @@ from .database import create_db_and_tables, get_session, engine
 from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest
 from .scanner import scan_media_library
 from .watcher import start_watcher, stop_watcher, scanner_debouncer
-from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time
+from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time, sanitize_vtt_content
 import subprocess
 import shutil
 try:
@@ -242,7 +242,7 @@ def on_startup():
 def on_shutdown():
     stop_watcher()
 
-def get_current_user(request: Request, session: Session = Depends(get_session)):
+def get_current_user(request: Request):
     token = request.cookies.get("session_token")
     if not token:
         auth_header = request.headers.get("Authorization")
@@ -252,7 +252,8 @@ def get_current_user(request: Request, session: Session = Depends(get_session)):
         token = request.query_params.get("token")
     if not token:
         return None
-    return session.exec(select(User).where(User.session_token == token)).first()
+    with Session(engine) as session:
+        return session.exec(select(User).where(User.session_token == token)).first()
 
 # Rate limiting for auth
 failed_attempts = {}
@@ -1061,14 +1062,16 @@ async def photo_view(request: Request, item_id: int, current_user: User = Depend
     })
 
 @app.get("/photo_file/{item_id}")
-async def get_photo_file(item_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def get_photo_file(item_id: int, current_user: User = Depends(get_current_user)):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
     if not current_user.photos_access: raise HTTPException(status_code=403, detail="Forbidden")
     
-    photo = session.get(Photo, item_id)
-    if not photo or not os.path.exists(photo.file_path): raise HTTPException(status_code=404, detail="File missing")
+    with Session(engine) as session:
+        photo = session.get(Photo, item_id)
+        if not photo or not os.path.exists(photo.file_path): raise HTTPException(status_code=404, detail="File missing")
+        file_path = photo.file_path
     
-    return FileResponse(photo.file_path)
+    return FileResponse(file_path)
 
 @app.get("/library/{media_type}", response_class=HTMLResponse)
 async def library_view(request: Request, media_type: str, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
@@ -1379,7 +1382,7 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
     return templates.TemplateResponse(request=request, name="player.html", context={
         "item": item, "media_type": media_type, "history": history_entry, "season_episode": season_episode,
         "duration": duration, "next_episode_id": next_episode_id, "subtitle_url": subtitle_url,
-        "subtitle_tracks": subtitle_tracks,
+        "subtitle_tracks": subtitle_tracks, "media_bitrate": probe.get("bitrate"),
         "sync_session_id": sync, "is_sync_host": is_sync_host, "sync_initial_time": sync_initial_time,
         "user": current_user, "token": token, "is_mobile": mobile == "1", "audio_tracks": audio_tracks
     })
@@ -1394,14 +1397,17 @@ async def get_subtitle(
     ext: Optional[str] = Query(None),
     stream_idx: Optional[int] = Query(None),
     current_user: User = Depends(get_current_user),
-    session: Session = Depends(get_session)
 ):
     if not current_user:
         return Response(status_code=403)
-    item = session.get(Movie if media_type == "movie" else TVShow, item_id)
-    if not item or not os.path.exists(item.file_path):
-        return Response(status_code=404)
-    if current_user.kids_mode and not is_kids_safe(item.content_rating):
+    with Session(engine) as session:
+        item = session.get(Movie if media_type == "movie" else TVShow, item_id)
+        if not item or not os.path.exists(item.file_path):
+            return Response(status_code=404)
+        file_path = item.file_path
+        content_rating = item.content_rating
+
+    if current_user.kids_mode and not is_kids_safe(content_rating):
         return Response(status_code=403)
 
     if stream_idx is not None and not track_id:
@@ -1409,7 +1415,7 @@ async def get_subtitle(
     if track_id == "legacy":
         track_id = None
 
-    probe = probe_media_streams(item.file_path)
+    probe = probe_media_streams(file_path)
 
     # Frame-accurate sync:
     # When video is direct-streamed (-c:v copy), FFmpeg snaps to the keyframe at or before start.
@@ -1417,11 +1423,11 @@ async def get_subtitle(
     if start > 0.0:
         can_direct_stream_video = (res == "original" and probe.get("can_direct_stream_video", False))
         if can_direct_stream_video:
-            start = get_keyframe_before_time(item.file_path, start)
+            start = get_keyframe_before_time(file_path, start)
 
     # Legacy fallback: ext query parameter without track_id
     if not track_id and ext:
-        sub_file = os.path.splitext(item.file_path)[0] + "." + ext
+        sub_file = os.path.splitext(file_path)[0] + "." + ext
         if not os.path.exists(sub_file):
             return Response(status_code=404)
         if ext == "srt":
@@ -1457,7 +1463,7 @@ async def get_subtitle(
         # Prevent directory traversal
         if os.path.basename(filename) != filename:
             return Response(status_code=400)
-        dir_name = os.path.dirname(item.file_path)
+        dir_name = os.path.dirname(file_path)
         sub_file = os.path.join(dir_name, filename)
         if not os.path.exists(sub_file):
             return Response(status_code=404)
@@ -1467,17 +1473,22 @@ async def get_subtitle(
                     srt_content = f.read()
                 srt_content = srt_content.replace("\r\n", "\n").replace("\r", "\n")
                 vtt_content = "WEBVTT\n\n" + re.sub(r'(\d{2}:\d{2}:\d{2}),(\d{3})', r'\1.\2', srt_content)
+                vtt_content = sanitize_vtt_content(vtt_content)
                 if start > 0.0:
                     vtt_content = shift_vtt_timestamps(vtt_content, start)
                 return Response(content=vtt_content, media_type="text/vtt")
             except Exception:
                 return Response(status_code=500)
         else:
-            if start > 0.0:
+            try:
                 with open(sub_file, "r", encoding="utf-8", errors="ignore") as f:
                     content = f.read()
-                return Response(content=shift_vtt_timestamps(content, start), media_type="text/vtt")
-            return FileResponse(sub_file, media_type="text/vtt")
+                content = sanitize_vtt_content(content)
+                if start > 0.0:
+                    content = shift_vtt_timestamps(content, start)
+                return Response(content=content, media_type="text/vtt")
+            except Exception:
+                return Response(status_code=500)
 
     # 2. Embedded subtitle stream
     if track_id.startswith("stream:") or track_id.isdigit():
@@ -1493,7 +1504,7 @@ async def get_subtitle(
         is_cached_valid = False
         if os.path.exists(cached_vtt) and os.path.getsize(cached_vtt) > 0:
             try:
-                media_mtime = os.path.getmtime(item.file_path)
+                media_mtime = os.path.getmtime(file_path)
                 cached_mtime = os.path.getmtime(cached_vtt)
                 if cached_mtime >= media_mtime:
                     is_cached_valid = True
@@ -1508,7 +1519,7 @@ async def get_subtitle(
             return FileResponse(cached_vtt, media_type="text/vtt")
 
         # Extract on demand via FFmpeg
-        success = extract_subtitle_to_vtt(item.file_path, s_idx, cached_vtt)
+        success = extract_subtitle_to_vtt(file_path, s_idx, cached_vtt)
         if success and os.path.exists(cached_vtt) and os.path.getsize(cached_vtt) > 0:
             if start > 0.0:
                 with open(cached_vtt, "r", encoding="utf-8", errors="ignore") as f:
@@ -1615,20 +1626,28 @@ async def stop_progress(media_type: str, item_id: int, current_user: User = Depe
 from fastapi.responses import StreamingResponse
 
 @app.get("/stream/{media_type}/{item_id}")
-async def stream_video(media_type: str, item_id: int, res: str = "original", start: float = 0.0, audio_track: int = 0, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def stream_video(
+    media_type: str,
+    item_id: int,
+    res: str = "original",
+    start: float = 0.0,
+    audio_track: int = 0,
+    current_user: User = Depends(get_current_user)
+):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
     if media_type == "movie" and not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
     if media_type == "tv" and not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
     
-    item = session.get(Movie if media_type == "movie" else TVShow, item_id)
-    if not item or not os.path.exists(item.file_path): raise HTTPException(status_code=404, detail="Video file missing")
-    
-    hw_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
-    hw_profile = hw_config.value if hw_config else "auto"
+    with Session(engine) as session:
+        item = session.get(Movie if media_type == "movie" else TVShow, item_id)
+        if not item or not os.path.exists(item.file_path): raise HTTPException(status_code=404, detail="Video file missing")
+        hw_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
+        hw_profile = hw_config.value if hw_config else "auto"
+        file_path = item.file_path
 
-    file_ext = os.path.splitext(item.file_path)[1].lower().lstrip(".")
+    file_ext = os.path.splitext(file_path)[1].lower().lstrip(".")
     is_mp4 = (file_ext in ["mp4", "m4v"])
-    probe = probe_media_streams(item.file_path)
+    probe = probe_media_streams(file_path)
     audio_tracks = probe.get("audio_tracks", [])
 
     selected_track = None
@@ -1661,7 +1680,7 @@ async def stream_video(media_type: str, item_id: int, res: str = "original", sta
             "X-Play-Type": "direct_play",
             "X-Audio-Track": str(audio_track),
         }
-        return FileResponse(item.file_path, media_type="video/mp4", headers=headers)
+        return FileResponse(file_path, media_type="video/mp4", headers=headers)
 
     # 2. Smart Remuxing / Direct Stream:
     # When video codec is already web-compatible (H.264) and native resolution is requested,
@@ -1670,14 +1689,14 @@ async def stream_video(media_type: str, item_id: int, res: str = "original", sta
 
     actual_start = start
     if start > 0.0 and can_direct_stream_video:
-        actual_start = get_keyframe_before_time(item.file_path, start)
+        actual_start = get_keyframe_before_time(file_path, start)
 
     cmd = [get_ffmpeg_path()]
     if start > 0.0:
         cmd.extend(["-ss", str(start)])
     if start > 0.0 and can_direct_stream_video:
         cmd.append("-noaccurate_seek")
-    cmd.extend(["-i", item.file_path])
+    cmd.extend(["-i", file_path])
     if start > 0.0 and can_direct_stream_video:
         cmd.extend(["-avoid_negative_ts", "make_zero"])
 
@@ -1769,20 +1788,29 @@ async def stream_video(media_type: str, item_id: int, res: str = "original", sta
     return StreamingResponse(generate(), media_type="video/mp4", headers=headers)
 
 @app.get("/stream-info/{media_type}/{item_id}")
-async def get_stream_info(media_type: str, item_id: int, res: str = "original", start: float = 0.0, audio_track: int = 0, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def get_stream_info(
+    media_type: str,
+    item_id: int,
+    res: str = "original",
+    start: float = 0.0,
+    audio_track: int = 0,
+    current_user: User = Depends(get_current_user)
+):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
     if media_type == "movie" and not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
     if media_type == "tv" and not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
     
-    item = session.get(Movie if media_type == "movie" else TVShow, item_id)
-    if not item or not os.path.exists(item.file_path): raise HTTPException(status_code=404, detail="Video file missing")
-    
-    hw_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
-    hw_profile = hw_config.value if hw_config else "auto"
+    with Session(engine) as session:
+        item = session.get(Movie if media_type == "movie" else TVShow, item_id)
+        if not item or not os.path.exists(item.file_path): raise HTTPException(status_code=404, detail="Video file missing")
+        hw_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
+        hw_profile = hw_config.value if hw_config else "auto"
+        file_path = item.file_path
+        item_title = item.title
 
-    file_ext = os.path.splitext(item.file_path)[1].lower().lstrip(".")
+    file_ext = os.path.splitext(file_path)[1].lower().lstrip(".")
     is_mp4 = (file_ext in ["mp4", "m4v"])
-    probe = probe_media_streams(item.file_path)
+    probe = probe_media_streams(file_path)
     audio_tracks = probe.get("audio_tracks", [])
 
     selected_track = None
@@ -1834,12 +1862,12 @@ async def get_stream_info(media_type: str, item_id: int, res: str = "original", 
     can_direct_stream_video = (res == "original" and probe.get("can_direct_stream_video", False))
     actual_start = start
     if start > 0.0 and can_direct_stream_video:
-        actual_start = get_keyframe_before_time(item.file_path, start)
+        actual_start = get_keyframe_before_time(file_path, start)
 
     return {
         "media_type": media_type,
         "item_id": item_id,
-        "title": item.title,
+        "title": item_title,
         "resolution": res,
         "start": start,
         "actual_start": actual_start,
@@ -1853,6 +1881,9 @@ async def get_stream_info(media_type: str, item_id: int, res: str = "original", 
         "play_type": play_type,
         "container": file_ext,
         "video_codec": probe.get("video_codec"),
+        "bitrate": probe.get("bitrate"),
+        "width": probe.get("width"),
+        "height": probe.get("height"),
         "audio_codec": selected_track.get("codec") if selected_track else probe.get("audio_codec"),
         "audio_channels": selected_track.get("channels") if selected_track else probe.get("audio_channels"),
         "hw_profile": hw_profile,
@@ -1902,17 +1933,19 @@ async def remove_history(request: Request, media_type: str, item_id: int, curren
 # ----------------- SETTINGS & USER MANAGEMENT -----------------
 
 @app.get("/download/{media_type}/{item_id}")
-async def download_media(media_type: str, item_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def download_media(media_type: str, item_id: int, current_user: User = Depends(get_current_user)):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
     if not current_user.downloads_access: raise HTTPException(status_code=403, detail="Forbidden")
     if media_type == "movie" and not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
     if media_type == "tv" and not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
     
-    item = session.get(Movie if media_type == "movie" else TVShow, item_id)
-    if not item or not os.path.exists(item.file_path): raise HTTPException(status_code=404, detail="Video file missing")
+    with Session(engine) as session:
+        item = session.get(Movie if media_type == "movie" else TVShow, item_id)
+        if not item or not os.path.exists(item.file_path): raise HTTPException(status_code=404, detail="Video file missing")
+        file_path = item.file_path
     
-    filename = os.path.basename(item.file_path)
-    return FileResponse(item.file_path, media_type="application/octet-stream", filename=filename)
+    filename = os.path.basename(file_path)
+    return FileResponse(file_path, media_type="application/octet-stream", filename=filename)
 
 def get_server_metrics(session: Session) -> dict:
     cpu_percent = 0.0
@@ -2351,6 +2384,31 @@ async def delete_user(user_id: int, current_user: User = Depends(get_current_use
 async def ping(response: Response):
     response.headers["Access-Control-Allow-Origin"] = "*"
     return {"status": "ok", "app": "heirloom", "server_time": time.time()}
+
+_speedtest_chunk = os.urandom(65536)
+
+@app.get("/speedtest")
+async def speedtest(size: int = 1048576):
+    """
+    Lightweight speedtest endpoint for measuring client download bandwidth.
+    Streams non-cacheable binary data chunks of requested size (default 1MB, min 64KB, max 10MB).
+    """
+    target_size = max(65536, min(10485760, size))
+    def iter_bytes():
+        bytes_sent = 0
+        chunk_len = len(_speedtest_chunk)
+        while bytes_sent < target_size:
+            to_send = min(chunk_len, target_size - bytes_sent)
+            yield _speedtest_chunk[:to_send]
+            bytes_sent += to_send
+
+    headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Content-Length": str(target_size),
+        "Access-Control-Allow-Origin": "*"
+    }
+    return StreamingResponse(iter_bytes(), media_type="application/octet-stream", headers=headers)
 # --- Watch Together Routes ---
 @app.websocket("/ws/sync/{session_id}")
 async def websocket_sync(websocket: WebSocket, session_id: str):

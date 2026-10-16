@@ -4,18 +4,26 @@ from .models import User, VolumePath  # We import models so SQLModel knows the t
 # This is critical: We are saving the database inside the /config folder.
 # Because of your Docker volume mount, this will actually be saved to your desktop!
 from sqlalchemy import event
+from sqlalchemy.pool import NullPool
 
 sqlite_file_name = "/config/heirloom.db"
 sqlite_url = f"sqlite:///{sqlite_file_name}"
 
-# The engine connects to the file with a timeout to wait for locks
-engine = create_engine(sqlite_url, echo=True, connect_args={"timeout": 15})
+# Use NullPool for SQLite to prevent QueuePool exhaustion during concurrent streams and downloads.
+# In WAL mode, SQLite handles concurrent read operations without pool contention.
+engine = create_engine(
+    sqlite_url,
+    echo=False,
+    connect_args={"timeout": 30, "check_same_thread": False},
+    poolclass=NullPool
+)
 
 @event.listens_for(engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA busy_timeout=30000")
     cursor.close()
 
 def create_db_and_tables():

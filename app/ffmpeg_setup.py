@@ -115,10 +115,54 @@ def get_sidecar_subtitles(file_path: str) -> list[dict]:
         
     return sidecars
 
+def sanitize_subtitle_line(line: str) -> str:
+    """
+    Cleans up common OCR and ripped subtitle formatting artifacts, such as
+    missing spaces after punctuation, speaker tags touching dialogue, etc.
+    """
+    if not line or '-->' in line or line.startswith(('WEBVTT', 'NOTE', 'STYLE', 'REGION')):
+        return line
+    if line.isdigit():
+        return line
+    
+    # 1. Closing brackets/parentheses directly touching a letter or number: [Speaker]Hello -> [Speaker] Hello
+    line = re.sub(r'([\]\)\}])([A-Za-z0-9])', r'\1 \2', line)
+    
+    # 2. Opening brackets directly touching letter/number if preceded by a letter: Hello[Speaker] -> Hello [Speaker]
+    line = re.sub(r'([A-Za-z0-9])([\[\(\{])', r'\1 \2', line)
+
+    # 3. HTML/VTT closing tag touching letter: </i>Hello -> </i> Hello, or Period before opening tag: Yes.<i> -> Yes. <i>
+    line = re.sub(r'(</[a-zA-Z0-9]+>)([A-Za-z0-9])', r'\1 \2', line)
+    line = re.sub(r'([.?!,:;])(<[a-zA-Z0-9]+[ >])', r'\1 \2', line)
+
+    # 4. Closing quotation mark touching letter: "Hello."He said -> "Hello." He said
+    line = re.sub(r'([.?!,]["\'”’])([A-Za-z0-9])', r'\1 \2', line)
+
+    # 5. Punctuation (comma, colon, semicolon, exclamation, question mark) touching letter:
+    line = re.sub(r'([,;:!?])([A-Za-z])', r'\1 \2', line)
+
+    # 6. Period directly touching a letter:
+    # Avoid abbreviations like 'U.S.A.', 'e.g.', 'i.e.' by ensuring not preceded by a single letter at word boundary
+    line = re.sub(r'(?<!\b[A-Za-z])([.])([A-Za-z])', r'\1 \2', line)
+    # Also handle single-letter 'I.' followed by word: e.g. "said I.Next" -> "said I. Next"
+    line = re.sub(r'(?<=\bI\.)([A-Za-z])', r' \1', line)
+
+    # 7. Collapse duplicate inline spaces
+    line = re.sub(r'[ \t]{2,}', ' ', line)
+    return line.strip()
+
+def sanitize_vtt_content(vtt_content: str) -> str:
+    """
+    Sanitizes each dialogue line in a WebVTT or SubRip content string.
+    """
+    lines = vtt_content.splitlines()
+    cleaned = [sanitize_subtitle_line(line) for line in lines]
+    return "\n".join(cleaned)
+
 def extract_subtitle_to_vtt(media_path: str, stream_index: int, output_vtt_path: str) -> bool:
     """
     Extracts an embedded text subtitle stream from a video container into a WebVTT file using ffmpeg.
-    Uses atomic writes to avoid race conditions.
+    Sanitizes dialogue lines and uses atomic writes to avoid race conditions.
     """
     try:
         ffmpeg_bin = get_ffmpeg_path()
@@ -136,6 +180,14 @@ def extract_subtitle_to_vtt(media_path: str, stream_index: int, output_vtt_path:
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if res.returncode == 0 and os.path.exists(tmp_vtt) and os.path.getsize(tmp_vtt) > 0:
+            try:
+                with open(tmp_vtt, "r", encoding="utf-8", errors="ignore") as f:
+                    raw_content = f.read()
+                cleaned_content = sanitize_vtt_content(raw_content)
+                with open(tmp_vtt, "w", encoding="utf-8") as f:
+                    f.write(cleaned_content)
+            except Exception:
+                pass
             os.replace(tmp_vtt, output_vtt_path)
             return True
         else:
@@ -151,10 +203,10 @@ def extract_subtitle_to_vtt(media_path: str, stream_index: int, output_vtt_path:
 def shift_vtt_timestamps(vtt_content: str, offset_seconds: float) -> str:
     """
     Shifts all WebVTT cue timestamps backwards by offset_seconds to align with video playback.
-    Cues that end before 0.0 are excluded.
+    Cues that end before 0.0 are excluded. Sanitizes dialogue lines for clean spacing.
     """
     if offset_seconds <= 0.0:
-        return vtt_content
+        return sanitize_vtt_content(vtt_content)
 
     def parse_vtt_time(ts_str: str) -> float:
         parts = ts_str.strip().split(":")
@@ -210,7 +262,7 @@ def shift_vtt_timestamps(vtt_content: str, offset_seconds: float) -> str:
             cue_text_lines = []
             i += 1
             while i < len(lines) and lines[i].strip():
-                cue_text_lines.append(lines[i])
+                cue_text_lines.append(sanitize_subtitle_line(lines[i]))
                 i += 1
 
             if end_sec is not None and end_sec > 0.0:
@@ -569,6 +621,15 @@ def probe_media_streams(file_path: str) -> dict:
                 (audio_channels is None or audio_channels <= 2)
             )
 
+            bitrate = None
+            try:
+                if fmt.get("bit_rate"):
+                    bitrate = int(fmt.get("bit_rate"))
+                elif fmt.get("size") and duration and duration > 0:
+                    bitrate = int(float(fmt.get("size")) * 8 / duration)
+            except (ValueError, TypeError):
+                bitrate = None
+
             result = {
                 "video_codec": video_codec,
                 "audio_codec": audio_codec,
@@ -576,6 +637,7 @@ def probe_media_streams(file_path: str) -> dict:
                 "width": width,
                 "height": height,
                 "duration": duration,
+                "bitrate": bitrate,
                 "can_direct_stream_video": can_direct_stream_video,
                 "can_direct_stream_audio": can_direct_stream_audio,
                 "audio_tracks": audio_tracks,

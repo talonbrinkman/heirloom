@@ -199,11 +199,15 @@ def _perform_scan(session: Session):
                             genres_str = None
                             
                             if tmdb_api_key:
-                                url = f"https://api.themoviedb.org/3/search/movie?query={search_title}&year={year}&api_key={tmdb_api_key}"
+                                params = {"query": search_title, "api_key": tmdb_api_key}
+                                if year:
+                                    params["year"] = year
                                 try:
-                                    res = requests.get(url, timeout=10)
+                                    res = requests.get("https://api.themoviedb.org/3/search/movie", params=params, timeout=10)
                                     if res.status_code == 200 and res.json().get("results"):
-                                        data = res.json()["results"][0]
+                                        results = res.json()["results"]
+                                        clean_search = re.sub(r'[^a-zA-Z0-9]', '', search_title).lower()
+                                        data = next((r for r in results if re.sub(r'[^a-zA-Z0-9]', '', r.get("title", "")).lower() == clean_search), results[0])
                                         tmdb_id = data.get("id")
                                         plot = data.get("overview")
                                         poster_filename = download_image(data.get("poster_path"), "movie", tmdb_id, "poster")
@@ -256,24 +260,39 @@ def _perform_scan(session: Session):
                                     episode = int(title_match.group(5))
                             else:
                                 search_title = raw_title.split(" - ")[0]
+
+                            # Fallback: check folder structure if title was not extracted from filename
+                            # e.g., /media/tv/Show Name/Season 1/S01E01.mkv
+                            rel_root = os.path.relpath(root, tv_dir)
+                            if rel_root and rel_root != ".":
+                                folder_parts = [p for p in rel_root.split(os.sep) if p and not re.match(r'^season\s*\d+', p, re.IGNORECASE)]
+                                if folder_parts:
+                                    folder_title = folder_parts[0].strip()
+                                    if not search_title or len(search_title) < 2:
+                                        search_title = folder_title
                             
                             # Strip trailing year in parentheses, e.g. " (2021)"
+                            year_in_title = re.search(r'\s*\((\d{4})\)$', search_title)
+                            year = year_in_title.group(1) if year_in_title else ""
                             search_title = re.sub(r'\s*\(\d{4}\)$', '', search_title).strip()
                             
                             plot, poster_filename, backdrop_filename = None, None, None
                             cast, director = None, None
                             rating = None
                             content_rating = None
-                            year = ""
                             season_poster_filename = None
                             genres_str = None
                             
                             if tmdb_api_key:
-                                url = f"https://api.themoviedb.org/3/search/tv?query={search_title}&api_key={tmdb_api_key}"
+                                params = {"query": search_title, "api_key": tmdb_api_key}
+                                if year:
+                                    params["first_air_date_year"] = year
                                 try:
-                                    res = requests.get(url, timeout=10)
+                                    res = requests.get("https://api.themoviedb.org/3/search/tv", params=params, timeout=10)
                                     if res.status_code == 200 and res.json().get("results"):
-                                        data = res.json()["results"][0]
+                                        results = res.json()["results"]
+                                        clean_search = re.sub(r'[^a-zA-Z0-9]', '', search_title).lower()
+                                        data = next((r for r in results if re.sub(r'[^a-zA-Z0-9]', '', r.get("name", "")).lower() == clean_search), results[0])
                                         tmdb_id = data.get("id")
                                         plot = data.get("overview")
                                         poster_filename = download_image(data.get("poster_path"), "tv", tmdb_id, "poster")
@@ -288,8 +307,11 @@ def _perform_scan(session: Session):
                                         
                                         # Also fetch season poster if we have a valid season
                                         if season is not None:
-                                            s_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season}?api_key={tmdb_api_key}"
-                                            s_res = requests.get(s_url, timeout=10)
+                                            s_res = requests.get(
+                                                f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season}",
+                                                params={"api_key": tmdb_api_key},
+                                                timeout=10
+                                            )
                                             if s_res.status_code == 200:
                                                 s_data = s_res.json()
                                                 if s_data.get("poster_path"):

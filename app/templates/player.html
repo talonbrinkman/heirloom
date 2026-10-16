@@ -217,13 +217,13 @@
                             {% endif %}
 
                             <!-- Resolution -->
-                            <div class="settings-section">
+                            <div class="settings-section" id="resolutionSection">
                                 <div class="settings-header">Resolution</div>
                                 <button class="res-btn active" data-res="original"
-                                    onclick="setResolution('original')">Original</button>
-                                <button class="res-btn" data-res="1080" onclick="setResolution('1080')">1080p</button>
-                                <button class="res-btn" data-res="720" onclick="setResolution('720')">720p</button>
-                                <button class="res-btn" data-res="480" onclick="setResolution('480')">480p</button>
+                                    onclick="setResolution('original')">Original{% if media_bitrate and media_bitrate > 0 %} <span class="res-rate">({{ ((media_bitrate / 1000000) | round(1)) if (media_bitrate >= 1000000) else ((media_bitrate / 1000) | round(0) | int) }}{{ ' Mbps' if media_bitrate >= 1000000 else ' kbps' }})</span>{% endif %}</button>
+                                <button class="res-btn" data-res="1080" onclick="setResolution('1080')">1080p <span class="res-rate">(6.0 Mbps)</span></button>
+                                <button class="res-btn" data-res="720" onclick="setResolution('720')">720p <span class="res-rate">(3.0 Mbps)</span></button>
+                                <button class="res-btn" data-res="480" onclick="setResolution('480')">480p <span class="res-rate">(1.5 Mbps)</span></button>
                             </div>
 
                             <!-- Speed -->
@@ -376,6 +376,19 @@
             networkLatencyMs: null,
             latencyAvgMs: null,
             latencyHistory: [],
+            bandwidth: {
+                currentMbps: null,
+                maxMbps: null,
+                minMbps: null,
+                smoothedMbps: null,
+                samples: [],
+                streamBitrateMbps: null,
+                headroomRatio: null,
+                recommendedTier: null,
+                deviceDownlinkEstMbps: (navigator.connection && navigator.connection.downlink) ? navigator.connection.downlink : null,
+                lastProbedAt: null,
+                isProbing: false
+            },
             isTranscoding: null,
             transcodeMethod: null,
             hardwareAccelerated: null,
@@ -383,10 +396,115 @@
             playType: null,
             resolution: currentRes,
             container: null,
+            streamBitrate: null,
             bufferAheadSec: 0,
             droppedFrames: 0,
             totalFrames: 0
         };
+
+        async function probeBandwidth(bytes = 1048576) {
+            const bw = playerStats.bandwidth;
+            if (bw.isProbing) return;
+            bw.isProbing = true;
+
+            const startTime = performance.now();
+            try {
+                const response = await fetch(`/speedtest?size=${bytes}&_t=${Date.now()}`, { cache: 'no-store' });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                let receivedBytes = 0;
+                if (response.body && response.body.getReader) {
+                    const reader = response.body.getReader();
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        receivedBytes += value.byteLength;
+                    }
+                } else {
+                    const blob = await response.blob();
+                    receivedBytes = blob.size;
+                }
+
+                const elapsedSec = (performance.now() - startTime) / 1000;
+                if (elapsedSec > 0 && receivedBytes > 0) {
+                    const bps = (receivedBytes * 8) / elapsedSec;
+                    const mbps = Number((bps / 1000000).toFixed(2));
+
+                    bw.currentMbps = mbps;
+                    bw.samples.push(mbps);
+                    if (bw.samples.length > 10) bw.samples.shift();
+
+                    bw.maxMbps = Number(Math.max(...bw.samples).toFixed(2));
+                    bw.minMbps = Number(Math.min(...bw.samples).toFixed(2));
+
+                    // Exponential Moving Average (EMA, alpha=0.35)
+                    if (bw.smoothedMbps === null) {
+                        bw.smoothedMbps = mbps;
+                    } else {
+                        bw.smoothedMbps = Number((0.35 * mbps + 0.65 * bw.smoothedMbps).toFixed(2));
+                    }
+
+                    bw.lastProbedAt = Date.now();
+                    updateBandwidthHeadroom();
+                }
+            } catch (err) {
+                console.debug("[Bandwidth Probe] Error measuring speed:", err);
+            } finally {
+                bw.isProbing = false;
+            }
+        }
+
+        function updateBandwidthHeadroom() {
+            const bw = playerStats.bandwidth;
+            const streamBps = playerStats.streamBitrate;
+            if (streamBps && streamBps > 0) {
+                bw.streamBitrateMbps = Number((streamBps / 1000000).toFixed(2));
+            } else if (playerStats.resolution) {
+                const resDefaults = { '360': 0.8, '480': 1.5, '720': 3.0, '1080': 6.0, 'original': 8.0 };
+                bw.streamBitrateMbps = resDefaults[playerStats.resolution] || 3.0;
+            }
+
+            const effectiveBw = bw.smoothedMbps || bw.currentMbps;
+            if (effectiveBw && bw.streamBitrateMbps && bw.streamBitrateMbps > 0) {
+                bw.headroomRatio = Number((effectiveBw / bw.streamBitrateMbps).toFixed(2));
+            }
+
+            if (effectiveBw) {
+                if (effectiveBw >= 25) bw.recommendedTier = 'Original / 4K';
+                else if (effectiveBw >= 12) bw.recommendedTier = '1080p (High)';
+                else if (effectiveBw >= 6) bw.recommendedTier = '1080p';
+                else if (effectiveBw >= 3.5) bw.recommendedTier = '720p';
+                else if (effectiveBw >= 1.5) bw.recommendedTier = '480p';
+                else bw.recommendedTier = '360p';
+            }
+        }
+
+        function updateResolutionBitrateLabels(origBitrateBps) {
+            if (!origBitrateBps || origBitrateBps <= 0) return;
+            const origMbps = origBitrateBps / 1000000;
+            const origLabel = origMbps >= 1.0 ? `${origMbps.toFixed(1)} Mbps` : `${Math.round(origBitrateBps / 1000)} kbps`;
+
+            const origBtn = document.querySelector('.res-btn[data-res="original"]');
+            if (origBtn) {
+                origBtn.innerHTML = `Original <span class="res-rate">(${origLabel})</span>`;
+            }
+
+            const b1080 = document.querySelector('.res-btn[data-res="1080"]');
+            if (b1080) {
+                const rate1080 = Math.min(origMbps, 6.0).toFixed(1);
+                b1080.innerHTML = `1080p <span class="res-rate">(${rate1080} Mbps)</span>`;
+            }
+            const b720 = document.querySelector('.res-btn[data-res="720"]');
+            if (b720) {
+                const rate720 = Math.min(origMbps, 3.0).toFixed(1);
+                b720.innerHTML = `720p <span class="res-rate">(${rate720} Mbps)</span>`;
+            }
+            const b480 = document.querySelector('.res-btn[data-res="480"]');
+            if (b480) {
+                const rate480 = Math.min(origMbps, 1.5).toFixed(1);
+                b480.innerHTML = `480p <span class="res-rate">(${rate480} Mbps)</span>`;
+            }
+        }
 
         async function updatePlaybackStats() {
             const startTime = performance.now();
@@ -417,6 +535,7 @@
                     playerStats.playType = data.play_type;
                     playerStats.resolution = data.resolution;
                     playerStats.container = data.container;
+                    playerStats.streamBitrate = data.bitrate || null;
                     playerStats.audioTrack = data.audio_track;
                     playerStats.audioCodec = data.audio_codec;
                     playerStats.audioChannels = data.audio_channels;
@@ -432,7 +551,17 @@
                         }
                     }
 
+                    updateBandwidthHeadroom();
+                    updateResolutionBitrateLabels(data.bitrate);
                     logPlayerStats();
+
+                    // Trigger periodic bandwidth probe if initial or last probe was > 30s ago
+                    const bw = playerStats.bandwidth;
+                    if (!bw.isProbing && (!bw.lastProbedAt || (Date.now() - bw.lastProbedAt > 30000))) {
+                        probeBandwidth().then(() => {
+                            logPlayerStats();
+                        });
+                    }
                 } else {
                     pingLatencyOnly();
                 }
@@ -482,13 +611,26 @@
             const lat = playerStats.networkLatencyMs;
             const avgLat = playerStats.latencyAvgMs;
 
+            const bw = playerStats.bandwidth;
+            const bwCurrent = bw.currentMbps;
+            const bwMax = bw.maxMbps;
+            const bwColor = (bwCurrent !== null && bwCurrent >= 15) ? '#4caf50' : ((bwCurrent !== null && bwCurrent >= 5) ? '#ffb300' : '#f44336');
+
             const latColor = (lat !== null && lat < 60) ? '#4caf50' : ((lat !== null && lat < 160) ? '#ffb300' : '#f44336');
             const transcodeColor = isTranscoding ? '#ff9800' : '#4caf50';
             const hwColor = isHW ? '#4caf50' : (isTranscoding ? '#ff5252' : '#888888');
 
+            const headroomLabel = bw.headroomRatio !== null
+                ? (bw.headroomRatio >= 2.0 ? 'Plentiful headroom' : (bw.headroomRatio >= 1.0 ? 'Sufficient' : 'Low / Buffering risk'))
+                : '--';
+
             console.groupCollapsed(
-                `%c[Heirloom Player]%c Latency: %c${lat !== null ? lat + 'ms' : '--'}%c | Transcode: %c${isTranscoding ? 'YES' : 'NO'}%c | HW Accel: %c${isHW ? 'YES' : (isTranscoding ? 'NO' : 'N/A')}%c`,
+                `%c[Heirloom Player]%c Bandwidth: %c${bwCurrent !== null ? bwCurrent + ' Mbps' : 'probing...'}%c (Peak: %c${bwMax !== null ? bwMax + ' Mbps' : '--'}%c) | Latency: %c${lat !== null ? lat + 'ms' : '--'}%c | Transcode: %c${isTranscoding ? 'YES' : 'NO'}%c | HW: %c${isHW ? 'YES' : (isTranscoding ? 'NO' : 'N/A')}%c`,
                 'color: #e50914; font-weight: bold;',
+                'color: #aaa;',
+                `color: ${bwColor}; font-weight: bold;`,
+                'color: #aaa;',
+                'color: #81c784; font-weight: bold;',
                 'color: #aaa;',
                 `color: ${latColor}; font-weight: bold;`,
                 'color: #aaa;',
@@ -499,6 +641,11 @@
             );
 
             console.log(
+                `%c  Current Bandwidth:     %c${bwCurrent !== null ? bwCurrent + ' Mbps' : 'probing...'} (smoothed: ${bw.smoothedMbps !== null ? bw.smoothedMbps + ' Mbps' : '--'})\n` +
+                `%c  Max Bandwidth (Peak):  %c${bwMax !== null ? bwMax + ' Mbps' : '--'} (min: ${bw.minMbps !== null ? bw.minMbps + ' Mbps' : '--'})\n` +
+                `%c  Stream Bitrate:        %c${bw.streamBitrateMbps !== null ? bw.streamBitrateMbps + ' Mbps' : 'Estimating...'}\n` +
+                `%c  Bandwidth Headroom:    %c${bw.headroomRatio !== null ? bw.headroomRatio + 'x' : '--'} (${headroomLabel})\n` +
+                `%c  Recommended Tier (ABR):%c${bw.recommendedTier || 'Evaluating...'}\n` +
                 `%c  Network Latency:       %c${lat !== null ? lat + ' ms' : 'measuring...'} (avg: ${avgLat !== null ? avgLat + ' ms' : '--'})\n` +
                 `%c  Transcoding Active:    %c${isTranscoding ? 'Yes' : 'No (' + (playerStats.playType || 'Direct Play') + ')'}\n` +
                 `%c  Transcode Method:      %c${playerStats.transcodeMethod || 'Direct Play'}\n` +
@@ -507,6 +654,11 @@
                 `%c  Selected Resolution:   %c${playerStats.resolution || currentRes}\n` +
                 `%c  Buffer Health:         %c${playerStats.bufferAheadSec}s ahead\n` +
                 `%c  Dropped Frames:        %c${playerStats.droppedFrames} / ${playerStats.totalFrames}`,
+                'font-weight: bold; color: #00e676;', 'color: inherit;',
+                'font-weight: bold; color: #69f0ae;', 'color: inherit;',
+                'font-weight: bold; color: #ffd54f;', 'color: inherit;',
+                'font-weight: bold; color: #ffb74d;', 'color: inherit;',
+                'font-weight: bold; color: #ba68c8;', 'color: inherit;',
                 'font-weight: bold; color: #42a5f5;', 'color: inherit;',
                 'font-weight: bold; color: #ab47bc;', 'color: inherit;',
                 'font-weight: bold; color: #26a69a;', 'color: inherit;',
@@ -522,6 +674,7 @@
 
         window.getPlayerStats = () => playerStats;
         window.logPlayerStats = logPlayerStats;
+        window.testBandwidth = (bytes) => probeBandwidth(bytes).then(() => logPlayerStats());
 
         function syncSubtitleTracks() {
             const trackEls = video.querySelectorAll('track');

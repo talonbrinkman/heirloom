@@ -71,7 +71,7 @@
                         <div class="flex gap-15 mb-20">
                             <a href="{{ resume_link }}" class="play-btn m-0">
                                 <i data-lucide="play" fill="currentColor"></i>
-                                {% if has_progress %}Resume{% else %}Play Episode{% endif %}
+                                {% if has_progress %}Resume{% else %}Play{% endif %}
                             </a>
                             
                             {% if in_watchlist %}
@@ -89,7 +89,7 @@
                             {% endif %}
                             
                             {% if user.downloads_access %}
-                            <a href="/download/tv/{{ series.id }}" class="play-btn m-0" download title="Download First Episode">
+                            <a href="/download/tv/{{ series.id }}" class="play-btn m-0" download title="Download">
                                 <i data-lucide="arrow-down-to-line" fill="none"></i>
                             </a>
                             {% endif %}
@@ -154,8 +154,10 @@
                                         </div>
                                     </a>
                                 </div>
-                                <div class="media-year" style="padding: 0 5px; color: #fff;">
-                                    <span style="color: #fff;">{{ ep.season_episode | safe }}</span>
+                                <div class="media-year" title="{{ ep.season_episode }}">
+                                    {% for part in ep.season_episode.replace('<br>', ' • ').split(' • ') %}
+                                    <span class="media-year-line">{{ part }}</span>
+                                    {% endfor %}
                                 </div>
                             </div>
                             {% endfor %}

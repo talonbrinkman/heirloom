@@ -112,12 +112,11 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 - **Smart Remuxing & Direct Stream**: Media files with web-compatible video streams (H.264/AVC) are repacked on-the-fly into fragmented MP4 streams via zero-overhead stream copy (`-c:v copy`), even across MKV/AVI containers and seeking/resuming. Only audio or incompatible video codecs/resolutions are transcoded, eliminating unnecessary CPU/GPU load while delivering instant playback and bit-for-bit picture quality.
 - **Multi-Audio Track Selection**: Switch between multiple audio tracks (e.g., original language tracks, international dubs, director's commentary) on-the-fly directly from the player settings menu, with persistent per-title track memory and zero buffering loss.
 - **Multi-Track Subtitles & Closed Captions**: Stream embedded text subtitles (SRT, WebVTT, ASS/SSA, MOV text) and external sidecar files dynamically extracted to WebVTT with keyframe-accurate seek synchronization. Toggle captions instantly with the dedicated player button or the `C` keyboard shortcut, select specific subtitle tracks directly from the player settings menu with persistent per-title memory, and close the player anytime with `Esc`.
-- **Mobile-First Responsive Interface**: Enjoy a streamlined, touch-optimized experience on smartphones and tablets featuring collapsible on-demand search, horizontal pill navigation, touch carousels, and thumb-friendly controls.
-- **Real-Time Telemetry & Volume Monitoring**: Access live stream health, real-time playback timestamps (`0:00 / 00:00 -00:00`), and mounted media storage metrics directly from the Server Dashboard with automated background telemetry.
+- **Mobile-First Responsive Interface**: Enjoy a streamlined, touch-optimized experience on smartphones and tablets featuring collapsible on-demand search, touch carousels, and thumb-friendly controls.
+- **Real-Time Telemetry & Volume Monitoring**: Access live stream health, real-time playback timestamps, and mounted media storage metrics directly from the Server Dashboard with automated background telemetry.
 
 ## 🔮 Upcoming Improvements
 
-- Subtitle Search & OpenSubtitles Integration
 - Adaptive Bitrate & HLS Streaming
 - Fast Profile Switching & PIN Protection
 - Non-Blocking Async Scanner

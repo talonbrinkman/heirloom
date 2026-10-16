@@ -708,6 +708,27 @@ input[type="checkbox"]:checked {
 .episode-card .media-year {
     color: var(--text);
     padding: 0 5px;
+    white-space: normal;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    text-align: center;
+    max-width: 120px;
+    line-height: 1.25;
+}
+
+.episode-card .media-year .media-year-line {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 0.85em;
+    color: #fff;
+}
+
+.episode-card .media-year .media-year-line:not(:first-child) {
+    font-size: 0.78em;
+    color: var(--text-muted);
 }
 
 .selected-episode .poster-container {
@@ -715,8 +736,9 @@ input[type="checkbox"]:checked {
     border-radius: var(--radius);
 }
 
-.selected-episode .media-year span {
-    color: var(--accent);
+.selected-episode .media-year span,
+.selected-episode .media-year .media-year-line {
+    color: var(--accent) !important;
     font-weight: bold;
 }
 
@@ -968,6 +990,7 @@ body.has-backdrop {
     flex-shrink: 0;
     border-radius: 8px;
     box-shadow: 0 10px 30px var(--overlay);
+    height: 100%;
 }
 
 .placeholder-poster {
@@ -1065,12 +1088,12 @@ body.has-backdrop {
     display: flex;
     flex-direction: column;
     align-items: center;
-    width: 80px;
+    width: 100px;
 }
 
 .cast-avatar {
-    width: 60px;
-    height: 60px;
+    width: 100%;
+    aspect-ratio: 1/1;
     margin-bottom: 8px;
     border-radius: 50%;
     object-fit: cover;
@@ -1084,8 +1107,9 @@ body.has-backdrop {
 .cast-name {
     font-size: 0.8em;
     line-height: 1.2;
-    color: var(--text-muted);
+    color: var(--text);
     text-align: center;
+    font-weight: bold;
 }
 
 .cast-character {
@@ -1358,17 +1382,23 @@ google-cast-launcher {
 .settings-section {
     display: flex;
     flex-direction: column;
-    min-width: 100px;
+    min-width: 120px;
     max-height: 280px;
     overflow: hidden;
 }
 
 .settings-section button {
-    max-width: 20ch;
+    max-width: 28ch;
     overflow-x: scroll;
     white-space: nowrap;
     text-overflow: ellipsis;
     scrollbar-width: none;
+}
+
+.settings-section button .res-rate {
+    font-size: 0.85em;
+    opacity: 0.75;
+    margin-left: 4px;
 }
 
 .settings-section button.disabled {
@@ -1387,15 +1417,25 @@ google-cast-launcher {
 }
 
 ::cue {
-    background-color: rgba(0, 0, 0, 0.75);
+    background-color: transparent;
     color: #ffffff;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    font-size: 1.15rem;
+    font-size: 1.5rem;
     font-weight: 500;
     line-height: 1.4;
-    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
-    border-radius: 4px;
-    padding: 2px 8px;
+    text-shadow: 0 2px 5px black;
+    position: relative;
+}
+
+/* Reposition subtitle track container above player controls */
+video::-webkit-media-text-track-container,
+.player-video::-webkit-media-text-track-container {
+    bottom: 5% !important;
+}
+
+video::-webkit-media-text-track-display,
+.player-video::-webkit-media-text-track-display {
+    transform: translateY(0);
 }
 
 /* Skip Intro / Skip Credits */
@@ -2369,6 +2409,7 @@ google-cast-launcher {
     }
 
     .info-poster {
+        display: none;
         width: 160px;
         max-width: 50vw;
         height: auto;
