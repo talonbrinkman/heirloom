@@ -1,6 +1,7 @@
 /media/
 /.agents/
-/config/
+/config/*
+!/config/.gitkeep
 .env
 __pycache__/
 *.pyc

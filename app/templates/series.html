@@ -23,9 +23,34 @@
                         <div id="inboxItems">Loading...</div>
                     </div>
                 </div>
-                <a href="/settings" class="icon-link">
+                <a href="/settings" class="icon-link" title="Settings">
                     <i data-lucide="settings"></i>
                 </a>
+                <!-- Profile Switcher Dropdown -->
+                <div class="profile-header-container">
+                    <button type="button" class="profile-header-btn" onclick="toggleProfileDropdown(event)" title="Current Profile: {{ current_profile.name if current_profile else user.username }}">
+                        <div class="profile-header-avatar" style="background: {{ current_profile.avatar_color if current_profile and current_profile.avatar_color else '#e50914' }};">
+                            <i data-lucide="{{ current_profile.avatar_icon if current_profile and current_profile.avatar_icon else 'user' }}"></i>
+                        </div>
+                        <span class="profile-header-name">{{ current_profile.name if current_profile else user.username }}</span>
+                    </button>
+                    <div id="profileDropdownMenu" class="profile-dropdown-menu" style="display: none;">
+                        <a href="/profiles" class="profile-dropdown-item">
+                            <i data-lucide="users"></i>
+                            <span>Switch Profiles</span>
+                        </a>
+                        {% if (user.is_admin or user.can_manage_profiles) and (current_profile is none or current_profile.is_primary) %}
+                        <a href="/profiles?manage=1" class="profile-dropdown-item">
+                            <i data-lucide="sliders"></i>
+                            <span>Manage Profiles</span>
+                        </a>
+                        {% endif %}
+                        <a href="/logout" class="profile-dropdown-item text-danger">
+                            <i data-lucide="log-out"></i>
+                            <span>Sign Out</span>
+                        </a>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -73,6 +98,20 @@
                                 <i data-lucide="play" fill="currentColor"></i>
                                 {% if has_progress %}Resume{% else %}Play{% endif %}
                             </a>
+                            
+                            {% if is_series_watched %}
+                            <form action="/history/mark_unwatched/tv/{{ series.id }}" method="post" title="Mark Series as Unwatched">
+                                <button type="submit" class="play-btn m-0" style="background: var(--accent);">
+                                    <i data-lucide="check" fill="none"></i>
+                                </button>
+                            </form>
+                            {% else %}
+                            <form action="/history/mark_watched/tv/{{ series.id }}" method="post" title="Mark Series as Watched">
+                                <button type="submit" class="play-btn m-0">
+                                    <i data-lucide="check" fill="none"></i>
+                                </button>
+                            </form>
+                            {% endif %}
                             
                             {% if in_watchlist %}
                             <form action="/watchlist/remove_by_item/tv/{{ series.id }}" method="post">
@@ -149,10 +188,35 @@
                                         {% else %}
                                         <div class="poster-placeholder"></div>
                                         {% endif %}
-                                        <div class="icon-btn hover-play">
-                                            <i data-lucide="play" fill="currentColor"></i>
-                                        </div>
                                     </a>
+                                    <a href="/play/tv/{{ ep.id }}" class="icon-btn hover-play">
+                                        <i data-lucide="play" fill="currentColor"></i>
+                                    </a>
+                                    <button class="icon-btn three-dots-btn" onclick="toggleMenu(event, 'menu-ep-{{ ep.id }}')">
+                                        <i data-lucide="more-vertical" fill="white"></i>
+                                    </button>
+                                    {% if ep.is_watched %}
+                                    <div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>
+                                    {% endif %}
+                                    <div class="dropdown-menu" id="menu-ep-{{ ep.id }}">
+                                        {% if ep.is_watched %}
+                                        <form action="/history/mark_unwatched/tv/{{ ep.id }}?scope=episode" method="post">
+                                            <button type="submit">Mark as Unwatched</button>
+                                        </form>
+                                        {% else %}
+                                        <form action="/history/mark_watched/tv/{{ ep.id }}?scope=episode" method="post">
+                                            <button type="submit">Mark as Watched</button>
+                                        </form>
+                                        {% endif %}
+                                        {% if user.watch_together_access %}
+                                        <button type="button" onclick="openWatchTogether('tv', {{ ep.id }})">Watch Together</button>
+                                        {% endif %}
+                                        {% if user.downloads_access %}
+                                        <form action="/download/tv/{{ ep.id }}" method="get">
+                                            <button type="submit">Download</button>
+                                        </form>
+                                        {% endif %}
+                                    </div>
                                 </div>
                                 <div class="media-year" title="{{ ep.season_episode }}">
                                     {% for part in ep.season_episode.replace('<br>', ' • ').split(' • ') %}
@@ -253,6 +317,67 @@
                     row.addEventListener('scroll', updateCarouselArrows);
                 });
             });
+
+            function toggleMenu(event, menuId) {
+                event.preventDefault();
+                event.stopPropagation();
+
+                document.querySelectorAll('.dropdown-menu.show').forEach(menu => {
+                    if (menu.id !== menuId) {
+                        menu.classList.remove('show');
+                    }
+                });
+
+                const menu = document.getElementById(menuId);
+                if (menu) {
+                    const isShowing = !menu.classList.contains('show');
+                    if (isShowing) {
+                        document.body.appendChild(menu);
+                        menu.style.position = 'fixed';
+                        menu.style.visibility = 'hidden';
+                        menu.classList.add('show');
+
+                        const btnRect = event.currentTarget.getBoundingClientRect();
+                        const menuRect = menu.getBoundingClientRect();
+                        const menuWidth = menuRect.width || 180;
+                        const menuHeight = menuRect.height || 150;
+                        const viewportWidth = window.innerWidth;
+                        const viewportHeight = window.innerHeight;
+
+                        // Align right edge of menu with right edge of button by default
+                        let left = btnRect.right - menuWidth;
+                        // Prevent spilling off the left edge on mobile (keep 10px margin)
+                        if (left < 10) {
+                            left = 10;
+                        }
+                        // Prevent spilling off the right edge (keep 10px margin)
+                        if (left + menuWidth > viewportWidth - 10) {
+                            left = Math.max(10, viewportWidth - menuWidth - 10);
+                        }
+
+                        // Position below button, or flip upward if not enough room below
+                        let top = btnRect.bottom + 5;
+                        if (top + menuHeight > viewportHeight - 10 && btnRect.top - menuHeight - 5 > 10) {
+                            top = btnRect.top - menuHeight - 5;
+                        }
+
+                        menu.style.left = left + 'px';
+                        menu.style.right = 'auto';
+                        menu.style.top = top + 'px';
+                        menu.style.visibility = 'visible';
+                    } else {
+                        menu.classList.remove('show');
+                    }
+                }
+            }
+
+            document.addEventListener('click', function (event) {
+                if (!event.target.closest('.dropdown-menu') && !event.target.closest('.three-dots-btn')) {
+                    document.querySelectorAll('.dropdown-menu.show').forEach(menu => {
+                        menu.classList.remove('show');
+                    });
+                }
+            });
         </script>
         <script src="/static/lucide.min.js"></script>
         <script>lucide.createIcons();</script>
@@ -326,6 +451,9 @@
     
     function toggleInbox(e) {
         e.preventDefault();
+        const profileMenu = document.getElementById('profileDropdownMenu');
+        if (profileMenu) profileMenu.style.display = 'none';
+
         const menu = document.getElementById('inboxMenu');
         if (menu.style.display === 'none') {
             menu.style.display = 'block';
@@ -393,30 +521,76 @@
         }
     }
     
-    async function startWatchTogether() {
-        const checkboxes = document.querySelectorAll('.wt-user-checkbox:checked');
-        const userIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
-        
-        try {
-            const res = await fetch('/watch_together/create', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    media_type: wtCurrentMedia.type,
-                    item_id: wtCurrentMedia.id,
-                    invited_user_ids: userIds
-                })
-            });
-            const data = await res.json();
-            if (data.session_id) {
-                window.location.href = `/play_sync/${data.session_id}`;
+        async function startWatchTogether() {
+            const checkboxes = document.querySelectorAll('.wt-user-checkbox:checked');
+            const userIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+            
+            try {
+                const res = await fetch('/watch_together/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        media_type: wtCurrentMedia.type,
+                        item_id: wtCurrentMedia.id,
+                        invited_user_ids: userIds
+                    })
+                });
+                const data = await res.json();
+                if (data.session_id) {
+                    window.location.href = `/play_sync/${data.session_id}`;
+                }
+            } catch (err) {
+                console.error(err);
+                alert("Error creating session.");
             }
-        } catch (err) {
-            console.error(err);
-            alert("Error creating session.");
         }
-    }
-</script>
+
+        function toggleProfileDropdown(event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            const inboxMenu = document.getElementById('inboxMenu');
+            if (inboxMenu) inboxMenu.style.display = 'none';
+
+            const menu = document.getElementById('profileDropdownMenu');
+            if (menu) {
+                const isHidden = menu.style.display === 'none' || menu.style.display === '';
+                menu.style.display = isHidden ? 'flex' : 'none';
+            }
+        }
+
+        document.addEventListener('click', function (e) {
+            const container = document.querySelector('.profile-header-container');
+            if (container && !container.contains(e.target)) {
+                const menu = document.getElementById('profileDropdownMenu');
+                if (menu) menu.style.display = 'none';
+            }
+        });
+
+        async function quickSwitchProfile(profileId, hasPin) {
+            if (hasPin) {
+                window.location.href = `/profiles?select=${profileId}`;
+                return;
+            }
+            try {
+                const resp = await fetch('/api/profile/select', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ profile_id: profileId })
+                });
+                const data = await resp.json();
+                if (data.requires_pin) {
+                    window.location.href = `/profiles?select=${profileId}`;
+                } else if (data.success) {
+                    window.location.reload();
+                }
+            } catch (err) {
+                console.error("Profile switch error:", err);
+                window.location.href = '/profiles';
+            }
+        }
+    </script>
 
 </body>
 </html>

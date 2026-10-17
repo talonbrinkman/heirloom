@@ -6,6 +6,7 @@
     <title>Heirloom</title>
     <link rel="stylesheet" href="/static/style.css">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <script src="https://unpkg.com/lucide@latest"></script>
 </head>
 
 <body class="center-screen">
@@ -15,7 +16,12 @@
             <label for="username">Username</label>
             <input type="text" name="username" id="username" style="margin-bottom: 15px;" required>
             <label for="password">Password</label>
-            <input type="password" name="password" id="password" style="margin-bottom: 15px;" required>
+            <div class="password-wrapper" style="margin-bottom: 15px;">
+                <input type="password" name="password" id="password" required>
+                <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('password', 'loginPasswordIcon')" title="Toggle visibility">
+                    <i data-lucide="eye" id="loginPasswordIcon"></i>
+                </button>
+            </div>
             <button type="submit" class="btn w-full">Sign In</button>
         </form>
         <div style="text-align: center; margin-top: 15px;">
@@ -65,6 +71,22 @@
             document.querySelector('.setup-box > div[style*="text-align: center"]').style.display = 'block';
             document.getElementById('forgotForm').style.display = 'none';
         }
+
+        function togglePasswordVisibility(inputId, iconId) {
+            const input = document.getElementById(inputId);
+            const icon = document.getElementById(iconId);
+            if (!input || !icon) return;
+            if (input.type === 'password') {
+                input.type = 'text';
+                icon.setAttribute('data-lucide', 'eye-off');
+            } else {
+                input.type = 'password';
+                icon.setAttribute('data-lucide', 'eye');
+            }
+            if (window.lucide) lucide.createIcons();
+        }
+
+        if (window.lucide) lucide.createIcons();
     </script>
 </body>
 

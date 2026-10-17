@@ -5,6 +5,7 @@
         <title>Heirloom</title>
         <link rel="stylesheet" href="/static/style.css">
         <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+        <script src="https://unpkg.com/lucide@latest"></script>
     </head>
     <body class="center-screen">
         <div class="setup-box">
@@ -17,21 +18,47 @@
                 <input type="text" name="username" id="username" required autocomplete="off">
                 
                 <label for="password">Password</label>
-                <input type="password" name="password" id="password" required>
+                <div class="password-wrapper" style="margin-bottom: 15px;">
+                    <input type="password" name="password" id="password" required>
+                    <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('password', 'togglePasswordIcon')" title="Toggle visibility">
+                        <i data-lucide="eye" id="togglePasswordIcon"></i>
+                    </button>
+                </div>
 
                 <label for="confirm_password">Confirm Password</label>
-                <input type="password" name="confirm_password" id="confirm_password" required>
+                <div class="password-wrapper" style="margin-bottom: 15px;">
+                    <input type="password" name="confirm_password" id="confirm_password" required>
+                    <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('confirm_password', 'toggleConfirmIcon')" title="Toggle visibility">
+                        <i data-lucide="eye" id="toggleConfirmIcon"></i>
+                    </button>
+                </div>
                 
                 <button type="submit" class="btn w-full" style="margin-top: 10px;">Create Admin Account</button>
             </form>
         </div>
 
         <script>
+            lucide.createIcons();
+
             const params = new URLSearchParams(window.location.search);
             const notice = document.getElementById('errorNotice');
             if (params.get('error') === 'passwords_mismatch') {
                 notice.textContent = 'Passwords do not match. Please try again.';
                 notice.style.display = 'block';
+            }
+
+            function togglePasswordVisibility(inputId, iconId) {
+                const input = document.getElementById(inputId);
+                const icon = document.getElementById(iconId);
+                if (!input || !icon) return;
+                if (input.type === 'password') {
+                    input.type = 'text';
+                    icon.setAttribute('data-lucide', 'eye-off');
+                } else {
+                    input.type = 'password';
+                    icon.setAttribute('data-lucide', 'eye');
+                }
+                lucide.createIcons();
             }
 
             function validatePasswords() {

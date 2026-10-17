@@ -15,7 +15,20 @@ class User(SQLModel, table=True):
     watch_together_access: bool = Field(default=True)
     kids_mode: bool = Field(default=False)
     rewind_seconds: int = Field(default=0)
+    can_manage_profiles: bool = Field(default=True)
     session_token: Optional[str] = Field(default=None, index=True)
+
+class Profile(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    name: str = Field(index=True)
+    avatar_color: str = Field(default="#e50914")
+    avatar_icon: Optional[str] = Field(default="user")
+    is_primary: bool = Field(default=False)
+    is_kids: bool = Field(default=False)
+    pin_hash: Optional[str] = Field(default=None)
+    rewind_seconds: int = Field(default=0)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class Movie(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -82,12 +95,14 @@ class InviteCode(SQLModel, table=True):
 class Watchlist(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id")
+    profile_id: Optional[int] = Field(default=None, foreign_key="profile.id", index=True)
     media_type: str 
     item_id: int
 
 class WatchHistory(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id")
+    profile_id: Optional[int] = Field(default=None, foreign_key="profile.id", index=True)
     media_type: str 
     item_id: int
     progress: float = Field(default=0.0) # Percentage from 0 to 100

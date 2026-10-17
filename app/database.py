@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, create_engine, Session, select, text
-from .models import User, VolumePath  # We import models so SQLModel knows the tables exist
+from .models import User, VolumePath, Profile, WatchHistory, Watchlist
 
 # This is critical: We are saving the database inside the /config folder.
 # Because of your Docker volume mount, this will actually be saved to your desktop!
@@ -130,6 +130,54 @@ def create_db_and_tables():
                     show.title = new_title
                     session.add(show)
             session.commit()
+        except Exception:
+            session.rollback()
+
+        # Multi-Profile Migrations
+        try:
+            session.exec(text("ALTER TABLE user ADD COLUMN can_manage_profiles BOOLEAN DEFAULT 1"))
+            session.exec(text("UPDATE user SET can_manage_profiles = 1 WHERE can_manage_profiles IS NULL"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
+            session.exec(text("ALTER TABLE watchhistory ADD COLUMN profile_id INTEGER"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
+            session.exec(text("ALTER TABLE watchlist ADD COLUMN profile_id INTEGER"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        # Seed Primary Profiles for existing Users if missing
+        try:
+            users = session.exec(select(User)).all()
+            for u in users:
+                existing_profile = session.exec(select(Profile).where(Profile.user_id == u.id, Profile.is_primary == True)).first()
+                if not existing_profile:
+                    primary_p = Profile(
+                        user_id=u.id,
+                        name=u.username,
+                        avatar_color="#e50914",
+                        avatar_icon="user",
+                        is_primary=True,
+                        is_kids=u.kids_mode,
+                        rewind_seconds=u.rewind_seconds or 0
+                    )
+                    session.add(primary_p)
+                    session.commit()
+                    session.refresh(primary_p)
+                    existing_profile = primary_p
+
+                # Backfill historical watchhistory and watchlist
+                if existing_profile:
+                    session.exec(text(f"UPDATE watchhistory SET profile_id = {existing_profile.id} WHERE user_id = {u.id} AND profile_id IS NULL"))
+                    session.exec(text(f"UPDATE watchlist SET profile_id = {existing_profile.id} WHERE user_id = {u.id} AND profile_id IS NULL"))
+                    session.commit()
         except Exception:
             session.rollback()
 

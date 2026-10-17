@@ -4,23 +4,22 @@ services:
     build: .
     container_name: heirloom
     environment:
-      # These tell the container who to pretend to be
-      - PUID=1026
-      - PGID=100
-      - TZ=America/Chicago
+      # These tell the container who to pretend to be (Defaults if not specified in .env)
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-America/Chicago}
+      - TMDB_API_KEY=${TMDB_API_KEY:-}
     ports:
       # Host : Container
       - "8000:8000"
-    env_file:
-      - path: .env
-        required: false
     volumes:
       # Host Path : Container Path
       - ./config:/config
+      - ./app:/app/app
+      # Media Library Mount Examples (Can manually add volumes later)
       - ./media/tv:/media/tv:ro
       - ./media/movies:/media/movies:ro
       - ./media/photos:/media/photos:ro
-      - ./app:/app/app
     # --- Hardware Acceleration (Optional) ---
     # For Synology NAS, Unraid, or Linux hosts with Intel QuickSync / AMD GPU (VA-API), uncomment:
     # devices:

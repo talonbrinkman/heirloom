@@ -23,9 +23,34 @@
                         <div id="inboxItems">Loading...</div>
                     </div>
                 </div>
-                <a href="/settings" class="icon-link">
+                <a href="/settings" class="icon-link" title="Settings">
                     <i data-lucide="settings"></i>
                 </a>
+                <!-- Profile Switcher Dropdown -->
+                <div class="profile-header-container">
+                    <button type="button" class="profile-header-btn" onclick="toggleProfileDropdown(event)" title="Current Profile: {{ current_profile.name if current_profile else user.username }}">
+                        <div class="profile-header-avatar" style="background: {{ current_profile.avatar_color if current_profile and current_profile.avatar_color else '#e50914' }};">
+                            <i data-lucide="{{ current_profile.avatar_icon if current_profile and current_profile.avatar_icon else 'user' }}"></i>
+                        </div>
+                        <span class="profile-header-name">{{ current_profile.name if current_profile else user.username }}</span>
+                    </button>
+                    <div id="profileDropdownMenu" class="profile-dropdown-menu" style="display: none;">
+                        <a href="/profiles" class="profile-dropdown-item">
+                            <i data-lucide="users"></i>
+                            <span>Switch Profiles</span>
+                        </a>
+                        {% if (user.is_admin or user.can_manage_profiles) and (current_profile is none or current_profile.is_primary) %}
+                        <a href="/profiles?manage=1" class="profile-dropdown-item">
+                            <i data-lucide="sliders"></i>
+                            <span>Manage Profiles</span>
+                        </a>
+                        {% endif %}
+                        <a href="/logout" class="profile-dropdown-item text-danger">
+                            <i data-lucide="log-out"></i>
+                            <span>Sign Out</span>
+                        </a>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -65,6 +90,20 @@
                                 <i data-lucide="play" fill="currentColor"></i>
                                 {% if has_progress %}Resume{% else %}Play{% endif %}
                             </a>
+                            
+                            {% if is_watched %}
+                            <form action="/history/mark_unwatched/movie/{{ movie.id }}" method="post" title="Mark as Unwatched">
+                                <button type="submit" class="play-btn m-0" style="background: var(--accent);">
+                                    <i data-lucide="check" fill="none"></i>
+                                </button>
+                            </form>
+                            {% else %}
+                            <form action="/history/mark_watched/movie/{{ movie.id }}" method="post" title="Mark as Watched">
+                                <button type="submit" class="play-btn m-0">
+                                    <i data-lucide="check" fill="none"></i>
+                                </button>
+                            </form>
+                            {% endif %}
                             
                             {% if in_watchlist %}
                             <form action="/watchlist/remove_by_item/movie/{{ movie.id }}" method="post">
@@ -189,6 +228,9 @@
     
     function toggleInbox(e) {
         e.preventDefault();
+        const profileMenu = document.getElementById('profileDropdownMenu');
+        if (profileMenu) profileMenu.style.display = 'none';
+
         const menu = document.getElementById('inboxMenu');
         if (menu.style.display === 'none') {
             menu.style.display = 'block';
@@ -256,30 +298,76 @@
         }
     }
     
-    async function startWatchTogether() {
-        const checkboxes = document.querySelectorAll('.wt-user-checkbox:checked');
-        const userIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
-        
-        try {
-            const res = await fetch('/watch_together/create', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    media_type: wtCurrentMedia.type,
-                    item_id: wtCurrentMedia.id,
-                    invited_user_ids: userIds
-                })
-            });
-            const data = await res.json();
-            if (data.session_id) {
-                window.location.href = `/play_sync/${data.session_id}`;
+        async function startWatchTogether() {
+            const checkboxes = document.querySelectorAll('.wt-user-checkbox:checked');
+            const userIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+            
+            try {
+                const res = await fetch('/watch_together/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        media_type: wtCurrentMedia.type,
+                        item_id: wtCurrentMedia.id,
+                        invited_user_ids: userIds
+                    })
+                });
+                const data = await res.json();
+                if (data.session_id) {
+                    window.location.href = `/play_sync/${data.session_id}`;
+                }
+            } catch (err) {
+                console.error(err);
+                alert("Error creating session.");
             }
-        } catch (err) {
-            console.error(err);
-            alert("Error creating session.");
         }
-    }
-</script>
+
+        function toggleProfileDropdown(event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            const inboxMenu = document.getElementById('inboxMenu');
+            if (inboxMenu) inboxMenu.style.display = 'none';
+
+            const menu = document.getElementById('profileDropdownMenu');
+            if (menu) {
+                const isHidden = menu.style.display === 'none' || menu.style.display === '';
+                menu.style.display = isHidden ? 'flex' : 'none';
+            }
+        }
+
+        document.addEventListener('click', function (e) {
+            const container = document.querySelector('.profile-header-container');
+            if (container && !container.contains(e.target)) {
+                const menu = document.getElementById('profileDropdownMenu');
+                if (menu) menu.style.display = 'none';
+            }
+        });
+
+        async function quickSwitchProfile(profileId, hasPin) {
+            if (hasPin) {
+                window.location.href = `/profiles?select=${profileId}`;
+                return;
+            }
+            try {
+                const resp = await fetch('/api/profile/select', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ profile_id: profileId })
+                });
+                const data = await resp.json();
+                if (data.requires_pin) {
+                    window.location.href = `/profiles?select=${profileId}`;
+                } else if (data.success) {
+                    window.location.reload();
+                }
+            } catch (err) {
+                console.error("Profile switch error:", err);
+                window.location.href = '/profiles';
+            }
+        }
+    </script>
 
 </body>
 </html>

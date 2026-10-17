@@ -124,7 +124,10 @@
         let currentDirPath = "";
         async function openDirBrowser() {
             document.getElementById('dirModal').style.display = 'flex';
-            let startPath = document.getElementById('pathInput').value || "/";
+            let startPath = document.getElementById('pathInput').value;
+            if (!startPath || startPath === "/") {
+                startPath = "/media";
+            }
             await loadDir(startPath);
         }
         async function loadDir(path) {
@@ -336,6 +339,7 @@
             <h1 class="m-0" style="font-size: 1.5rem;">Settings</h1>
         </div>
 
+        {% if can_change_password %}
         <div class="card">
             <div class="card-header">
                 <h2 class="m-0">My Account, {{ user.username }}</h2>
@@ -358,10 +362,11 @@
                     Password</button>
             </form>
         </div>
+        {% endif %}
 
         <div class="card">
             <div class="card-header">
-                <h2 class="m-0">Rewind on Resume</h2>
+                <h2 class="m-0">Rewind on Resume{% if current_profile and not current_profile.is_primary %} ({{ current_profile.name }}){% endif %}</h2>
             </div>
 
             <p style="color: var(--text-secondary); font-size: 0.9em;" class="mb-15">Set how many seconds playback will
@@ -371,14 +376,14 @@
                 class="flex gap-10 align-center mb-15">
                 <div class="flex-1" style="position: relative;">
                     <input type="number" name="rewind_seconds" id="rewindSecondsInput" class="no-arrows" min="0"
-                        max="300" step="1" value="{{ user.rewind_seconds if user.rewind_seconds is not none else 0 }}"
+                        max="300" step="1" value="{{ rewind_seconds if rewind_seconds is not none else (current_profile.rewind_seconds if current_profile and current_profile.rewind_seconds is not none else (user.rewind_seconds or 0)) }}"
                         placeholder="Seconds (e.g. 5, 10)" required class="w-full m-0" style="box-sizing: border-box;">
                 </div>
                 <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
             </form>
         </div>
 
-        {% if user.is_admin %}
+        {% if is_admin %}
         <div class="card">
             <div class="card-header">
                 <h2 class="m-0">Media Volume Paths</h2>
@@ -495,6 +500,10 @@
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.kids_mode
                                         %}checked{% endif %}>
                                     <span>Kids Only</span></label>
+                                <label class="toggle-pill"><input type="checkbox" name="can_manage_profiles"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        u.can_manage_profiles %}checked{% endif %}>
+                                    <span>Household Profiles</span></label>
                             </div>
                         </form>
                     </div>
@@ -582,7 +591,6 @@
                 credentials and data are encrypted.
             </div>
         </div>
-        {% endif %}
 
         <div class="card">
             <h2 class="mt-0">Hardware Accelerated Transcoding</h2>
@@ -607,14 +615,15 @@
                 <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
             </form>
         </div>
+        {% endif %}
 
         <div class="card">
             <form action="/logout" method="post" class="m-0">
-                <button type="submit" class="btn btn-danger btn-block"><i data-lucide="log-out"></i> Logout</button>
+                <button type="submit" class="btn btn-danger btn-block"><i data-lucide="log-out"></i> Sign Out</button>
             </form>
         </div>
         <div style="text-align: center; color: #888; font-size: 0.8em; margin-top: 10px;">
-            <strong>v1.0.0</strong>
+            <strong>v1.1.0</strong>
         </div>
     </div>
 

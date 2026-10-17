@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/static/style.css">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <script src="/static/lucide.min.js"></script>
+    <script src="/static/hls.min.js"></script>
     <script type="text/javascript"
         src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
     <style>
@@ -219,7 +220,8 @@
                             <!-- Resolution -->
                             <div class="settings-section" id="resolutionSection">
                                 <div class="settings-header">Resolution</div>
-                                <button class="res-btn active" data-res="original"
+                                <button class="res-btn active" data-res="auto" onclick="setResolution('auto')">Auto<span class="res-rate" id="autoResRate"></span></button>
+                                <button class="res-btn" data-res="original"
                                     onclick="setResolution('original')">Original{% if media_bitrate and media_bitrate > 0 %} <span class="res-rate">({{ ((media_bitrate / 1000000) | round(1)) if (media_bitrate >= 1000000) else ((media_bitrate / 1000) | round(0) | int) }}{{ ' Mbps' if media_bitrate >= 1000000 else ' kbps' }})</span>{% endif %}</button>
                                 <button class="res-btn" data-res="1080" onclick="setResolution('1080')">1080p <span class="res-rate">(6.0 Mbps)</span></button>
                                 <button class="res-btn" data-res="720" onclick="setResolution('720')">720p <span class="res-rate">(3.0 Mbps)</span></button>
@@ -298,7 +300,7 @@
         let rewindSeconds = Number("{{ user.rewind_seconds if user and user.rewind_seconds else 0 }}");
         let offsetStart = 0;
 
-        let currentRes = localStorage.getItem('player_res') || 'original';
+        let currentRes = localStorage.getItem('player_res') || 'auto';
         let currentAudioTrack = parseInt(localStorage.getItem('player_audio_{{ media_type }}_{{ item.id }}') || '0', 10);
         let savedSpeed = parseFloat(localStorage.getItem('player_speed')) || 1;
         let savedAspect = localStorage.getItem('player_aspect') || 'contain';
@@ -541,8 +543,8 @@
                     playerStats.audioChannels = data.audio_channels;
                     playerStats.audioTrackName = data.selected_audio_track ? data.selected_audio_track.label : `Track #${data.audio_track + 1}`;
 
-                    // Check if server snapped to keyframe for stream copy
-                    if (typeof data.actual_start === 'number' && !isNaN(data.actual_start)) {
+                    // Check if server snapped to keyframe for stream copy (legacy piped mode only)
+                    if (!isHlsActive && typeof data.actual_start === 'number' && !isNaN(data.actual_start)) {
                         if (Math.abs(offsetStart - data.actual_start) > 0.05 && Math.abs(offsetStart - data.actual_start) < 30.0) {
                             console.log(`[Playback] Aligning player offsetStart to actual keyframe: ${offsetStart.toFixed(2)}s -> ${data.actual_start.toFixed(2)}s`);
                             offsetStart = data.actual_start;
@@ -676,12 +678,92 @@
         window.logPlayerStats = logPlayerStats;
         window.testBandwidth = (bytes) => probeBandwidth(bytes).then(() => logPlayerStats());
 
+        let hlsInstance = null;
+        let isHlsActive = false;
+        let pendingInitialSeek = (offsetStart > 0) ? offsetStart : 0;
+
+        function getActualTime() {
+            if (isHlsActive) {
+                return video.currentTime || 0;
+            }
+            return offsetStart + (video.currentTime || 0);
+        }
+
+        function seekToTime(targetTime) {
+            const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
+            targetTime = Math.max(0, Math.min(effectiveDuration, targetTime));
+            if (castPlayer && castPlayer.isConnected) {
+                castPlayer.currentTime = targetTime;
+                castController.seek();
+                return;
+            }
+            const wasPlaying = !video.paused;
+            if (isHlsActive) {
+                video.currentTime = targetTime;
+                if (wasPlaying) {
+                    video.play().catch(e => console.debug("Resume after seek deferred:", e));
+                }
+            } else {
+                offsetStart = targetTime;
+                loadVideoSource();
+            }
+        }
+
+        function updateResolutionButtonsFromLevels(levels) {
+            if (!levels || levels.length === 0) return;
+            const availableHeights = new Set(levels.map(l => l.height));
+            ['1080', '720', '480'].forEach(resKey => {
+                const btn = document.querySelector(`.res-btn[data-res="${resKey}"]`);
+                if (btn) {
+                    const h = parseInt(resKey, 10);
+                    if (availableHeights.has(h)) {
+                        btn.style.display = ''; // Restores native CSS stylesheet rule (inline-flex)
+                        const lvl = levels.find(l => l.height === h);
+                        if (lvl && lvl.bitrate) {
+                            const mbps = (lvl.bitrate / 1000000).toFixed(1);
+                            const rateSpan = btn.querySelector('.res-rate');
+                            if (rateSpan) {
+                                rateSpan.textContent = `(${mbps} Mbps)`;
+                            }
+                        }
+                    } else {
+                        btn.style.display = 'none'; // Hides variant if not offered by master playlist
+                    }
+                }
+            });
+        }
+
+        function findLevelIndex(resKey) {
+            if (!hlsInstance || !hlsInstance.levels) return -1;
+            if (resKey === 'original') {
+                const idx = hlsInstance.levels.findIndex(l => (l.name && l.name.toLowerCase() === 'original'));
+                return idx !== -1 ? idx : 0;
+            }
+            const targetH = parseInt(resKey, 10);
+            return hlsInstance.levels.findIndex(l => l.height === targetH || (l.name && l.name.includes(resKey)));
+        }
+
+        function applyCurrentResolutionLevel() {
+            if (!hlsInstance || !hlsInstance.levels || hlsInstance.levels.length === 0) return;
+            if (currentRes === 'auto') {
+                hlsInstance.currentLevel = -1;
+                return;
+            }
+            const idx = findLevelIndex(currentRes);
+            if (idx !== -1) {
+                hlsInstance.currentLevel = idx;
+            } else {
+                hlsInstance.currentLevel = -1;
+            }
+        }
+
         function syncSubtitleTracks() {
             const trackEls = video.querySelectorAll('track');
             trackEls.forEach(trackEl => {
                 const trackId = trackEl.getAttribute('data-track-id');
                 if (trackId) {
-                    let subUrl = `/subtitle/{{ media_type }}/{{ item.id }}?track_id=${encodeURIComponent(trackId)}&start=${offsetStart}&res=${encodeURIComponent(currentRes)}`;
+                    let subStart = isHlsActive ? 0 : offsetStart;
+                    let subUrl = `/subtitle/{{ media_type }}/{{ item.id }}?track_id=${encodeURIComponent(trackId)}&start=${subStart}&res=${encodeURIComponent(currentRes)}`;
                     {% if token %}
                     subUrl += `&token={{ token }}`;
                     {% endif %}
@@ -692,17 +774,125 @@
         }
 
         function loadVideoSource() {
-            let url = `/stream/{{ media_type }}/{{ item.id }}?res=${currentRes}&start=${offsetStart}&audio_track=${currentAudioTrack}`;
+            let masterUrl = `/hls/{{ media_type }}/{{ item.id }}/master.m3u8?audio_track=${currentAudioTrack}`;
+            let legacyUrl = `/stream/{{ media_type }}/{{ item.id }}?res=${currentRes}&start=${offsetStart}&audio_track=${currentAudioTrack}`;
             {% if token %}
-            url += `&token={{ token }}`;
+            masterUrl += `&token={{ token }}`;
+            legacyUrl += `&token={{ token }}`;
             {% endif %}
-            video.src = url;
 
-            syncSubtitleTracks();
+            if (hlsInstance) {
+                hlsInstance.destroy();
+                hlsInstance = null;
+            }
 
-            video.load();
-            attemptPlay();
-            updatePlaybackStats();
+            if (window.Hls && Hls.isSupported()) {
+                isHlsActive = true;
+                const hls = new Hls({
+                    startPosition: pendingInitialSeek > 0 ? pendingInitialSeek : -1,
+                    autoStartLoad: true,
+                    maxBufferLength: 30,
+                    maxMaxBufferLength: 60,
+                    fragLoadingTimeOut: 45000,
+                    fragLoadingMaxRetry: 6,
+                    fragLoadingRetryDelay: 1500,
+                    fragLoadingMaxRetryTimeout: 64000,
+                    manifestLoadingTimeOut: 20000,
+                    levelLoadingTimeOut: 20000,
+                    enableWorker: true,
+                    lowLatencyMode: false
+                });
+                hlsInstance = hls;
+
+                hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+                    console.log(`[Heirloom HLS] Manifest loaded with ${data.levels.length} variants:`, data.levels.map(l => `${l.name || l.height + 'p'} (${(l.bitrate / 1000000).toFixed(2)} Mbps)`));
+                    updateResolutionButtonsFromLevels(data.levels);
+                    applyCurrentResolutionLevel();
+
+                    if (pendingInitialSeek > 0) {
+                        video.currentTime = pendingInitialSeek;
+                        pendingInitialSeek = 0;
+                    }
+                    offsetStart = 0;
+                    attemptPlay();
+                    updatePlaybackStats();
+                });
+
+                hls.on(Hls.Events.LEVEL_SWITCHED, (event, data) => {
+                    const level = hls.levels[data.level];
+                    if (level) {
+                        console.log(`%c[Heirloom HLS] ABR switched: ${level.name || level.height + 'p'} (${(level.bitrate / 1000000).toFixed(2)} Mbps, ${level.width}x${level.height})`, 'color: #10b981; font-weight: bold;');
+                        playerStats.resolution = level.name || `${level.height}p`;
+                        playerStats.streamBitrate = level.bitrate;
+                        playerStats.isTranscoding = (level.name !== 'Original');
+                        playerStats.transcodeMethod = level.name === 'Original' ? 'Direct Stream / Remux (Stream Copy)' : `HLS ABR (${level.name || level.height + 'p'})`;
+                        
+                        const autoRate = document.getElementById('autoResRate');
+                        if (autoRate && currentRes === 'auto') {
+                            autoRate.textContent = `(${level.name || level.height + 'p'})`;
+                        }
+                        logPlayerStats();
+                    }
+                });
+
+                hls.on(Hls.Events.ERROR, (event, data) => {
+                    console.warn('[Heirloom HLS Error]', data);
+                    if (data.fatal) {
+                        switch (data.type) {
+                            case Hls.ErrorTypes.NETWORK_ERROR:
+                                console.error('[Heirloom HLS] Fatal network error, recovering...');
+                                hls.startLoad();
+                                break;
+                            case Hls.ErrorTypes.MEDIA_ERROR:
+                                console.error('[Heirloom HLS] Fatal media error, recovering...');
+                                hls.recoverMediaError();
+                                break;
+                            default:
+                                console.error('[Heirloom HLS] Unrecoverable error, falling back to direct stream...');
+                                const resumeTime = getActualTime();
+                                hls.destroy();
+                                hlsInstance = null;
+                                isHlsActive = false;
+                                video.src = legacyUrl;
+                                syncSubtitleTracks();
+                                video.addEventListener('loadedmetadata', () => {
+                                    if (resumeTime > 0) {
+                                        video.currentTime = resumeTime;
+                                    }
+                                }, { once: true });
+                                video.load();
+                                attemptPlay();
+                                updatePlaybackStats();
+                                break;
+                        }
+                    }
+                });
+
+                hls.loadSource(masterUrl);
+                hls.attachMedia(video);
+                syncSubtitleTracks();
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                isHlsActive = true;
+                video.src = masterUrl;
+                syncSubtitleTracks();
+                if (pendingInitialSeek > 0) {
+                    video.addEventListener('loadedmetadata', () => {
+                        video.currentTime = pendingInitialSeek;
+                        pendingInitialSeek = 0;
+                        offsetStart = 0;
+                    }, { once: true });
+                }
+                video.load();
+                attemptPlay();
+                updatePlaybackStats();
+            } else {
+                isHlsActive = false;
+                video.src = legacyUrl;
+                syncSubtitleTracks();
+                video.load();
+                attemptPlay();
+                updatePlaybackStats();
+            }
         }
 
         loadVideoSource();
@@ -778,6 +968,22 @@
 
         // Playback Ended / Next Episode Auto-play / Exit
         video.addEventListener('ended', async () => {
+            const actualTime = getActualTime();
+            const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
+
+            // Safety guard: ONLY treat playback as finished if genuinely near end of media
+            const isNearEnd = effectiveDuration > 0 && (
+                actualTime >= effectiveDuration - 15 || 
+                (actualTime / effectiveDuration) >= 0.92 ||
+                (creditsStart !== null && actualTime >= creditsStart)
+            );
+
+            if (!isNearEnd) {
+                console.warn(`[Heirloom Player] Suppressed premature "ended" event at ${actualTime.toFixed(1)}s of ${effectiveDuration.toFixed(1)}s. Keeping player active.`);
+                video.play().catch(e => console.debug("Resume after premature ended deferred:", e));
+                return;
+            }
+
             {% if next_episode_id %}
             let removeUrl = '/history/remove/{{ media_type }}/{{ item.id }}';
             {% if token %}
@@ -881,13 +1087,7 @@
 
         function skipIntro() {
             if (introEnd !== null) {
-                if (castPlayer && castPlayer.isConnected) {
-                    castPlayer.currentTime = introEnd;
-                    castController.seek();
-                } else {
-                    offsetStart = introEnd;
-                    loadVideoSource();
-                }
+                seekToTime(introEnd);
                 if (skipIntroBtn) skipIntroBtn.style.display = 'none';
             }
         }
@@ -951,7 +1151,7 @@
         // Update Progress
         video.addEventListener('timeupdate', () => {
             if (castPlayer && castPlayer.isConnected) return;
-            const actualTime = offsetStart + video.currentTime;
+            const actualTime = getActualTime();
             const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
             updateProgressUI(actualTime, effectiveDuration);
             checkMarkers(actualTime);
@@ -978,27 +1178,11 @@
             const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
 
             const newTime = pct * effectiveDuration;
-            if (castPlayer && castPlayer.isConnected) {
-                castPlayer.currentTime = newTime;
-                castController.seek();
-            } else {
-                offsetStart = newTime;
-                loadVideoSource();
-            }
+            seekToTime(newTime);
         });
 
         function seekOffset(seconds) {
-            if (castPlayer && castPlayer.isConnected) {
-                castPlayer.currentTime = castPlayer.currentTime + seconds;
-                castController.seek();
-                return;
-            }
-            const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
-            if (effectiveDuration <= 0) return;
-
-            const actualTime = offsetStart + video.currentTime;
-            offsetStart = Math.max(0, Math.min(effectiveDuration, actualTime + seconds));
-            loadVideoSource();
+            seekToTime(getActualTime() + seconds);
         }
 
         // Subtitle Track Switch and Sync
@@ -1112,7 +1296,8 @@
             const activeBtn = document.querySelector(`.audio-btn[data-audio="${trackIdx}"]`);
             if (activeBtn) activeBtn.classList.add('active');
 
-            offsetStart = offsetStart + video.currentTime;
+            pendingInitialSeek = getActualTime();
+            offsetStart = pendingInitialSeek;
             currentAudioTrack = trackIdx;
             localStorage.setItem('player_audio_{{ media_type }}_{{ item.id }}', trackIdx);
             loadVideoSource();
@@ -1122,12 +1307,31 @@
         // Resolution Switch
         function setResolution(res) {
             document.querySelectorAll('.res-btn').forEach(b => b.classList.remove('active'));
-            document.querySelector(`.res-btn[data-res="${res}"]`).classList.add('active');
+            const btn = document.querySelector(`.res-btn[data-res="${res}"]`);
+            if (btn) btn.classList.add('active');
 
-            offsetStart = offsetStart + video.currentTime;
             currentRes = res;
             localStorage.setItem('player_res', res);
-            loadVideoSource();
+
+            if (hlsInstance) {
+                if (res === 'auto') {
+                    hlsInstance.currentLevel = -1;
+                    console.log("[Heirloom HLS] ABR mode: Auto");
+                } else {
+                    const idx = findLevelIndex(res);
+                    if (idx !== -1) {
+                        hlsInstance.currentLevel = idx;
+                        const level = hlsInstance.levels[idx];
+                        console.log(`[Heirloom HLS] Manually locked to level ${idx}: ${level.name || level.height + 'p'}`);
+                    } else {
+                        hlsInstance.currentLevel = -1;
+                    }
+                }
+                updatePlaybackStats();
+            } else {
+                offsetStart = getActualTime();
+                loadVideoSource();
+            }
             document.getElementById('settingsMenu').classList.remove('show');
         }
 
@@ -1435,9 +1639,7 @@
             }, 3000);
         }
 
-        function getActualTime() {
-            return offsetStart + (video.currentTime || 0);
-        }
+
 
         function showSyncLoading(title, subtext) {
             if (sessionEndedOverlay && sessionEndedOverlay.style.display === 'flex') return;
@@ -1564,8 +1766,7 @@
                         const current = getActualTime();
                         const drift = Math.abs(current - targetActualTime);
                         if (drift > 2.0) {
-                            offsetStart = Math.max(0, targetActualTime);
-                            loadVideoSource();
+                            seekToTime(targetActualTime);
                         } else if (drift > 0.35) {
                             video.currentTime += (targetActualTime - current);
                         }
@@ -1584,8 +1785,7 @@
                     if (typeof data.time === 'number') {
                         const current = getActualTime();
                         if (Math.abs(current - data.time) > 2.0) {
-                            offsetStart = Math.max(0, data.time);
-                            loadVideoSource();
+                            seekToTime(data.time);
                         }
                     }
                     if (data.all_ready) {
@@ -1621,8 +1821,7 @@
                         showSyncAction(data.username, 'play');
                     }
                     if (drift > 2.0) {
-                        offsetStart = Math.max(0, targetActualTime);
-                        loadVideoSource();
+                        seekToTime(targetActualTime);
                     } else if (drift > 0.35) {
                         video.currentTime += (targetActualTime - currentActualTime);
                     }
@@ -1634,22 +1833,19 @@
                         showSyncAction(data.username, 'pause');
                     }
                     if (drift > 2.0) {
-                        offsetStart = Math.max(0, data.time);
-                        loadVideoSource();
+                        seekToTime(data.time);
                     } else if (drift > 0.35) {
                         video.currentTime += (data.time - currentActualTime);
                     }
                     video.pause();
                 } else if (data.action === 'seek') {
-                    offsetStart = Math.max(0, data.time);
-                    loadVideoSource();
+                    seekToTime(data.time);
                     notifyLoading();
                 } else if (data.action === 'sync') {
                     if (!video.paused && drift > 0.4) {
                         console.log(`[Watch Together] Drift detected (${Math.round((currentActualTime - targetActualTime) * 1000)}ms), re-syncing`);
                         if (drift > 2.0) {
-                            offsetStart = Math.max(0, targetActualTime);
-                            loadVideoSource();
+                            seekToTime(targetActualTime);
                         } else {
                             video.currentTime += (targetActualTime - currentActualTime);
                         }

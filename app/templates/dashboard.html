@@ -11,6 +11,9 @@
 <body>
     <div class="header">
         <div class="flex gap-15 align-center">
+            <button type="button" class="mobile-menu-btn" id="mobileMenuBtn" onclick="toggleMobileMenu(event)" aria-label="Open menu" title="Menu">
+                <i data-lucide="menu" id="mobileMenuIcon"></i>
+            </button>
             <h1 class="m-0" style="font-size: 1.5rem;">Heirloom</h1>
             <div class="search-box">
                 <input type="text" id="searchInput" class="search-input" placeholder="Search..."
@@ -23,23 +26,117 @@
             <a href="#" class="icon-link mobile-search-toggle" id="mobileSearchBtn" onclick="toggleMobileSearch(event)" title="Search">
                 <i data-lucide="search"></i>
             </a>
-            <!-- Server Dashboard -->
-            {% if user.is_admin %}
-            <a href="/server-dashboard" class="icon-link" title="Server Dashboard">
-                <i data-lucide="activity"></i>
-            </a>
+            <!-- Server Dashboard & Activity Indicator -->
+            {% if user.is_admin and (current_profile is none or current_profile.is_primary) %}
+            <div class="server-activity-wrapper desktop-only">
+                <a href="/server-dashboard" id="serverActivityBadge" class="server-activity-badge" style="display: none;" title="Server Action">
+                    <span id="serverActivityText" class="server-activity-text">Scanning...</span>
+                </a>
+                <a href="/server-dashboard" class="icon-link" title="Server Dashboard">
+                    <i data-lucide="gauge"></i>
+                </a>
+            </div>
             {% endif %}
-            <div class="inbox">
+            <div class="inbox desktop-only">
                 <a href="#" class="icon-link" id="inboxBtn" onclick="toggleInbox(event)" title="Inbox">
-                    <i data-lucide="inbox"></i>
+                    <i data-lucide="bell"></i>
                     <span id="inboxBadge" class="inbox-badge" style="display: none;"></span>
                 </a>
                 <div id="inboxMenu" class="dropdown-menu inbox-menu" style="display: none;">
                     <div id="inboxItems">Loading...</div>
                 </div>
             </div>
-            <a href="/settings" class="icon-link" title="Settings">
+            <a href="/settings" class="icon-link desktop-only" title="Settings">
                 <i data-lucide="settings"></i>
+            </a>
+            <!-- Profile Switcher Dropdown -->
+            <div class="profile-header-container desktop-only">
+                <button type="button" class="profile-header-btn" onclick="toggleProfileDropdown(event)" title="Current Profile: {{ current_profile.name if current_profile else user.username }}">
+                    <div class="profile-header-avatar" style="background: {{ current_profile.avatar_color if current_profile and current_profile.avatar_color else '#e50914' }};">
+                        <i data-lucide="{{ current_profile.avatar_icon if current_profile and current_profile.avatar_icon else 'user' }}"></i>
+                    </div>
+                    <span class="profile-header-name">{{ current_profile.name if current_profile else user.username }}</span>
+                </button>
+                <div id="profileDropdownMenu" class="profile-dropdown-menu" style="display: none;">
+                    <a href="/profiles" class="profile-dropdown-item">
+                        <i data-lucide="users"></i>
+                        <span>Switch Profiles</span>
+                    </a>
+                    {% if (user.is_admin or user.can_manage_profiles) and (current_profile is none or current_profile.is_primary) %}
+                    <a href="/profiles?manage=1" class="profile-dropdown-item">
+                        <i data-lucide="sliders"></i>
+                        <span>Manage Profiles</span>
+                    </a>
+                    {% endif %}
+                    <a href="/logout" class="profile-dropdown-item text-danger">
+                        <i data-lucide="log-out"></i>
+                        <span>Sign Out</span>
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Mobile Menu Backdrop Blur Overlay -->
+        <div id="mobileMenuBackdrop" class="mobile-menu-backdrop" onclick="toggleMobileMenu(event)"></div>
+
+        <!-- Mobile Hamburger Menu Dropdown -->
+        <div id="mobileMenu" class="mobile-menu">
+            <div class="mobile-menu-profile-card">
+                <div class="profile-header-avatar" style="background: {{ current_profile.avatar_color if current_profile and current_profile.avatar_color else '#e50914' }};">
+                    <i data-lucide="{{ current_profile.avatar_icon if current_profile and current_profile.avatar_icon else 'user' }}"></i>
+                </div>
+                <div class="mobile-menu-profile-info">
+                    <span class="mobile-profile-name">{{ current_profile.name if current_profile else user.username }}</span>
+                    <span class="mobile-profile-role">{{ 'Admin' if user.is_admin else 'Member' }}</span>
+                </div>
+            </div>
+
+            <a href="/" class="mobile-menu-link">
+                <i data-lucide="home"></i>
+                <span>Dashboard</span>
+            </a>
+
+            {% if user.is_admin and (current_profile is none or current_profile.is_primary) %}
+            <a href="/server-dashboard" class="mobile-menu-link">
+                <i data-lucide="gauge"></i>
+                <span>Server Dashboard</span>
+                <span id="mobileServerActivityBadge" class="mobile-menu-badge" style="display: none;">
+                    <span id="mobileServerActivityText">Scanning...</span>
+                </span>
+            </a>
+            {% endif %}
+
+            <a href="#" class="mobile-menu-link" id="mobileInboxToggle" onclick="toggleMobileInbox(event)">
+                <i data-lucide="bell"></i>
+                <span>Inbox</span>
+                <span id="mobileInboxBadge" class="mobile-menu-badge" style="display: none;"></span>
+            </a>
+            <div id="mobileInboxDropdown" class="mobile-inbox-dropdown" style="display: none;">
+                <div id="mobileInboxItems">Loading...</div>
+            </div>
+
+            <div class="mobile-menu-divider"></div>
+
+            <a href="/profiles" class="mobile-menu-link">
+                <i data-lucide="users"></i>
+                <span>Switch Profiles</span>
+            </a>
+            {% if (user.is_admin or user.can_manage_profiles) and (current_profile is none or current_profile.is_primary) %}
+            <a href="/profiles?manage=1" class="mobile-menu-link">
+                <i data-lucide="sliders"></i>
+                <span>Manage Profiles</span>
+            </a>
+            {% endif %}
+
+            <div class="mobile-menu-divider"></div>
+
+            <a href="/settings" class="mobile-menu-link">
+                <i data-lucide="settings"></i>
+                <span>Settings</span>
+            </a>
+            <a href="/logout" class="mobile-menu-link text-danger">
+                <i data-lucide="log-out"></i>
+                <span>Sign Out</span>
             </a>
         </div>
     </div>
@@ -93,7 +190,19 @@
                                     onclick="toggleMenu(event, 'menu-history-{{ loop.index }}')">
                                     <i data-lucide="more-vertical" fill="white"></i>
                                 </button>
+                                {% if (h.media_type == 'movie' and h.item.id in watched_movie_ids) or (h.media_type == 'tv' and h.item.id in watched_tv_episode_ids) %}
+                                <div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>
+                                {% endif %}
                                 <div class="dropdown-menu" id="menu-history-{{ loop.index }}">
+                                    {% if (h.media_type == 'movie' and h.item.id in watched_movie_ids) or (h.media_type == 'tv' and h.item.id in watched_tv_episode_ids) %}
+                                    <form action="/history/mark_unwatched/{{ h.media_type }}/{{ h.item.id }}{% if h.media_type == 'tv' %}?scope=episode{% endif %}" method="post">
+                                        <button type="submit">Mark as Unwatched</button>
+                                    </form>
+                                    {% else %}
+                                    <form action="/history/mark_watched/{{ h.media_type }}/{{ h.item.id }}{% if h.media_type == 'tv' %}?scope=episode{% endif %}" method="post">
+                                        <button type="submit">Mark as Watched</button>
+                                    </form>
+                                    {% endif %}
                                     {% if user.watch_together_access %}<button type="button"
                                         onclick="openWatchTogether('{{ h.media_type }}', {{ h.item.id }})">Watch
                                         Together</button>{% endif %}
@@ -154,7 +263,19 @@
                                     onclick="toggleMenu(event, 'menu-recommended-{{ loop.index }}')">
                                     <i data-lucide="more-vertical" fill="white"></i>
                                 </button>
+                                {% if (r.media_type == 'movie' and r.item.id in watched_movie_ids) or (r.media_type == 'tv' and r.item.title.strip().lower() in watched_tv_titles) %}
+                                <div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>
+                                {% endif %}
                                 <div class="dropdown-menu" id="menu-recommended-{{ loop.index }}">
+                                    {% if (r.media_type == 'movie' and r.item.id in watched_movie_ids) or (r.media_type == 'tv' and r.item.title.strip().lower() in watched_tv_titles) %}
+                                    <form action="/history/mark_unwatched/{{ r.media_type }}/{{ r.item.id }}" method="post">
+                                        <button type="submit">Mark as Unwatched</button>
+                                    </form>
+                                    {% else %}
+                                    <form action="/history/mark_watched/{{ r.media_type }}/{{ r.item.id }}" method="post">
+                                        <button type="submit">Mark as Watched</button>
+                                    </form>
+                                    {% endif %}
                                     {% if user.watch_together_access %}<button type="button"
                                         onclick="openWatchTogether('{{ r.media_type }}', {{ r.item.id }})">Watch
                                         Together</button>{% endif %}
@@ -213,7 +334,19 @@
                                     onclick="toggleMenu(event, 'menu-watchlist-{{ loop.index }}')">
                                     <i data-lucide="more-vertical" fill="white"></i>
                                 </button>
+                                {% if (w.media_type == 'movie' and w.item.id in watched_movie_ids) or (w.media_type == 'tv' and w.item.title.strip().lower() in watched_tv_titles) %}
+                                <div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>
+                                {% endif %}
                                 <div class="dropdown-menu" id="menu-watchlist-{{ loop.index }}">
+                                    {% if (w.media_type == 'movie' and w.item.id in watched_movie_ids) or (w.media_type == 'tv' and w.item.title.strip().lower() in watched_tv_titles) %}
+                                    <form action="/history/mark_unwatched/{{ w.media_type }}/{{ w.item.id }}" method="post">
+                                        <button type="submit">Mark as Unwatched</button>
+                                    </form>
+                                    {% else %}
+                                    <form action="/history/mark_watched/{{ w.media_type }}/{{ w.item.id }}" method="post">
+                                        <button type="submit">Mark as Watched</button>
+                                    </form>
+                                    {% endif %}
                                     {% if user.watch_together_access %}<button type="button"
                                         onclick="openWatchTogether('{{ w.media_type }}', {{ w.item.id }})">Watch
                                         Together</button>{% endif %}
@@ -262,7 +395,19 @@
                                     onclick="toggleMenu(event, 'menu-recent-movies-{{ loop.index }}')">
                                     <i data-lucide="more-vertical" fill="white"></i>
                                 </button>
+                                {% if m.id in watched_movie_ids %}
+                                <div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>
+                                {% endif %}
                                 <div class="dropdown-menu" id="menu-recent-movies-{{ loop.index }}">
+                                    {% if m.id in watched_movie_ids %}
+                                    <form action="/history/mark_unwatched/movie/{{ m.id }}" method="post">
+                                        <button type="submit">Mark as Unwatched</button>
+                                    </form>
+                                    {% else %}
+                                    <form action="/history/mark_watched/movie/{{ m.id }}" method="post">
+                                        <button type="submit">Mark as Watched</button>
+                                    </form>
+                                    {% endif %}
                                     {% if user.watch_together_access %}<button type="button"
                                         onclick="openWatchTogether('movie', {{ m.id }})">Watch Together</button>{% endif
                                     %}
@@ -317,7 +462,19 @@
                                     onclick="toggleMenu(event, 'menu-recent-tv-{{ loop.index }}')">
                                     <i data-lucide="more-vertical" fill="white"></i>
                                 </button>
+                                {% if t.title.strip().lower() in watched_tv_titles %}
+                                <div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>
+                                {% endif %}
                                 <div class="dropdown-menu" id="menu-recent-tv-{{ loop.index }}">
+                                    {% if t.title.strip().lower() in watched_tv_titles %}
+                                    <form action="/history/mark_unwatched/tv/{{ t.id }}" method="post">
+                                        <button type="submit">Mark as Unwatched</button>
+                                    </form>
+                                    {% else %}
+                                    <form action="/history/mark_watched/tv/{{ t.id }}" method="post">
+                                        <button type="submit">Mark as Watched</button>
+                                    </form>
+                                    {% endif %}
                                     {% if user.watch_together_access %}<button type="button"
                                         onclick="openWatchTogether('tv', {{ t.id }})">Watch Together</button>{% endif %}
                                     {% if user.downloads_access %}
@@ -412,12 +569,38 @@
                 if (isShowing) {
                     // Move to body to avoid overflow clipping
                     document.body.appendChild(menu);
-                    const btnRect = event.currentTarget.getBoundingClientRect();
                     menu.style.position = 'fixed';
-                    menu.style.top = (btnRect.bottom + 5) + 'px';
-                    menu.style.right = (window.innerWidth - btnRect.right) + 'px';
-                    menu.style.left = 'auto';
+                    menu.style.visibility = 'hidden';
                     menu.classList.add('show');
+
+                    const btnRect = event.currentTarget.getBoundingClientRect();
+                    const menuRect = menu.getBoundingClientRect();
+                    const menuWidth = menuRect.width || 180;
+                    const menuHeight = menuRect.height || 150;
+                    const viewportWidth = window.innerWidth;
+                    const viewportHeight = window.innerHeight;
+
+                    // Align right edge of menu with right edge of button by default
+                    let left = btnRect.right - menuWidth;
+                    // Prevent spilling off the left edge on mobile (keep 10px margin)
+                    if (left < 10) {
+                        left = 10;
+                    }
+                    // Prevent spilling off the right edge (keep 10px margin)
+                    if (left + menuWidth > viewportWidth - 10) {
+                        left = Math.max(10, viewportWidth - menuWidth - 10);
+                    }
+
+                    // Position below button, or flip upward if not enough room below
+                    let top = btnRect.bottom + 5;
+                    if (top + menuHeight > viewportHeight - 10 && btnRect.top - menuHeight - 5 > 10) {
+                        top = btnRect.top - menuHeight - 5;
+                    }
+
+                    menu.style.left = left + 'px';
+                    menu.style.right = 'auto';
+                    menu.style.top = top + 'px';
+                    menu.style.visibility = 'visible';
                 } else {
                     menu.classList.remove('show');
                 }
@@ -587,8 +770,15 @@
                 if (!badge || !container) return;
 
                 const totalCount = items.length + resets.length;
+                const mobileBadge = document.getElementById('mobileInboxBadge');
+                const mobileContainer = document.getElementById('mobileInboxItems');
+
                 if (totalCount > 0) {
                     badge.style.display = 'block';
+                    if (mobileBadge) {
+                        mobileBadge.style.display = 'inline-block';
+                        mobileBadge.textContent = totalCount;
+                    }
                     let html = '';
                     html += items.map(inv => `
                     <div class="inbox-item">
@@ -610,9 +800,12 @@
                     </div>
                 `).join('');
                     container.innerHTML = html;
+                    if (mobileContainer) mobileContainer.innerHTML = html;
                 } else {
                     badge.style.display = 'none';
+                    if (mobileBadge) mobileBadge.style.display = 'none';
                     container.innerHTML = '<div class="empty-state">No new notifications</div>';
+                    if (mobileContainer) mobileContainer.innerHTML = '<div class="empty-state">No new notifications</div>';
                 }
             } catch (err) {
                 console.error("Error loading inbox:", err);
@@ -644,6 +837,9 @@
 
         function toggleInbox(e) {
             e.preventDefault();
+            const profileMenu = document.getElementById('profileDropdownMenu');
+            if (profileMenu) profileMenu.style.display = 'none';
+
             const menu = document.getElementById('inboxMenu');
             if (menu.style.display === 'none') {
                 menu.style.display = 'block';
@@ -660,6 +856,45 @@
                 menu.style.display = 'none';
             }
         });
+
+        function toggleMobileMenu(e) {
+            if (e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+            const menu = document.getElementById('mobileMenu');
+            const backdrop = document.getElementById('mobileMenuBackdrop');
+            if (!menu) return;
+            const isCurrentlyOpen = menu.classList.contains('open') || menu.style.display === 'flex';
+            if (isCurrentlyOpen) {
+                menu.classList.remove('open');
+                menu.style.display = 'none';
+                if (backdrop) backdrop.classList.remove('open');
+            } else {
+                menu.classList.add('open');
+                menu.style.display = 'flex';
+                if (backdrop) backdrop.classList.add('open');
+            }
+            const icon = document.getElementById('mobileMenuIcon');
+            if (icon) {
+                icon.setAttribute('data-lucide', !isCurrentlyOpen ? 'x' : 'menu');
+                if (window.lucide) lucide.createIcons();
+            }
+        }
+
+        function toggleMobileInbox(e) {
+            if (e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+            const dropdown = document.getElementById('mobileInboxDropdown');
+            if (!dropdown) return;
+            const isHidden = dropdown.style.display === 'none' || !dropdown.style.display;
+            dropdown.style.display = isHidden ? 'block' : 'none';
+            if (isHidden) {
+                loadInbox();
+            }
+        }
 
         setInterval(loadInbox, 10000);
         document.addEventListener('DOMContentLoaded', loadInbox);
@@ -735,6 +970,135 @@
                 alert("Error creating session.");
             }
         }
+
+        function toggleProfileDropdown(event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            const inboxMenu = document.getElementById('inboxMenu');
+            if (inboxMenu) inboxMenu.style.display = 'none';
+
+            const menu = document.getElementById('profileDropdownMenu');
+            if (menu) {
+                const isHidden = menu.style.display === 'none' || menu.style.display === '';
+                menu.style.display = isHidden ? 'flex' : 'none';
+            }
+        }
+
+        document.addEventListener('click', function (e) {
+            const container = document.querySelector('.profile-header-container');
+            if (container && !container.contains(e.target)) {
+                const menu = document.getElementById('profileDropdownMenu');
+                if (menu) menu.style.display = 'none';
+            }
+            const mobileMenu = document.getElementById('mobileMenu');
+            const mobileBtn = document.getElementById('mobileMenuBtn');
+            if (mobileMenu && mobileBtn && !mobileMenu.contains(e.target) && !mobileBtn.contains(e.target)) {
+                if (mobileMenu.classList.contains('open') || mobileMenu.style.display === 'flex') {
+                    mobileMenu.classList.remove('open');
+                    mobileMenu.style.display = 'none';
+                    const icon = document.getElementById('mobileMenuIcon');
+                    if (icon) {
+                        icon.setAttribute('data-lucide', 'menu');
+                        if (window.lucide) lucide.createIcons();
+                    }
+                }
+            }
+        });
+
+        async function quickSwitchProfile(profileId, hasPin) {
+            if (hasPin) {
+                window.location.href = `/profiles?select=${profileId}`;
+                return;
+            }
+            try {
+                const resp = await fetch('/api/profile/select', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ profile_id: profileId })
+                });
+                const data = await resp.json();
+                if (data.requires_pin) {
+                    window.location.href = `/profiles?select=${profileId}`;
+                } else if (data.success) {
+                    window.location.reload();
+                }
+            } catch (err) {
+                console.error("Profile switch error:", err);
+                window.location.href = '/profiles';
+            }
+        }
+
+        {% if user.is_admin and (current_profile is none or current_profile.is_primary) %}
+        // Admin Server Activity Real-time Monitor
+        (function initServerActivityMonitor() {
+            const badge = document.getElementById('serverActivityBadge');
+            const textEl = document.getElementById('serverActivityText');
+            if (!badge || !textEl) return;
+
+            let pollDelay = 3000;
+            let timer = null;
+
+            async function checkActivity() {
+                if (document.hidden) {
+                    timer = setTimeout(checkActivity, 5000);
+                    return;
+                }
+                try {
+                    const res = await fetch('/api/scanner/status');
+                    if (res.ok) {
+                        const data = await res.json();
+                        const mobileBadge = document.getElementById('mobileServerActivityBadge');
+                        const mobileTextEl = document.getElementById('mobileServerActivityText');
+
+                        if (data.is_scanning) {
+                            badge.style.display = 'inline-flex';
+                            badge.classList.remove('complete');
+                            textEl.textContent = data.short_status || 'Scanning...';
+                            badge.title = data.current_item ? `${data.action}: ${data.current_item}` : (data.action || 'Library scan in progress');
+                            if (mobileBadge && mobileTextEl) {
+                                mobileBadge.style.display = 'inline-flex';
+                                mobileTextEl.textContent = data.short_status || 'Scanning...';
+                            }
+                            pollDelay = 1500;
+                        } else if (data.recently_completed) {
+                            badge.style.display = 'inline-flex';
+                            badge.classList.add('complete');
+                            textEl.textContent = 'Scan Complete';
+                            badge.title = data.last_summary || 'Library scan complete';
+                            if (mobileBadge && mobileTextEl) {
+                                mobileBadge.style.display = 'inline-flex';
+                                mobileTextEl.textContent = 'Done';
+                            }
+                            pollDelay = 3000;
+                        } else {
+                            badge.style.display = 'none';
+                            badge.classList.remove('complete');
+                            if (mobileBadge) mobileBadge.style.display = 'none';
+                            pollDelay = 6000;
+                        }
+                    } else {
+                        badge.style.display = 'none';
+                        pollDelay = 10000;
+                    }
+                } catch (e) {
+                    badge.style.display = 'none';
+                    pollDelay = 10000;
+                } finally {
+                    timer = setTimeout(checkActivity, pollDelay);
+                }
+            }
+
+            checkActivity();
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden) {
+                    clearTimeout(timer);
+                    checkActivity();
+                }
+            });
+        })();
+        {% endif %}
     </script>
 
 </body>

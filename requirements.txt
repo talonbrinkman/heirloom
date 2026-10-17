@@ -9,3 +9,4 @@ watchdog
 Pillow
 websockets
 psutil
+httpx

@@ -14,12 +14,15 @@ By leveraging a lightweight, API-first architecture using Python and FastAPI, He
 - Automated Media Management
 - Real-Time Stream Dashboard
 - Fully Responsive Mobile & Tablet Web UI
+- Profiles & Multi-User PINs
+- Non-Blocking Async Scanner & Real-Time Action Indicator
 - Role-Based Access Control
 - Kids Mode & Content Filtering
 - Stateful Playback & Watchlists
 - Smart Remuxing & Direct Stream
 - Multi-Audio Track Selection
 - Multi-Track Subtitle Extraction (Embedded & Sidecar WebVTT)
+- Adaptive Bitrate (ABR) & HLS Streaming
 - Hardware-Accelerated Transcoding
 - Cross-Platform REST API
 - Frictionless Docker Deployment
@@ -55,14 +58,13 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
    ```env
    PUID=1000
    PGID=1000
-   TZ=America/New_York
+   TZ=America/Chicago
    ```
 
 3. **Mount your media:**
    Edit the `docker-compose.yml` file to point the volume mounts to your local media directories:
    ```yaml
    volumes:
-     - ./config:/config
      - /path/to/your/tv:/media/tv:ro
      - /path/to/your/movies:/media/movies:ro
      - /path/to/your/photos:/media/photos:ro
@@ -105,24 +107,32 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 
 ## 📖 Usage
 
-- **Library Scanning**: The server automatically scans mounted directories on startup and uses file system watchers to detect new content.
+- **Non-Blocking Async Scanner & Real-Time Action Indicator**: Media indexing and file event processing run asynchronously in a dedicated worker thread with connection pooling (`httpx`), concurrent TMDB downloads via async semaphores, and async subprocess `ffprobe` chapter marker extraction. The primary admin sees a live glowing activity badge right next to the Server Dashboard icon on the dashboard and library headers (e.g., `Scanning (3/14)...` with pulsing indicator and detailed item tooltips, transitioning to a graceful `Scan Complete` badge), keeping admins informed without stalling the web server or blocking concurrent playback.
 - **Inviting Users**: As an admin, navigate to the dashboard to generate one-time use invite codes for your family and friends.
 - **Watch Together**: Start a session from any media page and share the session invite with another registered user.
 - **Rewind on Resume**: Configure your preferred rewind buffer (e.g., 5s, 10s) in Settings so playback automatically skips back slightly when resuming interrupted movies or TV episodes, easing you back into context.
 - **Smart Remuxing & Direct Stream**: Media files with web-compatible video streams (H.264/AVC) are repacked on-the-fly into fragmented MP4 streams via zero-overhead stream copy (`-c:v copy`), even across MKV/AVI containers and seeking/resuming. Only audio or incompatible video codecs/resolutions are transcoded, eliminating unnecessary CPU/GPU load while delivering instant playback and bit-for-bit picture quality.
 - **Multi-Audio Track Selection**: Switch between multiple audio tracks (e.g., original language tracks, international dubs, director's commentary) on-the-fly directly from the player settings menu, with persistent per-title track memory and zero buffering loss.
 - **Multi-Track Subtitles & Closed Captions**: Stream embedded text subtitles (SRT, WebVTT, ASS/SSA, MOV text) and external sidecar files dynamically extracted to WebVTT with keyframe-accurate seek synchronization. Toggle captions instantly with the dedicated player button or the `C` keyboard shortcut, select specific subtitle tracks directly from the player settings menu with persistent per-title memory, and close the player anytime with `Esc`.
+- **Adaptive Bitrate (ABR) & HLS Streaming**: Enjoy buffer-free playback with native HTTP Live Streaming (HLS). Heirloom automatically generates master and variant VOD playlists, dynamically scaling stream bitrates (Original, 1080p, 720p, 480p, 360p) based on real-time client bandwidth and device capabilities. Select **Auto** for hands-free dynamic switching, or manually lock your preferred quality tier with instant, zero-reload level transitions. Completely self-hosted and offline-ready with bundled Hls.js and native iOS/Safari fallback.
+- **Fast Profile Switching & Multi-User PINs**: Organize family and shared accounts into distinct household profiles (up to 6 per account). Each profile maintains its own watch history, in-progress resume states, watchlists, and personal rewind buffers. Secure individual profiles with 4–15 digit numeric PIN locks powered by bcrypt hashing and HMAC session authorization, tag profiles with Kids Mode to restrict media to family-friendly ratings (G and PG), and personalize profiles with vibrant color palettes and custom icon avatars. Switch between profiles seamlessly via the top navigation dropdown or the dedicated "Who's Watching?" hub with active `OWNER` and `KIDS` badges.
 - **Mobile-First Responsive Interface**: Enjoy a streamlined, touch-optimized experience on smartphones and tablets featuring collapsible on-demand search, touch carousels, and thumb-friendly controls.
 - **Real-Time Telemetry & Volume Monitoring**: Access live stream health, real-time playback timestamps, and mounted media storage metrics directly from the Server Dashboard with automated background telemetry.
 
 ## 🔮 Upcoming Improvements
 
-- Adaptive Bitrate & HLS Streaming
-- Fast Profile Switching & PIN Protection
-- Non-Blocking Async Scanner
-- Actor & Director Filmography Hubs
-- Music Library & Audio Player
-- Mobile Offline Sync
+- **Manual "Fix Match" & Metadata Editor**: Search alternative TMDB/IMDb candidates, resolve mismatched titles, and customize artwork directly from the web interface.
+- **Real-Time HDR to SDR Tone Mapping**: Hardware-accelerated color space conversion (VA-API, NVENC, OpenCL) to prevent washed-out colors when streaming 4K HDR10 and Dolby Vision media to SDR displays.
+- **Bitmap & Image Subtitle Burn-In**: Dynamic video filter pipeline to burn Blu-ray (PGS) and DVD (VobSub) bitmap subtitles directly into transcoding streams.
+- **Curated Collections & Franchises**: Automatic and custom multi-title groupings (e.g., Marvel Cinematic Universe, Harry Potter) with unified collection views and playlists.
+- **Multi-Version Coexistence**: Unified media cards that merge multiple file editions (e.g., 4K Remux + 1080p SDR) with automatic quality selection.
+- **Granular Parental Controls & Rating Sliders**: Advanced content restriction thresholds (e.g., custom PG-13, R, TV-MA levels) and tag-based blocklists beyond standard Kids Mode.
+- **Smart TV & Native Client Ecosystem**: Dedicated native client applications for Apple TV, Android TV / Google TV, Roku, and Fire TV.
+- **Actor & Director Filmography Hubs**: Dedicated talent pages linking all matching movies and series across your local library.
+- **Music Library & Audio Player**: FLAC/MP3/ALAC playback with ID3 tag parsing, album artwork, artist discographies, and playlists.
+- **Mobile Offline Sync**: Transcode and download media to phones and tablets for offline airplane and travel playback.
+- **Live TV & DVR Tuner Support**: Network tuner integration (HDHomeRun, M3U) with Electronic Program Guide (EPG) and scheduled recording.
+
 
 ## 🤝 Contributing
 

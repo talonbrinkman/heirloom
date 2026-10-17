@@ -12,12 +12,17 @@ import os
 import uuid
 import json
 import time
+import re
+import hmac
+import hashlib
+from collections import defaultdict, Counter
 from datetime import datetime, timezone, timedelta
 from .database import create_db_and_tables, get_session, engine
-from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest
-from .scanner import scan_media_library
+from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile
+from .scanner import scan_media_library, scanner_manager
 from .watcher import start_watcher, stop_watcher, scanner_debouncer
 from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time, sanitize_vtt_content
+from .hls_manager import hls_manager
 import subprocess
 import shutil
 try:
@@ -241,6 +246,7 @@ def on_startup():
 @app.on_event("shutdown")
 def on_shutdown():
     stop_watcher()
+    hls_manager.shutdown()
 
 def get_current_user(request: Request):
     token = request.cookies.get("session_token")
@@ -254,6 +260,94 @@ def get_current_user(request: Request):
         return None
     with Session(engine) as session:
         return session.exec(select(User).where(User.session_token == token)).first()
+
+PIN_REGEX = re.compile(r"^\d{4,15}$")
+
+def validate_pin(pin: Optional[str]) -> bool:
+    if not pin:
+        return False
+    return bool(PIN_REGEX.match(pin.strip()))
+
+def hash_pin(pin: str) -> str:
+    return bcrypt.hashpw(pin.strip().encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_pin(pin: str, pin_hash: Optional[str]) -> bool:
+    if not pin or not pin_hash:
+        return False
+    try:
+        return bcrypt.checkpw(pin.strip().encode('utf-8'), pin_hash.encode('utf-8'))
+    except Exception:
+        return False
+
+def make_profile_unlock_token(profile_id: int, user_session_token: str) -> str:
+    if not user_session_token:
+        return ""
+    return hmac.new(user_session_token.encode('utf-8'), str(profile_id).encode('utf-8'), hashlib.sha256).hexdigest()[:32]
+
+def is_profile_kids(user: Optional[User], profile: Optional[Profile]) -> bool:
+    if profile and profile.is_kids:
+        return True
+    if user and user.kids_mode:
+        return True
+    return False
+
+def is_actual_admin(user: Optional[User], profile: Optional[Profile]) -> bool:
+    if not user or not user.is_admin:
+        return False
+    if profile and not profile.is_primary:
+        return False
+    return True
+
+def get_current_profile(
+    request: Request,
+    current_user: Optional[User] = Depends(get_current_user),
+    session: Session = Depends(get_session)
+) -> Optional[Profile]:
+    if not current_user:
+        return None
+
+    # Check active_profile_id cookie or query parameter
+    active_id_str = request.cookies.get("active_profile_id") or request.query_params.get("profile_id")
+    profile = None
+    if active_id_str:
+        try:
+            pid = int(active_id_str)
+            p = session.get(Profile, pid)
+            if p and p.user_id == current_user.id:
+                if not p.pin_hash:
+                    profile = p
+                else:
+                    unlock_token = request.cookies.get(f"profile_unlocked_{p.id}")
+                    expected = make_profile_unlock_token(p.id, current_user.session_token or "")
+                    if unlock_token and hmac.compare_digest(unlock_token, expected):
+                        profile = p
+        except (ValueError, TypeError):
+            pass
+
+    # Fallback to primary profile if no valid/unlocked profile found
+    if not profile:
+        profile = session.exec(select(Profile).where(Profile.user_id == current_user.id, Profile.is_primary == True)).first()
+
+    # Fallback to first profile
+    if not profile:
+        profile = session.exec(select(Profile).where(Profile.user_id == current_user.id)).first()
+
+    # Auto-seed primary profile if none exists for this user
+    if not profile:
+        profile = Profile(
+            user_id=current_user.id,
+            name=current_user.username,
+            avatar_color="#e50914",
+            avatar_icon="user",
+            is_primary=True,
+            is_kids=False,
+            rewind_seconds=current_user.rewind_seconds or 0
+        )
+        session.add(profile)
+        session.commit()
+        session.refresh(profile)
+
+    return profile
 
 # Rate limiting for auth
 failed_attempts = {}
@@ -305,9 +399,35 @@ async def process_login(request: Request, username: str = Form(...), password: s
         user.session_token = str(uuid.uuid4())
         session.add(user)
         session.commit()
-        redirect = RedirectResponse(url="/", status_code=303)
-        redirect.set_cookie(key="session_token", value=user.session_token, httponly=True)
-        return redirect
+
+        # Check or ensure primary profile
+        profiles = session.exec(select(Profile).where(Profile.user_id == user.id)).all()
+        if not profiles:
+            p = Profile(
+                user_id=user.id,
+                name=user.username,
+                avatar_color="#e50914",
+                avatar_icon="user",
+                is_primary=True,
+                is_kids=False,
+                rewind_seconds=user.rewind_seconds or 0
+            )
+            session.add(p)
+            session.commit()
+            session.refresh(p)
+            profiles = [p]
+
+        # If user has multiple profiles or single profile has a PIN, route to /profiles
+        if len(profiles) > 1 or (len(profiles) == 1 and profiles[0].pin_hash):
+            redirect = RedirectResponse(url="/profiles", status_code=303)
+            redirect.set_cookie(key="session_token", value=user.session_token, httponly=True)
+            return redirect
+        else:
+            redirect = RedirectResponse(url="/", status_code=303)
+            redirect.set_cookie(key="session_token", value=user.session_token, httponly=True)
+            redirect.set_cookie(key="active_profile_id", value=str(profiles[0].id), httponly=False)
+            return redirect
+
     record_failed_attempt(request)
     return RedirectResponse(url="/login?error=1", status_code=303)
 
@@ -328,7 +448,7 @@ async def api_login(request: Request, login_data: APILoginRequest, session: Sess
     return JSONResponse(status_code=401, content={"success": False, "error": "Invalid credentials"})
 
 
-@app.post("/logout")
+@app.api_route("/logout", methods=["GET", "POST"])
 async def process_logout(response: Response, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     if current_user:
         current_user.session_token = None
@@ -336,6 +456,7 @@ async def process_logout(response: Response, current_user: User = Depends(get_cu
         session.commit()
     redirect = RedirectResponse(url="/login", status_code=303)
     redirect.delete_cookie("session_token")
+    redirect.delete_cookie("active_profile_id")
     return redirect
 
 @app.post("/forgot_password")
@@ -377,8 +498,13 @@ async def process_reset_password(token: str, password: str = Form(...), confirm_
     return RedirectResponse(url="/login?reset_success=1", status_code=303)
 
 @app.post("/password_reset/approve/{request_id}")
-async def approve_password_reset(request_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user or not current_user.is_admin:
+async def approve_password_reset(
+    request_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile):
         raise HTTPException(status_code=403, detail="Forbidden")
     reset_req = session.get(PasswordResetRequest, request_id)
     if reset_req and reset_req.status == "pending":
@@ -388,8 +514,13 @@ async def approve_password_reset(request_id: int, current_user: User = Depends(g
     return {"success": True}
 
 @app.post("/password_reset/deny/{request_id}")
-async def deny_password_reset(request_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user or not current_user.is_admin:
+async def deny_password_reset(
+    request_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile):
         raise HTTPException(status_code=403, detail="Forbidden")
     reset_req = session.get(PasswordResetRequest, request_id)
     if reset_req and reset_req.status == "pending":
@@ -410,8 +541,22 @@ async def process_setup(username: str = Form(...), password: str = Form(...), co
     new_user = User(username=username, password_hash=hashed, is_admin=True, session_token=str(uuid.uuid4()))
     session.add(new_user)
     session.commit()
+
+    primary_profile = Profile(
+        user_id=new_user.id,
+        name=username,
+        avatar_color="#e50914",
+        avatar_icon="user",
+        is_primary=True,
+        is_kids=False,
+        rewind_seconds=0
+    )
+    session.add(primary_profile)
+    session.commit()
+
     redirect = RedirectResponse(url="/", status_code=303)
     redirect.set_cookie(key="session_token", value=new_user.session_token, httponly=True)
+    redirect.set_cookie(key="active_profile_id", value=str(primary_profile.id), httponly=False)
     return redirect
 
 @app.get("/register", response_class=HTMLResponse)
@@ -438,9 +583,307 @@ async def process_register(request: Request, username: str = Form(...), password
     session.add(new_user)
     session.delete(invite)
     session.commit()
+
+    primary_profile = Profile(
+        user_id=new_user.id,
+        name=username,
+        avatar_color="#e50914",
+        avatar_icon="user",
+        is_primary=True,
+        is_kids=False,
+        rewind_seconds=0
+    )
+    session.add(primary_profile)
+    session.commit()
+
     redirect = RedirectResponse(url="/", status_code=303)
     redirect.set_cookie(key="session_token", value=new_user.session_token, httponly=True)
+    redirect.set_cookie(key="active_profile_id", value=str(primary_profile.id), httponly=False)
     return redirect
+
+# ----------------- PROFILES & PIN MANAGEMENT -----------------
+
+@app.get("/profiles", response_class=HTMLResponse)
+async def view_profiles(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
+    if not profiles:
+        primary = Profile(
+            user_id=current_user.id,
+            name=current_user.username,
+            avatar_color="#e50914",
+            avatar_icon="user",
+            is_primary=True,
+            is_kids=False,
+            rewind_seconds=current_user.rewind_seconds or 0
+        )
+        session.add(primary)
+        session.commit()
+        session.refresh(primary)
+        profiles = [primary]
+
+    active_id = request.cookies.get("active_profile_id")
+    is_household_manager = bool(current_profile is None or current_profile.is_primary)
+    can_manage = bool(is_household_manager and (current_user.is_admin or current_user.can_manage_profiles))
+    manage_mode = (request.query_params.get("manage") == "1") and can_manage
+
+    profile_data = []
+    for p in profiles:
+        profile_data.append({
+            "id": p.id,
+            "name": p.name,
+            "avatar_color": p.avatar_color,
+            "avatar_icon": p.avatar_icon or "user",
+            "is_primary": p.is_primary,
+            "is_kids": p.is_kids,
+            "has_pin": bool(p.pin_hash),
+            "rewind_seconds": p.rewind_seconds or 0
+        })
+
+    return templates.TemplateResponse(request=request, name="profiles.html", context={
+        "user": current_user,
+        "current_profile": current_profile,
+        "profiles": profile_data,
+        "can_manage": can_manage,
+        "manage_mode": manage_mode,
+        "active_profile_id": int(active_id) if (active_id and active_id.isdigit()) else None
+    })
+
+@app.get("/api/profiles/list")
+async def list_profiles(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
+    return [{
+        "id": p.id,
+        "name": p.name,
+        "avatar_color": p.avatar_color,
+        "avatar_icon": p.avatar_icon or "user",
+        "is_primary": p.is_primary,
+        "is_kids": p.is_kids,
+        "has_pin": bool(p.pin_hash),
+        "rewind_seconds": p.rewind_seconds or 0
+    } for p in profiles]
+
+class ProfileSelectRequest(BaseModel):
+    profile_id: int
+
+@app.post("/api/profile/select")
+async def select_profile(
+    request: Request,
+    body: ProfileSelectRequest,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    profile = session.get(Profile, body.profile_id)
+    if not profile or profile.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    if profile.pin_hash:
+        unlock_token = request.cookies.get(f"profile_unlocked_{profile.id}")
+        expected = make_profile_unlock_token(profile.id, current_user.session_token or "")
+        if not unlock_token or not hmac.compare_digest(unlock_token, expected):
+            return JSONResponse(status_code=200, content={
+                "success": False,
+                "requires_pin": True,
+                "profile_id": profile.id,
+                "name": profile.name,
+                "avatar_color": profile.avatar_color,
+                "avatar_icon": profile.avatar_icon or "user"
+            })
+
+    resp = JSONResponse(content={"success": True, "redirect": "/"})
+    resp.set_cookie(key="active_profile_id", value=str(profile.id), httponly=False, max_age=60*60*24*30)
+    return resp
+
+class VerifyPinRequest(BaseModel):
+    pin: str
+
+@app.post("/api/profile/{profile_id}/verify-pin")
+async def verify_profile_pin(
+    profile_id: int,
+    body: VerifyPinRequest,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    profile = session.get(Profile, profile_id)
+    if not profile or profile.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    if not profile.pin_hash:
+        resp = JSONResponse(content={"success": True, "redirect": "/"})
+        resp.set_cookie(key="active_profile_id", value=str(profile.id), httponly=False, max_age=60*60*24*30)
+        return resp
+
+    pin_clean = body.pin.strip()
+    if not validate_pin(pin_clean) or not verify_pin(pin_clean, profile.pin_hash):
+        return JSONResponse(status_code=400, content={"success": False, "error": "Incorrect PIN"})
+
+    unlock_token = make_profile_unlock_token(profile.id, current_user.session_token or "")
+    resp = JSONResponse(content={"success": True, "redirect": "/"})
+    resp.set_cookie(key="active_profile_id", value=str(profile.id), httponly=False, max_age=60*60*24*30)
+    resp.set_cookie(key=f"profile_unlocked_{profile.id}", value=unlock_token, httponly=True, max_age=60*60*24*7)
+    return resp
+
+class CreateProfileRequest(BaseModel):
+    name: str
+    avatar_color: Optional[str] = "#e50914"
+    avatar_icon: Optional[str] = "user"
+    is_kids: Optional[bool] = False
+    pin: Optional[str] = None
+    rewind_seconds: Optional[int] = 0
+
+@app.post("/api/profile/create")
+async def create_profile(
+    body: CreateProfileRequest,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    is_household_manager = bool(current_profile is None or current_profile.is_primary)
+    if not is_household_manager or not (current_user.is_admin or current_user.can_manage_profiles):
+        raise HTTPException(status_code=403, detail="Only household managers can create profiles.")
+
+    name = body.name.strip()
+    if not name or len(name) > 30:
+        return JSONResponse(status_code=400, content={"success": False, "error": "Profile name must be 1 to 30 characters."})
+
+    existing_count = session.exec(select(func.count(Profile.id)).where(Profile.user_id == current_user.id)).one()
+    if existing_count >= 6:
+        return JSONResponse(status_code=400, content={"success": False, "error": "Maximum limit of 6 profiles reached for this account."})
+
+    pin_hash = None
+    if body.pin and body.pin.strip():
+        pin_val = body.pin.strip()
+        if not validate_pin(pin_val):
+            return JSONResponse(status_code=400, content={"success": False, "error": "PIN must be 4 to 15 numeric digits."})
+        pin_hash = hash_pin(pin_val)
+
+    new_profile = Profile(
+        user_id=current_user.id,
+        name=name,
+        avatar_color=body.avatar_color or "#e50914",
+        avatar_icon=body.avatar_icon or "user",
+        is_primary=False,
+        is_kids=bool(body.is_kids),
+        pin_hash=pin_hash,
+        rewind_seconds=0
+    )
+    session.add(new_profile)
+    session.commit()
+    session.refresh(new_profile)
+
+    return {
+        "success": True,
+        "profile": {
+            "id": new_profile.id,
+            "name": new_profile.name,
+            "avatar_color": new_profile.avatar_color,
+            "avatar_icon": new_profile.avatar_icon,
+            "is_primary": new_profile.is_primary,
+            "is_kids": new_profile.is_kids,
+            "has_pin": bool(new_profile.pin_hash),
+            "rewind_seconds": new_profile.rewind_seconds
+        }
+    }
+
+class UpdateProfileRequest(BaseModel):
+    name: str
+    avatar_color: Optional[str] = "#e50914"
+    avatar_icon: Optional[str] = "user"
+    is_kids: Optional[bool] = False
+    pin: Optional[str] = None
+    remove_pin: Optional[bool] = False
+    rewind_seconds: Optional[int] = 0
+
+@app.post("/api/profile/{profile_id}/update")
+async def update_profile(
+    profile_id: int,
+    body: UpdateProfileRequest,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    profile = session.get(Profile, profile_id)
+    if not profile or profile.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    is_household_manager = bool(current_profile is None or current_profile.is_primary)
+    if not is_household_manager or not (current_user.is_admin or current_user.can_manage_profiles):
+        raise HTTPException(status_code=403, detail="Only household managers can manage profiles.")
+
+    name = body.name.strip()
+    if not name or len(name) > 30:
+        return JSONResponse(status_code=400, content={"success": False, "error": "Profile name must be 1 to 30 characters."})
+
+    profile.name = name
+    profile.avatar_color = body.avatar_color or profile.avatar_color
+    profile.avatar_icon = body.avatar_icon or profile.avatar_icon
+    profile.is_kids = bool(body.is_kids)
+
+    if body.remove_pin:
+        profile.pin_hash = None
+    elif body.pin and body.pin.strip():
+        pin_val = body.pin.strip()
+        if not validate_pin(pin_val):
+            return JSONResponse(status_code=400, content={"success": False, "error": "PIN must be 4 to 15 numeric digits."})
+        profile.pin_hash = hash_pin(pin_val)
+
+    session.add(profile)
+    session.commit()
+    return {"success": True}
+
+@app.post("/api/profile/{profile_id}/delete")
+async def delete_profile(
+    profile_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    profile = session.get(Profile, profile_id)
+    if not profile or profile.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    if profile.is_primary:
+        return JSONResponse(status_code=400, content={"success": False, "error": "The primary account profile cannot be deleted."})
+
+    is_household_manager = bool(current_profile is None or current_profile.is_primary)
+    if not is_household_manager or not (current_user.is_admin or current_user.can_manage_profiles):
+        raise HTTPException(status_code=403, detail="Only household managers can manage profiles.")
+
+    for h in session.exec(select(WatchHistory).where(WatchHistory.profile_id == profile.id)).all():
+        session.delete(h)
+    for w in session.exec(select(Watchlist).where(Watchlist.profile_id == profile.id)).all():
+        session.delete(w)
+
+    session.delete(profile)
+    session.commit()
+    return {"success": True}
 
 # ----------------- DASHBOARD & MEDIA -----------------
 
@@ -468,16 +911,48 @@ def is_kids_safe(rating: str) -> bool:
     if not rating: return False
     return rating.strip().upper() in {"G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"}
 
+def get_user_watched_status(session: Session, user_id: int, prof_id: Optional[int] = None):
+    hist_q = select(WatchHistory).where(
+        WatchHistory.user_id == user_id,
+        WatchHistory.progress >= 90.0
+    )
+    if prof_id:
+        hist_q = hist_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+    watched_records = session.exec(hist_q).all()
+    
+    watched_movie_ids = {h.item_id for h in watched_records if h.media_type == 'movie'}
+    watched_tv_episode_ids = {h.item_id for h in watched_records if h.media_type == 'tv'}
+    
+    all_tv = session.exec(select(TVShow.id, TVShow.title)).all()
+    show_episodes_map = defaultdict(set)
+    for ep_id, ep_title in all_tv:
+        show_episodes_map[ep_title.strip().lower()].add(ep_id)
+        
+    watched_tv_titles = set()
+    for title_key, ep_ids in show_episodes_map.items():
+        if ep_ids and ep_ids.issubset(watched_tv_episode_ids):
+            watched_tv_titles.add(title_key)
+            
+    return watched_movie_ids, watched_tv_episode_ids, watched_tv_titles
+
 @app.get("/", response_class=HTMLResponse)
-async def root(request: Request, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def root(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not session.exec(select(User)).first():
         return templates.TemplateResponse(request=request, name="setup.html")
     if not current_user:
         return RedirectResponse(url="/login", status_code=303)
 
+    is_kids = is_profile_kids(current_user, current_profile)
+    prof_id = current_profile.id if current_profile else None
+
     movies = session.exec(select(Movie).order_by(Movie.id.desc())).all() if current_user.movies_access else []
     tv_shows_raw = session.exec(select(TVShow).order_by(TVShow.id.desc())).all() if current_user.tv_access else []    
-    if current_user.kids_mode:
+    if is_kids:
         movies = [m for m in movies if is_kids_safe(m.content_rating)]
         tv_shows_raw = [t for t in tv_shows_raw if is_kids_safe(t.content_rating)]
     photos = session.exec(select(Photo).order_by(Photo.id.desc())).all() if current_user.photos_access else []
@@ -523,21 +998,34 @@ async def root(request: Request, current_user: User = Depends(get_current_user),
                     t['year'] = base
         recent_tv.append(t)
     
-    watchlist_db = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id)).all()
+    if prof_id:
+        watchlist_db = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))).all()
+    else:
+        watchlist_db = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id)).all()
+
     watchlist = []
     for w in watchlist_db:
         if w.media_type == 'movie' and not current_user.movies_access: continue
         if w.media_type == 'tv' and not current_user.tv_access: continue
         item = session.get(Movie if w.media_type == 'movie' else TVShow, w.item_id)
-        if item: watchlist.append({"db_id": w.id, "item": item, "media_type": w.media_type})
+        if item:
+            if is_kids and not is_kids_safe(getattr(item, 'content_rating', '')):
+                continue
+            watchlist.append({"db_id": w.id, "item": item, "media_type": w.media_type})
 
-    history_db = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.progress < 95.0).order_by(WatchHistory.last_watched.desc()).limit(15)).all()
+    hist_query = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.progress < 95.0)
+    if prof_id:
+        hist_query = hist_query.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+    history_db = session.exec(hist_query.order_by(WatchHistory.last_watched.desc()).limit(15)).all()
+
     history = []
     for h in history_db:
         if h.media_type == 'movie' and not current_user.movies_access: continue
         if h.media_type == 'tv' and not current_user.tv_access: continue
         item_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
         if item_obj:
+            if is_kids and not is_kids_safe(getattr(item_obj, 'content_rating', '')):
+                continue
             item = {
                 "id": item_obj.id,
                 "title": item_obj.title,
@@ -563,7 +1051,10 @@ async def root(request: Request, current_user: User = Depends(get_current_user),
     
     import random
     from collections import Counter
-    history_db_full = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).order_by(WatchHistory.last_watched.desc()).limit(100)).all()
+    full_hist_query = select(WatchHistory).where(WatchHistory.user_id == current_user.id)
+    if prof_id:
+        full_hist_query = full_hist_query.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+    history_db_full = session.exec(full_hist_query.order_by(WatchHistory.last_watched.desc()).limit(100)).all()
     watched_movie_ids = set()
     watched_tv_titles = set()
     genre_counts = Counter()
@@ -590,9 +1081,14 @@ async def root(request: Request, current_user: User = Depends(get_current_user),
         random.shuffle(recommended)
         recommended = recommended[:15]
 
+    user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
+
+    watched_movie_ids, watched_tv_episode_ids, watched_tv_titles = get_user_watched_status(session, current_user.id, prof_id)
+
     if "application/json" in request.headers.get("Accept", ""):
         return {
-            "user": {"id": current_user.id, "username": current_user.username, "is_admin": current_user.is_admin, "watch_together_access": current_user.watch_together_access, "downloads_access": current_user.downloads_access},
+            "user": {"id": current_user.id, "username": current_user.username, "is_admin": is_actual_admin(current_user, current_profile), "watch_together_access": current_user.watch_together_access, "downloads_access": current_user.downloads_access},
+            "current_profile": {"id": current_profile.id, "name": current_profile.name, "avatar_color": current_profile.avatar_color, "avatar_icon": current_profile.avatar_icon, "is_kids": current_profile.is_kids} if current_profile else None,
             "recent_movies": recent_movies,
             "recent_tv": recent_tv,
             "recent_photos": recent_photos,
@@ -600,27 +1096,36 @@ async def root(request: Request, current_user: User = Depends(get_current_user),
             "history": history,
             "recommended": recommended,
             "user_watchlist_movies": user_watchlist_movies,
-            "user_watchlist_tv": user_watchlist_tv
+            "user_watchlist_tv": user_watchlist_tv,
+            "watched_movie_ids": list(watched_movie_ids),
+            "watched_tv_episode_ids": list(watched_tv_episode_ids),
+            "watched_tv_titles": list(watched_tv_titles)
         }
 
     return templates.TemplateResponse(request=request, name="dashboard.html", context={
-        "user": current_user, "recent_movies": recent_movies, "recent_tv": recent_tv, "recent_photos": recent_photos, "watchlist": watchlist, "history": history,
+        "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
+        "recent_movies": recent_movies, "recent_tv": recent_tv, "recent_photos": recent_photos, "watchlist": watchlist, "history": history,
         "recommended": recommended,
-        "user_watchlist_movies": user_watchlist_movies, "user_watchlist_tv": user_watchlist_tv
+        "user_watchlist_movies": user_watchlist_movies, "user_watchlist_tv": user_watchlist_tv,
+        "watched_movie_ids": watched_movie_ids, "watched_tv_episode_ids": watched_tv_episode_ids, "watched_tv_titles": watched_tv_titles
     })
 
 @app.get("/api/library/{media_type}")
 async def api_library(
     request: Request, media_type: str, page: int = 1, limit: int = 50, 
     search: str = "", sort: str = "title_asc",
-    current_user: User = Depends(get_current_user), session: Session = Depends(get_session)
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
 ):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    is_kids = is_profile_kids(current_user, current_profile)
+    prof_id = current_profile.id if current_profile else None
     
     if media_type == "movie":
         if not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
         query = select(Movie)
-        if current_user.kids_mode:
+        if is_kids:
             query = query.where(Movie.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
         if search:
             query = query.where(Movie.title.ilike(f"%{search}%"))
@@ -636,7 +1141,7 @@ async def api_library(
     elif media_type == "tv":
         if not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
         query = select(TVShow)
-        if current_user.kids_mode:
+        if is_kids:
             query = query.where(TVShow.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
         if search:
             query = query.where(TVShow.title.ilike(f"%{search}%"))
@@ -667,7 +1172,10 @@ async def api_library(
     else:
         raise HTTPException(status_code=404, detail="Not Found")
         
-    watchlist_db = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.media_type == media_type)).all()
+    if prof_id:
+        watchlist_db = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None)).where(Watchlist.media_type == media_type)).all()
+    else:
+        watchlist_db = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.media_type == media_type)).all()
     user_watchlist = {w.item_id for w in watchlist_db}
     
     import urllib.parse
@@ -739,11 +1247,14 @@ async def api_library(
             
             result = all_items[(page - 1) * limit : page * limit]
     else:
+        watched_movie_ids, _, watched_tv_titles = get_user_watched_status(session, current_user.id, prof_id)
         for item in items:
             if media_type == "tv":
                 url_path = f"/series/{urllib.parse.quote(item.title)}"
+                is_w = item.title.strip().lower() in watched_tv_titles
             else:
                 url_path = f"/movie/{item.id}"
+                is_w = item.id in watched_movie_ids
             
             result.append({
                 "id": item.id,
@@ -752,7 +1263,8 @@ async def api_library(
                 "poster_filename": item.poster_filename if hasattr(item, 'poster_filename') else None,
                 "album": None,
                 "url": url_path,
-                "in_watchlist": item.id in user_watchlist if hasattr(item, 'id') else False
+                "in_watchlist": item.id in user_watchlist if hasattr(item, 'id') else False,
+                "is_watched": is_w
             })
         
     return {"items": result}
@@ -763,12 +1275,18 @@ async def api_me(current_user: User = Depends(get_current_user)):
     return {"id": current_user.id, "username": current_user.username}
 
 @app.get("/api/dashboard")
-async def api_dashboard(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def api_dashboard(
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    is_kids = is_profile_kids(current_user, current_profile)
+    prof_id = current_profile.id if current_profile else None
     
     movies = session.exec(select(Movie).order_by(Movie.id.desc())).all() if current_user.movies_access else []
     tv_shows_raw = session.exec(select(TVShow).order_by(TVShow.id.desc())).all() if current_user.tv_access else []    
-    if current_user.kids_mode:
+    if is_kids:
         movies = [m for m in movies if is_kids_safe(m.content_rating)]
         tv_shows_raw = [t for t in tv_shows_raw if is_kids_safe(t.content_rating)]
         
@@ -805,13 +1323,19 @@ async def api_dashboard(current_user: User = Depends(get_current_user), session:
                 t['year'] = base
         recent_tv.append(t)
         
-    watchlist_db = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id)).all()
+    if prof_id:
+        watchlist_db = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))).all()
+    else:
+        watchlist_db = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id)).all()
+
     watchlist = []
     for w in watchlist_db:
         if w.media_type == 'movie' and not current_user.movies_access: continue
         if w.media_type == 'tv' and not current_user.tv_access: continue
         item_obj = session.get(Movie if w.media_type == 'movie' else TVShow, w.item_id)
         if item_obj:
+            if is_kids and not is_kids_safe(getattr(item_obj, 'content_rating', '')):
+                continue
             item = {
                 "id": item_obj.id,
                 "title": item_obj.title,
@@ -824,13 +1348,19 @@ async def api_dashboard(current_user: User = Depends(get_current_user), session:
                     item['year'] = f"S{int(m.group(1))} E{int(m.group(2))}"
             watchlist.append({"item": item, "media_type": w.media_type})
         
-    history_db = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.progress < 95.0).order_by(WatchHistory.last_watched.desc()).limit(15)).all()
+    hist_query = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.progress < 95.0)
+    if prof_id:
+        hist_query = hist_query.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+    history_db = session.exec(hist_query.order_by(WatchHistory.last_watched.desc()).limit(15)).all()
+
     history = []
     for h in history_db:
         if h.media_type == 'movie' and not current_user.movies_access: continue
         if h.media_type == 'tv' and not current_user.tv_access: continue
         item_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
         if item_obj:
+            if is_kids and not is_kids_safe(getattr(item_obj, 'content_rating', '')):
+                continue
             item = {
                 "id": item_obj.id,
                 "title": item_obj.title,
@@ -848,7 +1378,10 @@ async def api_dashboard(current_user: User = Depends(get_current_user), session:
 
     import random
     from collections import Counter
-    history_db_full = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).order_by(WatchHistory.last_watched.desc()).limit(100)).all()
+    full_hist_query = select(WatchHistory).where(WatchHistory.user_id == current_user.id)
+    if prof_id:
+        full_hist_query = full_hist_query.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+    history_db_full = session.exec(full_hist_query.order_by(WatchHistory.last_watched.desc()).limit(100)).all()
     watched_movie_ids = set()
     watched_tv_titles = set()
     genre_counts = Counter()
@@ -896,13 +1429,20 @@ async def api_dashboard(current_user: User = Depends(get_current_user), session:
     }
 
 @app.get("/api/movie/{movie_id}")
-async def api_movie(movie_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def api_movie(
+    movie_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
     if not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
+    is_kids = is_profile_kids(current_user, current_profile)
+    prof_id = current_profile.id if current_profile else None
     
     movie = session.get(Movie, movie_id)
     if not movie: raise HTTPException(status_code=404, detail="Movie not found")
-    if current_user.kids_mode and not is_kids_safe(movie.content_rating):
+    if is_kids and not is_kids_safe(movie.content_rating):
         raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
         
     cast_list = []
@@ -912,10 +1452,16 @@ async def api_movie(movie_id: int, current_user: User = Depends(get_current_user
             cast_list = json.loads(movie.cast)
         except: pass
         
-    history = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == movie.id).where(WatchHistory.media_type == 'movie')).first()
+    hist_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == movie.id).where(WatchHistory.media_type == 'movie')
+    if prof_id:
+        hist_q = hist_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+    history = session.exec(hist_q).first()
     has_progress = history.progress > 0 if history and history.progress else False
     
-    in_watchlist = bool(session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.item_id == movie.id).where(Watchlist.media_type == 'movie')).first())
+    wl_q = select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.item_id == movie.id).where(Watchlist.media_type == 'movie')
+    if prof_id:
+        wl_q = wl_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+    in_watchlist = bool(session.exec(wl_q).first())
     
     return {
         "id": movie.id,
@@ -936,14 +1482,21 @@ async def api_movie(movie_id: int, current_user: User = Depends(get_current_user
     }
 
 @app.get("/api/series/{series_id}")
-async def api_series(series_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def api_series(
+    series_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
     if not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
+    is_kids = is_profile_kids(current_user, current_profile)
+    prof_id = current_profile.id if current_profile else None
     
     show = session.get(TVShow, series_id)
     if not show: raise HTTPException(status_code=404, detail="Show not found")
     
-    if current_user.kids_mode and not is_kids_safe(show.content_rating):
+    if is_kids and not is_kids_safe(show.content_rating):
         raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
         
     cast_list = []
@@ -966,7 +1519,10 @@ async def api_series(series_id: int, current_user: User = Depends(get_current_us
         if season_num not in seasons:
             seasons[season_num] = []
             
-        history = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == ep.id).where(WatchHistory.media_type == 'tv')).first()
+        hist_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == ep.id).where(WatchHistory.media_type == 'tv')
+        if prof_id:
+            hist_q = hist_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+        history = session.exec(hist_q).first()
         
         seasons[season_num].append({
             "id": ep.id,
@@ -977,7 +1533,10 @@ async def api_series(series_id: int, current_user: User = Depends(get_current_us
             "progress": history.progress if history else 0
         })
         
-    in_watchlist = bool(session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.item_id == show.id).where(Watchlist.media_type == 'tv')).first())
+    wl_q = select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.item_id == show.id).where(Watchlist.media_type == 'tv')
+    if prof_id:
+        wl_q = wl_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+    in_watchlist = bool(session.exec(wl_q).first())
     
     return {
         "id": show.id,
@@ -998,16 +1557,19 @@ async def api_series(series_id: int, current_user: User = Depends(get_current_us
 @app.get("/api/search")
 async def api_search(
     request: Request, q: str = "",
-    current_user: User = Depends(get_current_user), session: Session = Depends(get_session)
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
 ):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
     if not q: return {"items": []}
+    is_kids = is_profile_kids(current_user, current_profile)
     
     import urllib.parse
     results = []
     if current_user.movies_access:
         query = select(Movie).where(Movie.title.ilike(f"%{q}%"))
-        if current_user.kids_mode:
+        if is_kids:
             query = query.where(Movie.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
         movies = session.exec(query.limit(10)).all()
         for m in movies:
@@ -1018,7 +1580,7 @@ async def api_search(
             
     if current_user.tv_access:
         query = select(TVShow).where(TVShow.title.ilike(f"%{q}%"))
-        if current_user.kids_mode:
+        if is_kids:
             query = query.where(TVShow.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
         shows = session.exec(query).all()
         processed = process_tv_shows(shows)
@@ -1042,7 +1604,13 @@ async def api_search(
     return {"items": results}
 
 @app.get("/photo/{item_id}", response_class=HTMLResponse)
-async def photo_view(request: Request, item_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def photo_view(
+    request: Request,
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: return RedirectResponse(url="/login", status_code=303)
     if not current_user.photos_access: raise HTTPException(status_code=403, detail="Forbidden")
     
@@ -1054,9 +1622,11 @@ async def photo_view(request: Request, item_id: int, current_user: User = Depend
     
     prev_photo = session.exec(select(Photo).where(Photo.id < item_id).order_by(Photo.id.desc())).first()
     next_photo = session.exec(select(Photo).where(Photo.id > item_id).order_by(Photo.id.asc())).first()
+    user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
 
     return templates.TemplateResponse(request=request, name="photo.html", context={
-        "user": current_user, "photo": photo, "is_video": is_video,
+        "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
+        "photo": photo, "is_video": is_video,
         "prev_photo_id": prev_photo.id if prev_photo else None,
         "next_photo_id": next_photo.id if next_photo else None
     })
@@ -1074,15 +1644,28 @@ async def get_photo_file(item_id: int, current_user: User = Depends(get_current_
     return FileResponse(file_path)
 
 @app.get("/library/{media_type}", response_class=HTMLResponse)
-async def library_view(request: Request, media_type: str, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def library_view(
+    request: Request,
+    media_type: str,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: return RedirectResponse(url="/login", status_code=303)
+    is_kids = is_profile_kids(current_user, current_profile)
     
     if media_type == "movie":
         if not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
-        total_count = session.exec(select(func.count(Movie.id))).one()
+        q_count = select(func.count(Movie.id))
+        if is_kids:
+            q_count = q_count.where(Movie.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
+        total_count = session.exec(q_count).one()
     elif media_type == "tv":
         if not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
-        total_count = session.exec(select(func.count(func.distinct(TVShow.title)))).one()
+        q_count = select(func.count(func.distinct(TVShow.title)))
+        if is_kids:
+            q_count = q_count.where(TVShow.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
+        total_count = session.exec(q_count).one()
     elif media_type == "photo":
         if not current_user.photos_access: raise HTTPException(status_code=403, detail="Forbidden")
         total_count = session.exec(select(func.count(Photo.id))).one()
@@ -1090,17 +1673,28 @@ async def library_view(request: Request, media_type: str, current_user: User = D
         raise HTTPException(status_code=404, detail="Not Found")
         
     album = request.query_params.get("album")
+    user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
+
     return templates.TemplateResponse(request=request, name="library.html", context={
-        "user": current_user, "media_type": media_type, "total_count": total_count, "album": album
+        "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
+        "media_type": media_type, "total_count": total_count, "album": album
     })
 @app.get("/movie/{movie_id}", response_class=HTMLResponse)
-async def movie_view(request: Request, movie_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def movie_view(
+    request: Request,
+    movie_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: return RedirectResponse(url="/login", status_code=303)
     if not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
+    is_kids = is_profile_kids(current_user, current_profile)
+    prof_id = current_profile.id if current_profile else None
     
     movie = session.get(Movie, movie_id)
     if not movie: raise HTTPException(status_code=404, detail="Movie not found")
-    if current_user.kids_mode and not is_kids_safe(movie.content_rating):
+    if is_kids and not is_kids_safe(movie.content_rating):
         raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
         
     cast_list = []
@@ -1110,17 +1704,30 @@ async def movie_view(request: Request, movie_id: int, current_user: User = Depen
             cast_list = json.loads(movie.cast)
         except: pass
         
-    history = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == movie.id).where(WatchHistory.media_type == 'movie')).first()
+    hist_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == movie.id).where(WatchHistory.media_type == 'movie')
+    if prof_id:
+        hist_q = hist_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+    history = session.exec(hist_q).first()
     has_progress = history.progress > 0 if history and history.progress else False
     
-    in_watchlist = bool(session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.item_id == movie.id).where(Watchlist.media_type == 'movie')).first())
+    wl_q = select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.item_id == movie.id).where(Watchlist.media_type == 'movie')
+    if prof_id:
+        wl_q = wl_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+    in_watchlist = bool(session.exec(wl_q).first())
 
     rt_str = get_runtime_str(movie, session)
     if rt_str:
         movie.year = f"{movie.year} • {rt_str}" if movie.year else rt_str
 
+    watched_movie_ids, _, _ = get_user_watched_status(session, current_user.id, prof_id)
+    is_watched = movie.id in watched_movie_ids
+
+    user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
+
     return templates.TemplateResponse(request=request, name="movie.html", context={
-        "user": current_user, "movie": movie, "cast_list": cast_list, "has_progress": has_progress, "in_watchlist": in_watchlist
+        "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
+        "movie": movie, "cast_list": cast_list, "has_progress": has_progress, "in_watchlist": in_watchlist,
+        "is_watched": is_watched
     })
 
 def get_runtime_str(item, session):
@@ -1140,14 +1747,23 @@ def get_runtime_str(item, session):
     return f"{m//60}hr {m%60}min"
 
 @app.get("/series/{title}", response_class=HTMLResponse)
-async def series_view(request: Request, title: str, ep: Optional[int] = None, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def series_view(
+    request: Request,
+    title: str,
+    ep: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: return RedirectResponse(url="/login", status_code=303)
     if not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
+    is_kids = is_profile_kids(current_user, current_profile)
+    prof_id = current_profile.id if current_profile else None
     
     shows = session.exec(select(TVShow).where(TVShow.title == title)).all()
     if not shows:
         raise HTTPException(status_code=404, detail="Series not found")
-    if current_user.kids_mode and not is_kids_safe(shows[0].content_rating):
+    if is_kids and not is_kids_safe(shows[0].content_rating):
         raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
         
     cast_list = []
@@ -1158,7 +1774,10 @@ async def series_view(request: Request, title: str, ep: Optional[int] = None, cu
         except: pass
         
     series_ep_ids = [e.id for e in shows]
-    history = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id.in_(series_ep_ids)).where(WatchHistory.media_type == 'tv').order_by(WatchHistory.last_watched.desc())).first()
+    hist_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id.in_(series_ep_ids)).where(WatchHistory.media_type == 'tv')
+    if prof_id:
+        hist_q = hist_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+    history = session.exec(hist_q.order_by(WatchHistory.last_watched.desc())).first()
     
     has_progress = False
     resume_link = ""
@@ -1179,7 +1798,13 @@ async def series_view(request: Request, title: str, ep: Optional[int] = None, cu
         else:
             resume_link = f"/play/tv/{selected_episode.id}"
         
-    in_watchlist = bool(session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.item_id == selected_episode.id).where(Watchlist.media_type == 'tv')).first())
+    wl_q = select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.item_id == selected_episode.id).where(Watchlist.media_type == 'tv')
+    if prof_id:
+        wl_q = wl_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+    in_watchlist = bool(session.exec(wl_q).first())
+
+    _, watched_tv_episode_ids, watched_tv_titles = get_user_watched_status(session, current_user.id, prof_id)
+    is_series_watched = title.strip().lower() in watched_tv_titles
         
     def get_s_e(t):
         m = re.search(r'S(\d+)E(\d+)', t.file_path, re.IGNORECASE)
@@ -1189,7 +1814,7 @@ async def series_view(request: Request, title: str, ep: Optional[int] = None, cu
     episodes = []
     seasons = set()
     for ep_obj in sorted(shows, key=get_s_e):
-        ep = {
+        ep_dict = {
             "id": ep_obj.id,
             "title": ep_obj.title,
             "poster_filename": ep_obj.poster_filename,
@@ -1199,10 +1824,10 @@ async def series_view(request: Request, title: str, ep: Optional[int] = None, cu
             "episode_name": "",
             "season": 0
         }
-        m = re.search(r'S(\d+)E(\d+)', ep['file_path'], re.IGNORECASE)
+        m = re.search(r'S(\d+)E(\d+)', ep_dict['file_path'], re.IGNORECASE)
         if m:
             s_num = int(m.group(1))
-            ep["season"] = s_num
+            ep_dict["season"] = s_num
             seasons.add(s_num)
             base = f"Season {int(m.group(1))} Episode {int(m.group(2))}"
         else:
@@ -1212,16 +1837,17 @@ async def series_view(request: Request, title: str, ep: Optional[int] = None, cu
         rt_str = get_runtime_str(ep_obj, session)
         rt_suffix = f" • {rt_str}" if rt_str else ""
         
-        filename = os.path.splitext(os.path.basename(ep['file_path']))[0]
+        filename = os.path.splitext(os.path.basename(ep_dict['file_path']))[0]
         name_match = re.search(r'S\d+E\d+[ \-]*(.+)', filename, re.IGNORECASE)
         
         if name_match and name_match.group(1).strip():
-            ep['episode_name'] = name_match.group(1).strip()
-            ep['season_episode'] = f"{ep['episode_name']} • {base}{rt_suffix}"
+            ep_dict['episode_name'] = name_match.group(1).strip()
+            ep_dict['season_episode'] = f"{ep_dict['episode_name']} • {base}{rt_suffix}"
         else:
-            ep['season_episode'] = f"{base}{rt_suffix}"
+            ep_dict['season_episode'] = f"{base}{rt_suffix}"
             
-        episodes.append(ep)
+        ep_dict['is_watched'] = ep_obj.id in watched_tv_episode_ids
+        episodes.append(ep_dict)
     
     sorted_seasons = sorted(list(seasons))
     
@@ -1230,28 +1856,43 @@ async def series_view(request: Request, title: str, ep: Optional[int] = None, cu
     if not resume_link and episodes:
         resume_link = f"/play/tv/{episodes[0]['id']}"
 
+    user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
+
     return templates.TemplateResponse(request=request, name="series.html", context={
-        "user": current_user, "title": title, "episodes": episodes, "seasons": sorted_seasons, "series": selected_episode, "cast_list": cast_list,
+        "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
+        "title": title, "episodes": episodes, "seasons": sorted_seasons, "series": selected_episode, "cast_list": cast_list,
         "has_progress": has_progress, "in_watchlist": in_watchlist, "resume_link": resume_link, "selected_ep_id": selected_episode.id,
-        "selected_ep_dict": selected_ep_dict
+        "selected_ep_dict": selected_ep_dict, "is_series_watched": is_series_watched
     })
 
 @app.get("/play/{media_type}/{item_id}", response_class=HTMLResponse)
-async def play_video(request: Request, media_type: str, item_id: int, sync: str = None, mobile: str = None, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def play_video(
+    request: Request,
+    media_type: str,
+    item_id: int,
+    sync: str = None,
+    mobile: str = None,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: return RedirectResponse(url="/login", status_code=303)
     if media_type == "movie" and not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
     if media_type == "tv" and not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
     
     item = session.get(Movie if media_type == "movie" else TVShow, item_id)
     if not item: raise HTTPException(status_code=404, detail="Item not found")
-    if current_user.kids_mode and not is_kids_safe(item.content_rating):
+    if is_profile_kids(current_user, current_profile) and not is_kids_safe(item.content_rating):
         raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
         
-    history_entry = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == item_id).where(WatchHistory.media_type == media_type)).first()
+    prof_id = current_profile.id if current_profile else None
+    history_entry = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == item_id).where(WatchHistory.media_type == media_type).where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))).first()
     if history_entry:
+        if prof_id and not history_entry.profile_id:
+            history_entry.profile_id = prof_id
         history_entry.last_watched = datetime.now(timezone.utc)
     else:
-        history_entry = WatchHistory(user_id=current_user.id, media_type=media_type, item_id=item_id)
+        history_entry = WatchHistory(user_id=current_user.id, profile_id=prof_id, media_type=media_type, item_id=item_id)
         session.add(history_entry)
         
     session.commit()
@@ -1271,7 +1912,10 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
         # Clean up older episodes from continue watching
         series_episodes = session.exec(select(TVShow).where(TVShow.title == item.title)).all()
         series_ep_ids = [ep.id for ep in series_episodes]
-        old_history = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id.in_(series_ep_ids)).where(WatchHistory.id != history_entry.id)).all()
+        clean_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id.in_(series_ep_ids)).where(WatchHistory.id != history_entry.id)
+        if prof_id:
+            clean_q = clean_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+        old_history = session.exec(clean_q).all()
         for old_h in old_history:
             session.delete(old_h)
         session.commit()
@@ -1334,6 +1978,7 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
     token = request.query_params.get("token", "")
     is_sync_host = False
     sync_initial_time = 0.0
+    rewind_buffer = (current_profile.rewind_seconds if current_profile and current_profile.rewind_seconds else current_user.rewind_seconds) or 0
     if sync:
         ws_session = session.get(WatchSession, sync)
         if not ws_session or not ws_session.is_active:
@@ -1343,8 +1988,8 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
             host_start = 0.0
             if history_entry and duration and history_entry.progress > 0 and history_entry.progress < 100:
                 host_start = (history_entry.progress / 100.0) * duration
-                if current_user.rewind_seconds:
-                    host_start = max(0.0, host_start - current_user.rewind_seconds)
+                if rewind_buffer:
+                    host_start = max(0.0, host_start - rewind_buffer)
             if sync not in manager.session_playback or manager.session_playback[sync].get("current_time", 0.0) == 0.0:
                 manager.session_playback[sync] = {"current_time": host_start, "is_paused": True, "updated_at": time.time()}
             sync_initial_time = manager.session_playback[sync]["current_time"]
@@ -1358,15 +2003,16 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
                         manager.session_playback[sync] = {"current_time": sync_initial_time, "is_paused": True, "updated_at": time.time()}
 
     # Register active stream telemetry immediately
-    session_key = f"{current_user.id}_{media_type}_{item_id}"
+    session_key = f"{current_user.id}_{prof_id or 0}_{media_type}_{item_id}"
     item_title = item.title
     item_poster = getattr(item, 'season_poster_filename', None) or getattr(item, 'poster_filename', None)
     season_ep_clean = season_episode.replace("<br>", " - ") if season_episode else ""
     client_ip = request.client.host if request.client else ""
+    display_username = f"{current_user.username} ({current_profile.name})" if (current_profile and current_profile.name != current_user.username) else current_user.username
     active_stream_manager.register_or_update(
         session_key=session_key,
         user_id=current_user.id,
-        username=current_user.username,
+        username=display_username,
         media_type=media_type,
         item_id=item_id,
         title=item_title,
@@ -1384,7 +2030,7 @@ async def play_video(request: Request, media_type: str, item_id: int, sync: str 
         "duration": duration, "next_episode_id": next_episode_id, "subtitle_url": subtitle_url,
         "subtitle_tracks": subtitle_tracks, "media_bitrate": probe.get("bitrate"),
         "sync_session_id": sync, "is_sync_host": is_sync_host, "sync_initial_time": sync_initial_time,
-        "user": current_user, "token": token, "is_mobile": mobile == "1", "audio_tracks": audio_tracks
+        "user": current_user, "current_profile": current_profile, "token": token, "is_mobile": mobile == "1", "audio_tracks": audio_tracks
     })
 
 @app.get("/subtitle/{media_type}/{item_id}")
@@ -1541,17 +2187,42 @@ async def update_progress(
     duration: Optional[float] = Form(None),
     play_type: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
 ):
     if not current_user: return {"status": "unauthorized"}
     
-    session_key = f"{current_user.id}_{media_type}_{item_id}"
-    history_entry = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == item_id).where(WatchHistory.media_type == media_type)).first()
+    prof_id = current_profile.id if current_profile else None
+    session_key = f"{current_user.id}_{prof_id or 0}_{media_type}_{item_id}"
+    
+    hist_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == item_id).where(WatchHistory.media_type == media_type)
+    if prof_id:
+        hist_q = hist_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+    history_entry = session.exec(hist_q).first()
     
     if progress >= 95.0:
         active_stream_manager.stop_stream(session_key)
+        dur_val = float(duration) if duration is not None else 0.0
+        cur_time_val = float(current_time) if current_time is not None else dur_val
         if history_entry:
-            session.delete(history_entry)
+            history_entry.progress = 100.0
+            if dur_val > 0: history_entry.duration = dur_val
+            history_entry.current_time = dur_val if dur_val > 0 else cur_time_val
+            history_entry.last_watched = datetime.now(timezone.utc)
+            session.add(history_entry)
+            session.commit()
+        else:
+            history_entry = WatchHistory(
+                user_id=current_user.id,
+                profile_id=prof_id,
+                media_type=media_type,
+                item_id=item_id,
+                progress=100.0,
+                current_time=dur_val if dur_val > 0 else cur_time_val,
+                duration=dur_val,
+                last_watched=datetime.now(timezone.utc)
+            )
+            session.add(history_entry)
             session.commit()
         return {"status": "completed"}
 
@@ -1564,12 +2235,15 @@ async def update_progress(
             history_entry.current_time = cur_time_val
         if duration is not None and dur_val > 0:
             history_entry.duration = dur_val
+        if prof_id and not history_entry.profile_id:
+            history_entry.profile_id = prof_id
         history_entry.last_watched = datetime.now(timezone.utc)
         session.add(history_entry)
         session.commit()
     else:
         history_entry = WatchHistory(
             user_id=current_user.id,
+            profile_id=prof_id,
             media_type=media_type,
             item_id=item_id,
             progress=progress,
@@ -1599,10 +2273,11 @@ async def update_progress(
                 season_episode = f"S{int(match.group(1))} • E{int(match.group(2))}"
                 
     client_ip = request.client.host if request.client else ""
+    display_username = f"{current_user.username} ({current_profile.name})" if (current_profile and current_profile.name != current_user.username) else current_user.username
     active_stream_manager.register_or_update(
         session_key=session_key,
         user_id=current_user.id,
-        username=current_user.username,
+        username=display_username,
         media_type=media_type,
         item_id=item_id,
         title=title,
@@ -1617,10 +2292,17 @@ async def update_progress(
     return {"status": "success"}
 
 @app.post("/progress/{media_type}/{item_id}/stop")
-async def stop_progress(media_type: str, item_id: int, current_user: User = Depends(get_current_user)):
+async def stop_progress(
+    media_type: str,
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile)
+):
     if current_user:
-        session_key = f"{current_user.id}_{media_type}_{item_id}"
+        prof_id = current_profile.id if current_profile else 0
+        session_key = f"{current_user.id}_{prof_id}_{media_type}_{item_id}"
         active_stream_manager.stop_stream(session_key)
+        hls_manager.stop_session(media_type, item_id)
     return {"status": "stopped"}
 
 from fastapi.responses import StreamingResponse
@@ -1890,6 +2572,124 @@ async def get_stream_info(
         "server_time": time.time()
     }
 
+# -------------------------------------------------------------
+# HLS Adaptive Bitrate (ABR) Endpoints
+# -------------------------------------------------------------
+@app.get("/hls/{media_type}/{item_id}/master.m3u8")
+async def get_hls_master(
+    request: Request,
+    media_type: str,
+    item_id: int,
+    audio_track: int = 0,
+    current_user: User = Depends(get_current_user)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if media_type == "movie" and not current_user.movies_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if media_type == "tv" and not current_user.tv_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    with Session(engine) as session:
+        item = session.get(Movie if media_type == "movie" else TVShow, item_id)
+        if not item or not os.path.exists(item.file_path):
+            raise HTTPException(status_code=404, detail="Media file missing")
+        file_path = item.file_path
+
+    token = request.query_params.get("token") or request.cookies.get("session_token")
+    content = hls_manager.build_master_playlist(
+        media_type=media_type,
+        item_id=item_id,
+        file_path=file_path,
+        audio_track=audio_track,
+        token=token
+    )
+    return Response(content=content, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-cache"})
+
+@app.get("/hls/{media_type}/{item_id}/variant_{res}.m3u8")
+async def get_hls_variant(
+    request: Request,
+    media_type: str,
+    item_id: int,
+    res: str,
+    audio_track: int = 0,
+    current_user: User = Depends(get_current_user)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if media_type == "movie" and not current_user.movies_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if media_type == "tv" and not current_user.tv_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    with Session(engine) as session:
+        item = session.get(Movie if media_type == "movie" else TVShow, item_id)
+        if not item or not os.path.exists(item.file_path):
+            raise HTTPException(status_code=404, detail="Media file missing")
+        file_path = item.file_path
+
+    probe = probe_media_streams(file_path)
+    duration = probe.get("duration") or 0.0
+
+    token = request.query_params.get("token") or request.cookies.get("session_token")
+    content = hls_manager.build_variant_playlist(
+        media_type=media_type,
+        item_id=item_id,
+        res=res,
+        duration=duration,
+        audio_track=audio_track,
+        token=token
+    )
+    return Response(content=content, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-cache"})
+
+@app.get("/hls/{media_type}/{item_id}/segment_{res}_{segment_idx}.ts")
+async def get_hls_segment(
+    media_type: str,
+    item_id: int,
+    res: str,
+    segment_idx: int,
+    audio_track: int = 0,
+    current_user: User = Depends(get_current_user)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if media_type == "movie" and not current_user.movies_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if media_type == "tv" and not current_user.tv_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    with Session(engine) as session:
+        item = session.get(Movie if media_type == "movie" else TVShow, item_id)
+        if not item or not os.path.exists(item.file_path):
+            raise HTTPException(status_code=404, detail="Media file missing")
+        file_path = item.file_path
+        hw_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
+        hw_profile = hw_config.value if hw_config else "auto"
+
+    seg_path = hls_manager.get_segment(
+        media_type=media_type,
+        item_id=item_id,
+        file_path=file_path,
+        res=res,
+        audio_track=audio_track,
+        segment_idx=segment_idx,
+        hw_profile=hw_profile
+    )
+    if not seg_path or not os.path.exists(seg_path):
+        raise HTTPException(status_code=404, detail="Segment generation timed out or failed")
+
+    return FileResponse(seg_path, media_type="video/MP2T", headers={"Cache-Control": "public, max-age=86400"})
+
+@app.post("/hls/{media_type}/{item_id}/stop")
+async def stop_hls(
+    media_type: str,
+    item_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    if current_user:
+        hls_manager.stop_session(media_type, item_id)
+    return {"status": "stopped"}
+
 @app.post("/watchlist/remove/{watchlist_id}")
 async def remove_watchlist(request: Request, watchlist_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     if not current_user: return RedirectResponse(url="/login", status_code=303)
@@ -1900,34 +2700,218 @@ async def remove_watchlist(request: Request, watchlist_id: int, current_user: Us
     return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
 
 @app.post("/watchlist/remove_by_item/{media_type}/{item_id}")
-async def remove_watchlist_by_item(request: Request, media_type: str, item_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def remove_watchlist_by_item(
+    request: Request,
+    media_type: str,
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: return RedirectResponse(url="/login", status_code=303)
-    item = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.media_type == media_type).where(Watchlist.item_id == item_id)).first()
-    if item:
+    prof_id = current_profile.id if current_profile else None
+    q = select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.media_type == media_type).where(Watchlist.item_id == item_id)
+    if prof_id:
+        q = q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+    items = session.exec(q).all()
+    for item in items:
         session.delete(item)
-        session.commit()
+    session.commit()
     return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
+
 @app.post("/watchlist/add/{media_type}/{item_id}")
-async def add_watchlist(request: Request, media_type: str, item_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def add_watchlist(
+    request: Request,
+    media_type: str,
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: return RedirectResponse(url="/login", status_code=303)
-    existing = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.media_type == media_type).where(Watchlist.item_id == item_id)).first()
+    prof_id = current_profile.id if current_profile else None
+    q = select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.media_type == media_type).where(Watchlist.item_id == item_id)
+    if prof_id:
+        q = q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+    existing = session.exec(q).first()
     if not existing:
-        session.add(Watchlist(user_id=current_user.id, media_type=media_type, item_id=item_id))
+        session.add(Watchlist(user_id=current_user.id, profile_id=prof_id, media_type=media_type, item_id=item_id))
         session.commit()
     return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
 
 @app.post("/history/remove/{media_type}/{item_id}")
-async def remove_history(request: Request, media_type: str, item_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def remove_history(
+    request: Request,
+    media_type: str,
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user:
         if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
             return Response(content='{"status": "unauthorized"}', media_type="application/json", status_code=401)
         return RedirectResponse(url="/login", status_code=303)
-    history_entry = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == item_id).where(WatchHistory.media_type == media_type)).first()
-    if history_entry:
-        session.delete(history_entry)
-        session.commit()
+    prof_id = current_profile.id if current_profile else None
+    q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == item_id).where(WatchHistory.media_type == media_type)
+    if prof_id:
+        q = q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+    history_entries = session.exec(q).all()
+    for h in history_entries:
+        session.delete(h)
+    session.commit()
     if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
         return {"status": "success"}
+    return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
+
+@app.post("/history/mark_watched/{media_type}/{item_id}")
+async def mark_watched(
+    request: Request,
+    media_type: str,
+    item_id: int,
+    scope: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
+            return Response(content='{"status": "unauthorized"}', media_type="application/json", status_code=401)
+        return RedirectResponse(url="/login", status_code=303)
+        
+    prof_id = current_profile.id if current_profile else None
+    
+    if media_type == "movie":
+        movie = session.get(Movie, item_id)
+        if movie:
+            dur = float(movie.runtime * 60) if movie.runtime else 0.0
+            hist = session.exec(
+                select(WatchHistory).where(
+                    WatchHistory.user_id == current_user.id,
+                    WatchHistory.media_type == "movie",
+                    WatchHistory.item_id == item_id
+                ).where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None) if prof_id else True)
+            ).first()
+            if hist:
+                hist.progress = 100.0
+                hist.current_time = dur
+                hist.duration = dur
+                hist.last_watched = datetime.now(timezone.utc)
+                if prof_id: hist.profile_id = prof_id
+                session.add(hist)
+            else:
+                hist = WatchHistory(
+                    user_id=current_user.id,
+                    profile_id=prof_id,
+                    media_type="movie",
+                    item_id=item_id,
+                    progress=100.0,
+                    current_time=dur,
+                    duration=dur,
+                    last_watched=datetime.now(timezone.utc)
+                )
+                session.add(hist)
+            session.commit()
+            
+    elif media_type == "tv":
+        tv_item = session.get(TVShow, item_id)
+        if tv_item:
+            if scope == "episode":
+                targets = [tv_item]
+            else:
+                targets = session.exec(
+                    select(TVShow).where(func.lower(TVShow.title) == tv_item.title.strip().lower())
+                ).all()
+                
+            for ep in targets:
+                dur = float(ep.runtime * 60) if ep.runtime else 0.0
+                hist = session.exec(
+                    select(WatchHistory).where(
+                        WatchHistory.user_id == current_user.id,
+                        WatchHistory.media_type == "tv",
+                        WatchHistory.item_id == ep.id
+                    ).where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None) if prof_id else True)
+                ).first()
+                if hist:
+                    hist.progress = 100.0
+                    hist.current_time = dur
+                    hist.duration = dur
+                    hist.last_watched = datetime.now(timezone.utc)
+                    if prof_id: hist.profile_id = prof_id
+                    session.add(hist)
+                else:
+                    hist = WatchHistory(
+                        user_id=current_user.id,
+                        profile_id=prof_id,
+                        media_type="tv",
+                        item_id=ep.id,
+                        progress=100.0,
+                        current_time=dur,
+                        duration=dur,
+                        last_watched=datetime.now(timezone.utc)
+                    )
+                    session.add(hist)
+            session.commit()
+            
+    if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
+        return {"status": "success", "watched": True}
+    return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
+
+@app.post("/history/mark_unwatched/{media_type}/{item_id}")
+async def mark_unwatched(
+    request: Request,
+    media_type: str,
+    item_id: int,
+    scope: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
+            return Response(content='{"status": "unauthorized"}', media_type="application/json", status_code=401)
+        return RedirectResponse(url="/login", status_code=303)
+        
+    prof_id = current_profile.id if current_profile else None
+    
+    if media_type == "movie":
+        q = select(WatchHistory).where(
+            WatchHistory.user_id == current_user.id,
+            WatchHistory.media_type == "movie",
+            WatchHistory.item_id == item_id
+        )
+        if prof_id:
+            q = q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+        entries = session.exec(q).all()
+        for h in entries:
+            session.delete(h)
+        session.commit()
+        
+    elif media_type == "tv":
+        tv_item = session.get(TVShow, item_id)
+        if tv_item:
+            if scope == "episode":
+                target_ids = [tv_item.id]
+            else:
+                episodes = session.exec(
+                    select(TVShow.id).where(func.lower(TVShow.title) == tv_item.title.strip().lower())
+                ).all()
+                target_ids = list(episodes)
+                
+            q = select(WatchHistory).where(
+                WatchHistory.user_id == current_user.id,
+                WatchHistory.media_type == "tv",
+                WatchHistory.item_id.in_(target_ids)
+            )
+            if prof_id:
+                q = q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+            entries = session.exec(q).all()
+            for h in entries:
+                session.delete(h)
+            session.commit()
+            
+    if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
+        return {"status": "success", "watched": False}
     return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
 
 # ----------------- SETTINGS & USER MANAGEMENT -----------------
@@ -1946,6 +2930,11 @@ async def download_media(media_type: str, item_id: int, current_user: User = Dep
     
     filename = os.path.basename(file_path)
     return FileResponse(file_path, media_type="application/octet-stream", filename=filename)
+
+def format_storage_size(gb_val: float) -> str:
+    if gb_val >= 1000:
+        return f"{gb_val / 1000:.1f} TB"
+    return f"{gb_val:.1f} GB"
 
 def get_server_metrics(session: Session) -> dict:
     cpu_percent = 0.0
@@ -1984,12 +2973,18 @@ def get_server_metrics(session: Session) -> dict:
                     du = shutil.disk_usage(vol.path)
                     pct = round((du.used / du.total) * 100, 1) if du.total > 0 else 0.0
                     display_type = {"movie": "Movies", "tv": "TV Shows", "photo": "Photos"}.get(vol.media_type, vol.media_type.capitalize())
+                    tot_gb = round(du.total / (1024**3), 1)
+                    used_gb = round(du.used / (1024**3), 1)
+                    free_gb = round(du.free / (1024**3), 1)
                     disks.append({
                         "name": f"{display_type} ({vol.path})",
                         "path": vol.path,
-                        "total_gb": round(du.total / (1024**3), 1),
-                        "used_gb": round(du.used / (1024**3), 1),
-                        "free_gb": round(du.free / (1024**3), 1),
+                        "total_gb": tot_gb,
+                        "used_gb": used_gb,
+                        "free_gb": free_gb,
+                        "total_str": format_storage_size(tot_gb),
+                        "used_str": format_storage_size(used_gb),
+                        "free_str": format_storage_size(free_gb),
                         "percent": pct
                     })
             except Exception:
@@ -2100,7 +3095,11 @@ def get_user_and_watch_stats(session: Session, limit: int = 25) -> dict:
         else:
             time_display = "0:00"
 
-        delta = now - h.last_watched if h.last_watched else timedelta(0)
+        if h.last_watched:
+            lw = h.last_watched.replace(tzinfo=timezone.utc) if h.last_watched.tzinfo is None else h.last_watched
+            delta = now - lw
+        else:
+            delta = timedelta(0)
         secs = delta.total_seconds()
         if secs < 60:
             time_ago = "Just now"
@@ -2159,9 +3158,14 @@ def get_user_and_watch_stats(session: Session, limit: int = 25) -> dict:
     }
 
 @app.get("/server-dashboard", response_class=HTMLResponse)
-async def server_dashboard_view(request: Request, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def server_dashboard_view(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: return RedirectResponse(url="/login", status_code=303)
-    if not current_user.is_admin:
+    if not is_actual_admin(current_user, current_profile):
         raise HTTPException(status_code=403, detail="Admin privileges required to view server dashboard.")
     metrics = get_server_metrics(session)
     user_stats = get_user_and_watch_stats(session)
@@ -2178,50 +3182,103 @@ async def activity_redirect(current_user: User = Depends(get_current_user)):
     return RedirectResponse(url="/server-dashboard", status_code=303)
 
 @app.get("/api/server-dashboard/stats")
-async def api_server_dashboard_stats(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user or not current_user.is_admin:
+async def api_server_dashboard_stats(
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile):
         raise HTTPException(status_code=403, detail="Forbidden")
     metrics = get_server_metrics(session)
     user_stats = get_user_and_watch_stats(session, limit=15)
     return {
         "metrics": metrics,
-        "stats": user_stats
+        "stats": user_stats,
+        "scanner": scanner_manager.get_status()
     }
 
+@app.get("/api/scanner/status")
+async def api_scanner_status(
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile)
+):
+    if not is_actual_admin(current_user, current_profile):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return scanner_manager.get_status()
+
+@app.post("/api/scanner/start")
+async def api_scanner_start(
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile)
+):
+    if not is_actual_admin(current_user, current_profile):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    started = scanner_manager.start_scan()
+    return {"started": started, "status": scanner_manager.get_status()}
+
 @app.get("/settings", response_class=HTMLResponse)
-async def view_settings(request: Request, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def view_settings(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: return RedirectResponse(url="/login", status_code=303)
-    invites = session.exec(select(InviteCode).order_by(InviteCode.id.desc())).all()
-    users = session.exec(select(User).order_by(User.id)).all()
-    v_paths = session.exec(select(VolumePath).order_by(VolumePath.id)).all()
+    
+    is_admin = is_actual_admin(current_user, current_profile)
+    is_primary = (current_profile is None or current_profile.is_primary)
+    can_change_password = is_primary
+
+    invites = []
+    users = []
     volume_paths = []
-    for v in v_paths:
-        display_type = {"movie": "Movies", "tv": "TV Shows", "photo": "Photos"}.get(v.media_type, v.media_type)
-        volume_paths.append({
-            "id": v.id,
-            "path": v.path,
-            "display_path": v.path,
-            "media_type": display_type,
-            "exists": os.path.exists(v.path)
-        })
-    remote_url_config = session.exec(select(SystemConfig).where(SystemConfig.key == "remote_access_url")).first()
-    host_url = remote_url_config.value.rstrip("/") if remote_url_config and remote_url_config.value else str(request.base_url).rstrip("/")
+    remote_url = ""
+    tmdb_key = ""
+    hw_accel_profile = "auto"
+    host_url = str(request.base_url).rstrip("/")
+
+    if is_admin:
+        invites = session.exec(select(InviteCode).order_by(InviteCode.id.desc())).all()
+        users = session.exec(select(User).order_by(User.id)).all()
+        v_paths = session.exec(select(VolumePath).order_by(VolumePath.id)).all()
+        for v in v_paths:
+            display_type = {"movie": "Movies", "tv": "TV Shows", "photo": "Photos"}.get(v.media_type, v.media_type)
+            volume_paths.append({
+                "id": v.id,
+                "path": v.path,
+                "display_path": v.path,
+                "media_type": display_type,
+                "exists": os.path.exists(v.path)
+            })
+        remote_url_config = session.exec(select(SystemConfig).where(SystemConfig.key == "remote_access_url")).first()
+        remote_url = remote_url_config.value if remote_url_config else ""
+        if remote_url:
+            host_url = remote_url.rstrip("/")
+        
+        tmdb_key_config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
+        tmdb_key = tmdb_key_config.value if tmdb_key_config else os.getenv("TMDB_API_KEY", "")
+        
+        hw_accel_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
+        hw_accel_profile = hw_accel_config.value if hw_accel_config else "auto"
     
-    tmdb_key_config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
-    tmdb_key = tmdb_key_config.value if tmdb_key_config else os.getenv("TMDB_API_KEY", "")
-    
-    hw_accel_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
-    hw_accel_profile = hw_accel_config.value if hw_accel_config else "auto"
+    rewind_seconds = current_profile.rewind_seconds if (current_profile and current_profile.rewind_seconds is not None) else (current_user.rewind_seconds or 0)
     
     return templates.TemplateResponse(request=request, name="settings.html", context={
-        "user": current_user, "invites": invites, "users": users, "volume_paths": volume_paths, 
-        "host_url": host_url, "remote_url": remote_url_config.value if remote_url_config else "",
-        "tmdb_key": tmdb_key, "hw_accel_profile": hw_accel_profile
+        "user": current_user, "current_profile": current_profile,
+        "is_admin": is_admin, "can_change_password": can_change_password,
+        "invites": invites, "users": users, "volume_paths": volume_paths, 
+        "host_url": host_url, "remote_url": remote_url, "tmdb_key": tmdb_key, "hw_accel_profile": hw_accel_profile,
+        "rewind_seconds": rewind_seconds
     })
 
 @app.post("/settings/transcoding")
-async def save_transcoding_settings(hw_accel_profile: str = Form("auto"), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user or not current_user.is_admin: raise HTTPException(status_code=403, detail="Forbidden")
+async def save_transcoding_settings(
+    hw_accel_profile: str = Form("auto"),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
     config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
     if not config:
         config = SystemConfig(key="hw_accel_profile", value=hw_accel_profile.strip())
@@ -2233,8 +3290,15 @@ async def save_transcoding_settings(hw_accel_profile: str = Form("auto"), curren
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/change_password")
-async def change_password(new_password: str = Form(...), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def change_password(
+    new_password: str = Form(...),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    if current_profile and not current_profile.is_primary:
+        raise HTTPException(status_code=403, detail="Household users cannot change account password.")
     
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(new_password.encode('utf-8'), salt).decode('utf-8')
@@ -2246,16 +3310,31 @@ async def change_password(new_password: str = Form(...), current_user: User = De
     return RedirectResponse(url="/settings?pw_success=1", status_code=303)
 
 @app.post("/settings/rewind")
-async def save_rewind_settings(rewind_seconds: int = Form(0), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def save_rewind_settings(
+    rewind_seconds: int = Form(0),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
-    current_user.rewind_seconds = max(0, min(300, rewind_seconds))
-    session.add(current_user)
+    val = max(0, min(300, rewind_seconds))
+    if current_profile:
+        current_profile.rewind_seconds = val
+        session.add(current_profile)
+    if current_profile is None or current_profile.is_primary:
+        current_user.rewind_seconds = val
+        session.add(current_user)
     session.commit()
     return RedirectResponse(url="/settings?rewind_success=1", status_code=303)
 
 @app.post("/settings/tmdb")
-async def save_tmdb_key(tmdb_key: str = Form(""), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user or not current_user.is_admin: raise HTTPException(status_code=403, detail="Forbidden")
+async def save_tmdb_key(
+    tmdb_key: str = Form(""),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
     config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
     if not config:
         config = SystemConfig(key="tmdb_api_key", value=tmdb_key.strip())
@@ -2269,8 +3348,13 @@ async def save_tmdb_key(tmdb_key: str = Form(""), current_user: User = Depends(g
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/remote_access")
-async def save_remote_access(remote_url: str = Form(""), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user or not current_user.is_admin: raise HTTPException(status_code=403, detail="Forbidden")
+async def save_remote_access(
+    remote_url: str = Form(""),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
     config = session.exec(select(SystemConfig).where(SystemConfig.key == "remote_access_url")).first()
     if not config:
         config = SystemConfig(key="remote_access_url", value=remote_url.strip())
@@ -2282,8 +3366,14 @@ async def save_remote_access(remote_url: str = Form(""), current_user: User = De
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/add_volume")
-async def add_volume(path: str = Form(...), media_type: str = Form(...), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user or not current_user.is_admin: raise HTTPException(status_code=403, detail="Forbidden")
+async def add_volume(
+    path: str = Form(...),
+    media_type: str = Form(...),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
     clean_path = path.strip()
     if clean_path and media_type in ("movie", "tv", "photo"):
         existing = session.exec(select(VolumePath).where(VolumePath.path == clean_path)).first()
@@ -2295,8 +3385,13 @@ async def add_volume(path: str = Form(...), media_type: str = Form(...), current
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/delete_volume/{volume_id}")
-async def delete_volume(volume_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user or not current_user.is_admin: raise HTTPException(status_code=403, detail="Forbidden")
+async def delete_volume(
+    volume_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
     vol = session.get(VolumePath, volume_id)
     if vol:
         session.delete(vol)
@@ -2306,32 +3401,62 @@ async def delete_volume(volume_id: int, current_user: User = Depends(get_current
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/rescan")
-async def rescan_library(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user or not current_user.is_admin: raise HTTPException(status_code=403, detail="Forbidden")
-    scanner_debouncer.trigger_scan(delay=0.1)
+async def rescan_library(
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
+    scanner_manager.start_scan()
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.get("/api/browse")
-async def browse_directory(path: str = "/", current_user: User = Depends(get_current_user)):
-    if not current_user or not current_user.is_admin: raise HTTPException(status_code=403, detail="Forbidden")
+async def browse_directory(
+    path: str = "/",
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile)
+):
+    if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
+    SYSTEM_CONTAINER_DIRS = {
+        "bin", "boot", "dev", "etc", "lib", "lib64", "proc", "root", "run",
+        "sbin", "sys", "tmp", "usr", "var", "app", "config", "opt", "srv", "home"
+    }
     try:
         abs_path = os.path.abspath(path)
-        if not os.path.isdir(abs_path): return {"current": path, "directories": []}
+        norm_path = abs_path.replace("\\", "/")
+
+        # Prevent navigating into internal container system directories
+        parts = [p for p in norm_path.split("/") if p]
+        if parts and parts[0] in SYSTEM_CONTAINER_DIRS:
+            return {"current": norm_path, "directories": [".."]}
+
+        if not os.path.isdir(abs_path): return {"current": norm_path, "directories": []}
         dirs = []
         if abs_path != os.path.dirname(abs_path):
             dirs.append("..")
         for f in os.listdir(abs_path):
+            if f.startswith("."):
+                continue
+            # When browsing root, hide Linux container system folders so only mounted volumes appear
+            if abs_path == "/" or norm_path == "/":
+                if f in SYSTEM_CONTAINER_DIRS:
+                    continue
             try:
                 if os.path.isdir(os.path.join(abs_path, f)):
                     dirs.append(f)
             except: pass
-        return {"current": abs_path.replace("\\", "/"), "directories": sorted(dirs)}
+        return {"current": norm_path, "directories": sorted(dirs)}
     except:
         return {"current": path.replace("\\", "/"), "directories": []}
 
 @app.post("/settings/generate_invite")
-async def generate_invite(remote_url: str = Form(None), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user or not current_user.is_admin: raise HTTPException(status_code=403, detail="Forbidden")
+async def generate_invite(
+    remote_url: str = Form(None),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
     if remote_url is not None:
         config = session.exec(select(SystemConfig).where(SystemConfig.key == "remote_access_url")).first()
         if not config:
@@ -2346,8 +3471,13 @@ async def generate_invite(remote_url: str = Form(None), current_user: User = Dep
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/delete_invite/{invite_id}")
-async def delete_invite(invite_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user or not current_user.is_admin: raise HTTPException(status_code=403, detail="Forbidden")
+async def delete_invite(
+    invite_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
     invite = session.get(InviteCode, invite_id)
     if invite:
         session.delete(invite)
@@ -2355,8 +3485,20 @@ async def delete_invite(invite_id: int, current_user: User = Depends(get_current
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/update_user/{user_id}")
-async def update_user(user_id: int, movies_access: str = Form(None), tv_access: str = Form(None), photos_access: str = Form(None), downloads_access: str = Form(None), watch_together_access: str = Form(None), kids_mode: str = Form(None), current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user or not current_user.is_admin: raise HTTPException(status_code=403, detail="Forbidden")
+async def update_user(
+    user_id: int,
+    movies_access: str = Form(None),
+    tv_access: str = Form(None),
+    photos_access: str = Form(None),
+    downloads_access: str = Form(None),
+    watch_together_access: str = Form(None),
+    kids_mode: str = Form(None),
+    can_manage_profiles: str = Form(None),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
     user = session.get(User, user_id)
     if user and not user.is_admin:
         user.movies_access = movies_access == "on"
@@ -2365,14 +3507,21 @@ async def update_user(user_id: int, movies_access: str = Form(None), tv_access: 
         user.downloads_access = downloads_access == "on"
         user.watch_together_access = watch_together_access == "on"
         user.kids_mode = kids_mode == "on"
+        user.can_manage_profiles = can_manage_profiles == "on"
         session.commit()
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/delete_user/{user_id}")
-async def delete_user(user_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user or not current_user.is_admin: raise HTTPException(status_code=403, detail="Forbidden")
+async def delete_user(
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
     user = session.get(User, user_id)
     if user and not user.is_admin:
+        for p in session.exec(select(Profile).where(Profile.user_id == user_id)).all(): session.delete(p)
         for w in session.exec(select(Watchlist).where(Watchlist.user_id == user_id)).all(): session.delete(w)
         for h in session.exec(select(WatchHistory).where(WatchHistory.user_id == user_id)).all(): session.delete(h)
         for i in session.exec(select(WatchInvite).where((WatchInvite.sender_id == user_id) | (WatchInvite.invited_user_id == user_id))).all(): session.delete(i)
@@ -2570,7 +3719,11 @@ async def websocket_sync(websocket: WebSocket, session_id: str):
                 }), session_id)
 
 @app.get("/api/inbox")
-async def get_inbox(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+async def get_inbox(
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not current_user: return {"invites": [], "reset_requests": []}
     invites = session.exec(select(WatchInvite).where(WatchInvite.invited_user_id == current_user.id).where(WatchInvite.status == "pending")).all()
     results = []
@@ -2611,7 +3764,7 @@ async def get_inbox(current_user: User = Depends(get_current_user), session: Ses
         })
 
     reset_requests = []
-    if current_user.is_admin:
+    if is_actual_admin(current_user, current_profile):
         pending_resets = session.exec(select(PasswordResetRequest).where(PasswordResetRequest.status == "pending")).all()
         for pr in pending_resets:
             req_user = session.get(User, pr.user_id)

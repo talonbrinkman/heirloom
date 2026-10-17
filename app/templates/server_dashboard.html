@@ -20,6 +20,9 @@
                 </a>
                 <div class="flex align-center gap-10">
                     <h1 class="m-0" style="font-size: 1.5rem;">Server Dashboard</h1>
+                    <div id="serverDashboardActivityBadge" class="server-activity-badge" style="display: none;" title="Library Activity">
+                        <span id="serverDashboardActivityText" class="server-activity-text">Scanning...</span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -147,37 +150,32 @@
             <div class="card m-0">
                 <div class="card-header flex justify-between align-center">
                     <h2 class="m-0" style="font-size: 1.25rem;">Storage & Volumes</h2>
-                    <span style="font-size: 0.82rem; color: var(--text-muted);">Disks & Media Paths</span>
                 </div>
 
                 <div id="disksList" class="flex flex-col gap-15 mt-10">
                     {% for d in metrics.disks %}
-                    <div
-                        style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--surface-hover); border-radius: 6px; padding: 12px 16px; gap: 10px; display: flex; flex-direction: column;">
-                        <div class="flex justify-between align-center mb-5">
-                            <div class="flex align-center gap-10">
-                                <i data-lucide="hard-drive"
-                                    style="width: 18px; height: 18px; color: var(--text-muted);"></i>
-                                <span style="font-weight: 600; font-size: 0.95rem;">{{ d.name }}</span>
+                    <div class="disk-item">
+                        <div class="disk-item-header">
+                            <div class="disk-item-info">
+                                <i data-lucide="hard-drive" class="disk-icon"></i>
+                                <span class="disk-name">{{ d.name }}</span>
                             </div>
-                            <span
-                                style="font-size: 0.85rem; font-weight: 600; color: {% if d.percent > 90 %}#f44336{% elif d.percent > 75 %}#ff9800{% else %}var(--text){% endif %};">
+                            <span class="disk-percent {% if d.percent > 90 %}danger{% elif d.percent > 75 %}warning{% endif %}">
                                 {{ d.percent }}% Used
                             </span>
                         </div>
-                        <div class="kpi-bar-bg mb-5" style="height: 7px;">
-                            <div class="kpi-bar-fill"
-                                style="width: {{ d.percent }}%; background: {% if d.percent > 90 %}#f44336{% elif d.percent > 75 %}#ff9800{% else %}var(--accent){% endif %};">
+                        <div class="kpi-bar-bg mb-5 disk-bar-bg">
+                            <div class="disk-bar-fill {% if d.percent > 90 %}danger{% elif d.percent > 75 %}warning{% endif %}"
+                                style="width: {{ d.percent }}%;">
                             </div>
                         </div>
-                        <div class="flex justify-between" style="font-size: 0.78rem; color: var(--text-muted);">
-                            <span>Used: <strong>{{ d.used_gb }} / {{ d.total_gb }} GB</strong></span>
-                            <span>Free: <strong>{{ d.free_gb }} GB</strong></span>
+                        <div class="disk-item-footer">
+                            <span>Used: <strong>{{ d.used_str if d.used_str else d.used_gb ~ ' GB' }} / {{ d.total_str if d.total_str else d.total_gb ~ ' GB' }}</strong></span>
+                            <span>Free: <strong>{{ d.free_str if d.free_str else d.free_gb ~ ' GB' }}</strong></span>
                         </div>
                     </div>
                     {% else %}
-                    <div style="font-size: 0.85rem; color: var(--text-muted); padding: 8px 0;">No mounted media volumes
-                        found.</div>
+                    <div class="disk-empty-state">No mounted media volumes found.</div>
                     {% endfor %}
                 </div>
             </div>
@@ -233,7 +231,7 @@
             </div>
 
             {% if stats.recent_history and stats.recent_history|length > 0 %}
-            <div style="overflow-x: auto;">
+            <div class="history-table-container">
                 <table class="history-table" id="recentHistoryTable">
                     <thead>
                         <tr>
@@ -325,7 +323,7 @@
                 <h2 class="m-0" style="font-size: 1.25rem;">User Accounts</h2>
             </div>
 
-            <div style="overflow-x: auto;">
+            <div class="history-table-container">
                 <table class="history-table">
                     <thead>
                         <tr>
@@ -392,6 +390,9 @@
                     updateHistoryUI(data.stats.recent_history);
                     updateStatsUI(data.stats);
                 }
+                if (data.scanner) {
+                    updateScannerUI(data.scanner);
+                }
 
                 const updatedText = document.getElementById('lastUpdatedText');
                 if (updatedText) {
@@ -402,6 +403,27 @@
                 console.debug("[Server Dashboard] Polling update failed:", err);
             } finally {
                 isFetching = false;
+            }
+        }
+
+        function updateScannerUI(scanner) {
+            const badge = document.getElementById('serverDashboardActivityBadge');
+            const textEl = document.getElementById('serverDashboardActivityText');
+            if (!badge || !textEl) return;
+
+            if (scanner.is_scanning) {
+                badge.style.display = 'inline-flex';
+                badge.classList.remove('complete');
+                textEl.textContent = scanner.short_status || 'Scanning...';
+                badge.title = scanner.current_item ? `${scanner.action}: ${scanner.current_item}` : (scanner.action || 'Library scan in progress');
+            } else if (scanner.recently_completed) {
+                badge.style.display = 'inline-flex';
+                badge.classList.add('complete');
+                textEl.textContent = 'Scan Complete';
+                badge.title = scanner.last_summary || 'Library scan complete';
+            } else {
+                badge.style.display = 'none';
+                badge.classList.remove('complete');
             }
         }
 
@@ -449,36 +471,47 @@
             renderActiveStreams(metrics.active_streams);
         }
 
+        function formatStorageSize(gb) {
+            if (gb === null || gb === undefined) return '';
+            const num = parseFloat(gb);
+            if (num >= 1000) {
+                return (num / 1000).toFixed(1) + ' TB';
+            }
+            return num.toFixed(1) + ' GB';
+        }
+
         function renderDisks(disks) {
             const list = document.getElementById('disksList');
             if (!list || !disks) return;
 
             if (disks.length === 0) {
-                list.innerHTML = '<div style="font-size: 0.85rem; color: var(--text-muted); padding: 8px 0;">No mounted media volumes found.</div>';
+                list.innerHTML = '<div class="disk-empty-state">No mounted media volumes found.</div>';
                 return;
             }
 
             let html = '';
             disks.forEach(d => {
-                const color = d.percent > 90 ? '#f44336' : (d.percent > 75 ? '#ff9800' : 'var(--accent)');
-                const textColor = d.percent > 90 ? '#f44336' : (d.percent > 75 ? '#ff9800' : 'var(--text)');
+                const statusClass = d.percent > 90 ? 'danger' : (d.percent > 75 ? 'warning' : '');
+                const usedDisplay = d.used_str || formatStorageSize(d.used_gb);
+                const totalDisplay = d.total_str || formatStorageSize(d.total_gb);
+                const freeDisplay = d.free_str || formatStorageSize(d.free_gb);
                 html += `
-                    <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--surface-hover); border-radius: 6px; padding: 12px 16px; gap: 10px; display: flex; flex-direction: column;">
-                        <div class="flex justify-between align-center mb-5">
-                            <div class="flex align-center gap-10">
-                                <i data-lucide="hard-drive" style="width: 18px; height: 18px; color: var(--text-muted);"></i>
-                                <span style="font-weight: 600; font-size: 0.95rem;">${escapeHtml(d.name)}</span>
+                    <div class="disk-item">
+                        <div class="disk-item-header">
+                            <div class="disk-item-info">
+                                <i data-lucide="hard-drive" class="disk-icon"></i>
+                                <span class="disk-name">${escapeHtml(d.name)}</span>
                             </div>
-                            <span style="font-size: 0.85rem; font-weight: 600; color: ${textColor};">
+                            <span class="disk-percent ${statusClass}">
                                 ${d.percent}% Used
                             </span>
                         </div>
-                        <div class="kpi-bar-bg mb-5" style="height: 7px;">
-                            <div class="kpi-bar-fill" style="width: ${d.percent}%; background: ${color};"></div>
+                        <div class="kpi-bar-bg mb-5 disk-bar-bg">
+                            <div class="disk-bar-fill ${statusClass}" style="width: ${d.percent}%;"></div>
                         </div>
-                        <div class="flex justify-between" style="font-size: 0.78rem; color: var(--text-muted);">
-                            <span>Used: <strong>${d.used_gb} / ${d.total_gb} GB</strong></span>
-                            <span>Free: <strong>${d.free_gb} GB</strong></span>
+                        <div class="disk-item-footer">
+                            <span>Used: <strong>${usedDisplay} / ${totalDisplay}</strong></span>
+                            <span>Free: <strong>${freeDisplay}</strong></span>
                         </div>
                     </div>
                 `;
