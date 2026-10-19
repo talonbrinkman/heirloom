@@ -5,7 +5,9 @@ import time
 import threading
 import asyncio
 import subprocess
+import hashlib
 from typing import Optional, Dict, Any, List
+from datetime import datetime, timezone
 import requests
 try:
     import httpx
@@ -32,6 +34,159 @@ class SafeHTTPClient:
 VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".m4v")
 PHOTO_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".heic", ".webp", ".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm")
 METADATA_DIR = "/config/metadata"
+
+RECYCLE_NAMES = {
+    "#recycle", "@recycle", "$recycle.bin", "recycle.bin", "recycler",
+    ".trash", ".trashes", "@eadir"
+}
+
+def is_recycle_name(name: str) -> bool:
+    """Check if a directory or file name corresponds to recycle/trash/indexing artifacts."""
+    if not name:
+        return False
+    lower = name.strip().lower()
+    if lower in RECYCLE_NAMES:
+        return True
+    if "recycle" in lower:
+        return True
+    if lower.startswith(".trash-"):
+        return True
+    if lower == "@eadir" or lower.startswith("@eadir"):
+        return True
+    return False
+
+def is_recycle_path(path: str) -> bool:
+    """Check if any segment in the path belongs to a recycle or trash folder."""
+    if not path:
+        return False
+    norm = path.replace("\\", "/")
+    segments = [s.strip() for s in norm.split("/") if s.strip()]
+    return any(is_recycle_name(s) for s in segments)
+
+def get_album_name(root: str, photo_dir: str) -> Optional[str]:
+    """
+    Returns the relative album path for a photo directory preserving folder structure.
+    If root is directly inside photo_dir, returns None.
+    If root is a nested subfolder (e.g. Vacation/2023/Day1), returns 'Vacation/2023/Day1'.
+    """
+    if not root or not photo_dir:
+        return None
+    norm_root = root.replace("\\", "/").rstrip("/")
+    norm_dir = photo_dir.replace("\\", "/").rstrip("/")
+    
+    if norm_root.lower() == norm_dir.lower():
+        return None
+
+    if norm_root.lower().startswith(norm_dir.lower() + "/"):
+        rel_path = norm_root[len(norm_dir) + 1:]
+    else:
+        try:
+            rel_path = os.path.relpath(root, photo_dir).replace("\\", "/")
+        except ValueError:
+            return None
+
+    if rel_path == "." or not rel_path:
+        return None
+    parts = [p for p in rel_path.split("/") if p and p != "."]
+    if not parts or any(is_recycle_name(p) for p in parts):
+        return None
+    return "/".join(parts)
+
+def extract_date_taken(filepath: str) -> Optional[datetime]:
+    """
+    Extract the date and time the photo or video was taken.
+    Checks:
+    1. EXIF metadata (DateTimeOriginal, DateTimeDigitized, DateTime) via Pillow.
+    2. Video creation_time tag via ffprobe.
+    3. Filename patterns containing YYYYMMDD or YYYY-MM-DD.
+    4. File filesystem birthtime / mtime.
+    """
+    if not filepath or not os.path.exists(filepath):
+        return None
+
+    ext = os.path.splitext(filepath)[1].lower()
+
+    # 1. EXIF metadata for images
+    if ext in (".jpg", ".jpeg", ".png", ".webp", ".heic", ".tiff"):
+        try:
+            from PIL import Image
+            with Image.open(filepath) as img:
+                exif = img.getexif()
+                if exif:
+                    date_str = None
+                    try:
+                        exif_ifd = exif.get_ifd(0x8769)
+                        if exif_ifd:
+                            date_str = exif_ifd.get(36867) or exif_ifd.get(36868)
+                    except Exception:
+                        pass
+                    if not date_str:
+                        date_str = exif.get(36867) or exif.get(36868) or exif.get(306)
+
+                    if date_str and isinstance(date_str, str):
+                        clean_str = date_str.strip().split("\x00")[0]
+                        parts = clean_str.split(" ")
+                        if len(parts) >= 1:
+                            date_part = parts[0].replace(":", "-")
+                            time_part = parts[1] if len(parts) > 1 else "00:00:00"
+                            time_part_clean = time_part.split("+")[0].split("-")[0].replace("Z", "")
+                            dt = datetime.fromisoformat(f"{date_part}T{time_part_clean}")
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            return dt
+        except Exception:
+            pass
+
+    # 2. Video creation_time via ffprobe
+    if ext in (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"):
+        try:
+            from .ffmpeg_setup import get_ffprobe_path
+            cmd = [
+                get_ffprobe_path(), "-v", "quiet",
+                "-print_format", "json",
+                "-show_entries", "format_tags=creation_time:stream_tags=creation_time",
+                filepath
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout:
+                data = json.loads(res.stdout)
+                c_time = None
+                if "format" in data and "tags" in data["format"]:
+                    c_time = data["format"]["tags"].get("creation_time")
+                if not c_time and "streams" in data:
+                    for s in data["streams"]:
+                        if "tags" in s and "creation_time" in s["tags"]:
+                            c_time = s["tags"]["creation_time"]
+                            break
+                if c_time:
+                    clean_iso = c_time.replace("Z", "").split(".")[0]
+                    dt = datetime.fromisoformat(clean_iso)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return dt
+        except Exception:
+            pass
+
+    # 3. Filename timestamp patterns (e.g. 20230814_123456 or 2023-08-14)
+    try:
+        fname = os.path.basename(filepath)
+        match = re.search(r'(20\d\d)[-_]?(0[1-9]|1[0-2])[-_]?(0[1-9]|[12]\d|3[01])', fname)
+        if match:
+            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            return datetime(year, month, day, tzinfo=timezone.utc)
+    except Exception:
+        pass
+
+    # 4. Filesystem timestamp
+    try:
+        st = os.stat(filepath)
+        file_time = st.st_mtime
+        if hasattr(st, "st_birthtime") and st.st_birthtime > 0:
+            file_time = min(st.st_mtime, st.st_birthtime)
+        return datetime.fromtimestamp(file_time, tz=timezone.utc)
+    except Exception:
+        return None
+
 
 # -----------------------------------------------------------------------------
 # Synchronous Helpers (Preserved for compatibility)
@@ -320,13 +475,144 @@ class ScannerManager:
         self.last_completed_time: float = 0.0
         self.last_summary: str = ""
         self._thread: Optional[threading.Thread] = None
+        self._abort_event = threading.Event()
+        self.scanned_volumes: set[str] = set()
+        self.scanned_types: set[str] = set()
+        self.last_validity_check: float = 0.0
+
+    def check_scan_necessary(self) -> bool:
+        """
+        Checks whether the currently running scan is still needed based on active volumes in the database.
+        If the scan is no longer necessary (e.g. volumes were removed, changed, or none exist),
+        it signals the scan to abort immediately and cleans up orphaned media.
+        Returns True if the scan is still needed/valid, False if it was cancelled or not scanning.
+        """
+        with self._lock:
+            if not self.is_scanning:
+                return False
+            now = time.time()
+            if now - self.last_validity_check < 3.0:
+                return not self._abort_event.is_set()
+            self.last_validity_check = now
+
+        try:
+            with Session(engine) as session:
+                active_vols = session.exec(select(VolumePath)).all()
+                active_paths = {v.path.replace("\\", "/").rstrip("/").lower() for v in active_vols if v.path}
+                active_types = {v.media_type for v in active_vols if v.media_type}
+
+            with self._lock:
+                if not self.is_scanning:
+                    return False
+
+                # 1. No volume paths configured in database
+                if not active_paths:
+                    print("[Scanner] No active volume paths configured in database. Aborting scan.")
+                    self._abort_event.set()
+                    self.action = "Scan cancelled (no volumes configured)"
+                    self.last_summary = "Scan was cancelled because all media libraries were removed."
+                    return False
+
+                # 2. Check if any volume currently being scanned was removed from DB
+                norm_scanned = {p.replace("\\", "/").rstrip("/").lower() for p in self.scanned_volumes if p}
+                removed_vols = norm_scanned - active_paths
+                if removed_vols:
+                    print(f"[Scanner] Scanned volume(s) removed from configuration ({removed_vols}). Aborting obsolete scan.")
+                    self._abort_event.set()
+                    self.action = "Scan cancelled (volume removed)"
+                    self.last_summary = "Scan was cancelled because a library volume was removed."
+                    return False
+
+                # 3. Check if current phase media type has been removed
+                if self.phase in ("movies", "tv", "photos"):
+                    type_map = {"movies": "movie", "tv": "tv", "photos": "photo"}
+                    curr_type = type_map.get(self.phase)
+                    if curr_type and curr_type not in active_types:
+                        print(f"[Scanner] No active volumes for phase '{self.phase}'. Aborting obsolete scan.")
+                        self._abort_event.set()
+                        self.action = f"Scan cancelled ({curr_type} library removed)"
+                        self.last_summary = f"Scan was cancelled because {curr_type} library was removed."
+                        return False
+
+                # 4. Check if any configured volume exists on disk
+                if not any(os.path.exists(v.path) for v in active_vols if v.path):
+                    print("[Scanner] None of the configured volume paths exist on disk. Aborting scan.")
+                    self._abort_event.set()
+                    self.action = "Scan cancelled (paths missing)"
+                    self.last_summary = "Scan was cancelled because library directories do not exist on disk."
+                    return False
+
+            return True
+        except Exception as e:
+            print(f"[Scanner] Error during scan necessity check: {e}")
+            return True
+
+    def abort_scan(self, reason: str = "Scan cancelled"):
+        """Requests immediate cancellation of any active background scan."""
+        with self._lock:
+            if not self.is_scanning:
+                return
+            self._abort_event.set()
+            self.action = reason
+            self.last_summary = reason
+            print(f"[Scanner] Abort requested: {reason}")
+
+    def _cleanup_orphans(self):
+        """Purge media items from the database that no longer belong to any active volume."""
+        with Session(engine) as session:
+            volume_paths = session.exec(select(VolumePath)).all()
+            movie_volume_paths = [v.path for v in volume_paths if v.media_type == "movie"]
+            tv_volume_paths = [v.path for v in volume_paths if v.media_type == "tv"]
+            photo_volume_paths = [v.path for v in volume_paths if v.media_type == "photo"]
+
+            raw_movies = session.exec(select(Movie.id, Movie.file_path)).all()
+            raw_shows = session.exec(select(TVShow.id, TVShow.file_path)).all()
+            raw_photos = session.exec(select(Photo.id, Photo.file_path)).all()
+
+        def is_valid(filepath, volumes):
+            if not filepath or not os.path.exists(filepath):
+                return False
+            if is_recycle_path(filepath):
+                return False
+            norm_filepath = filepath.replace("\\", "/").rstrip("/").lower()
+            for v in volumes:
+                norm_v = v.replace("\\", "/").rstrip("/").lower()
+                if norm_filepath == norm_v or norm_filepath.startswith(norm_v + "/"):
+                    return True
+                try:
+                    rel = os.path.relpath(filepath, v)
+                    if not rel.startswith(".."):
+                        return True
+                except ValueError:
+                    continue
+            return False
+
+        del_m_ids = [m_id for m_id, fpath in raw_movies if fpath and not fpath.startswith("remote_") and not is_valid(fpath, movie_volume_paths)]
+        del_t_ids = [t_id for t_id, fpath in raw_shows if fpath and not fpath.startswith("remote_") and not is_valid(fpath, tv_volume_paths)]
+        del_p_ids = [p_id for p_id, fpath in raw_photos if not fpath or not is_valid(fpath, photo_volume_paths)]
+
+        if del_m_ids or del_t_ids or del_p_ids:
+            with Session(engine) as session:
+                for m_id in del_m_ids:
+                    m = session.get(Movie, m_id)
+                    if m: session.delete(m)
+                for t_id in del_t_ids:
+                    t = session.get(TVShow, t_id)
+                    if t: session.delete(t)
+                for p_id in del_p_ids:
+                    p = session.get(Photo, p_id)
+                    if p: session.delete(p)
+                try:
+                    session.commit()
+                    print("[Scanner] Cleaned up orphaned media after scan cancellation.")
+                except Exception as e:
+                    session.rollback()
+                    print(f"[Scanner] Failed to commit orphan cleanup: {e}")
 
     def get_status(self) -> Dict[str, Any]:
-        """Returns JSON-serializable snapshot of current scanning progress."""
+        """Returns JSON-serializable snapshot of current scanning progress (100% in-memory)."""
         with self._lock:
             now = time.time()
-            recently_completed = (not self.is_scanning) and (now - self.last_completed_time < 5.0) and self.last_completed_time > 0
-
             short_status = "Idle"
             if self.is_scanning:
                 if self.total_items > 0:
@@ -337,8 +623,8 @@ class ScannerManager:
                     short_status = "Cleaning..."
                 else:
                     short_status = "Scanning..."
-            elif recently_completed:
-                short_status = "Scan Complete"
+            elif "cancelled" in self.action.lower():
+                short_status = "Cancelled"
 
             progress_pct = int((self.items_scanned / self.total_items) * 100) if (self.total_items > 0) else 0
 
@@ -351,7 +637,7 @@ class ScannerManager:
                 "total_items": self.total_items,
                 "progress_percent": progress_pct,
                 "short_status": short_status,
-                "recently_completed": recently_completed,
+                "recently_completed": False,
                 "last_summary": self.last_summary,
                 "elapsed_seconds": int(now - self.start_time) if self.is_scanning else 0
             }
@@ -360,7 +646,17 @@ class ScannerManager:
         """Triggers non-blocking background async library scan if not already running."""
         with self._lock:
             if self.is_scanning:
-                print("[Scanner] A scan is already running, skipping duplicate trigger.")
+                if self._abort_event.is_set() or not self.check_scan_necessary():
+                    print("[Scanner] Current scan is obsolete or aborting, waiting briefly to restart.")
+                else:
+                    print("[Scanner] A scan is already running, skipping duplicate trigger.")
+                    return False
+
+        if self._thread and self._thread.is_alive() and self._abort_event.is_set():
+            self._thread.join(timeout=1.0)
+
+        with self._lock:
+            if self.is_scanning:
                 return False
             self.is_scanning = True
             self.phase = "discovering"
@@ -369,6 +665,7 @@ class ScannerManager:
             self.items_scanned = 0
             self.total_items = 0
             self.start_time = time.time()
+            self._abort_event.clear()
 
         self._thread = threading.Thread(target=self._run_worker, daemon=True)
         self._thread.start()
@@ -384,8 +681,18 @@ class ScannerManager:
             with self._lock:
                 self.is_scanning = False
                 self.last_completed_time = time.time()
-                self.phase = "complete"
-                self.action = "Scan complete"
+                if self._abort_event.is_set():
+                    self.phase = "complete"
+                    if "cancelled" not in self.action.lower():
+                        self.action = "Scan cancelled"
+                else:
+                    self.phase = "complete"
+                    self.action = "Scan complete"
+            if self._abort_event.is_set():
+                try:
+                    self._cleanup_orphans()
+                except Exception as e:
+                    print(f"[Scanner] Error cleaning up orphans: {e}")
 
     async def _async_scan(self):
         """Main async scanning pipeline."""
@@ -403,33 +710,113 @@ class ScannerManager:
             existing_tv_paths = set(session.exec(select(TVShow.file_path)).all())
             existing_photos = {p.file_path: p.poster_filename for p in session.exec(select(Photo)).all()}
 
+        with self._lock:
+            self.scanned_volumes = set(movie_volume_paths + tv_volume_paths + photo_volume_paths)
+            self.scanned_types = {v.media_type for v in volume_paths if v.media_type}
+            self._abort_event.clear()
+
+        if not self.scanned_volumes:
+            with self._lock:
+                self.action = "No volumes configured"
+                self.last_summary = "No library volumes are configured to scan."
+            return
+
         def is_valid_path(filepath, volumes):
-            if not os.path.exists(filepath):
+            if not filepath or not os.path.exists(filepath):
                 return False
+            if is_recycle_path(filepath):
+                return False
+            norm_filepath = filepath.replace("\\", "/").rstrip("/")
             for v in volumes:
-                if filepath.startswith(v.rstrip('/') + '/'):
+                norm_v = v.replace("\\", "/").rstrip("/")
+                if norm_filepath.lower() == norm_v.lower() or norm_filepath.lower().startswith(norm_v.lower() + "/"):
                     return True
+                try:
+                    rel = os.path.relpath(filepath, v)
+                    if not rel.startswith(".."):
+                        return True
+                except ValueError:
+                    continue
             return False
 
-        # 2. Cleanup missing files from database
+        # 2. Cleanup missing files from database and reconcile albums
         with self._lock:
             self.phase = "cleanup"
             self.action = "Cleaning up removed files..."
 
         with Session(engine) as session:
-            for m in session.exec(select(Movie)).all():
-                if m.file_path and not m.file_path.startswith("remote_") and not is_valid_path(m.file_path, movie_volume_paths):
-                    session.delete(m)
-            for t in session.exec(select(TVShow)).all():
-                if t.file_path and not t.file_path.startswith("remote_") and not is_valid_path(t.file_path, tv_volume_paths):
-                    session.delete(t)
-            for p in session.exec(select(Photo)).all():
-                if p.file_path and not is_valid_path(p.file_path, photo_volume_paths):
-                    session.delete(p)
-            try:
-                session.commit()
-            except Exception:
-                session.rollback()
+            movie_records = session.exec(select(Movie.id, Movie.file_path)).all()
+            tv_records = session.exec(select(TVShow.id, TVShow.file_path)).all()
+            photo_records = session.exec(select(Photo.id, Photo.file_path, Photo.album, Photo.date_taken)).all()
+
+        del_movies = [m_id for m_id, fpath in movie_records if fpath and not fpath.startswith("remote_") and not is_valid_path(fpath, movie_volume_paths)]
+        del_tv = [t_id for t_id, fpath in tv_records if fpath and not fpath.startswith("remote_") and not is_valid_path(fpath, tv_volume_paths)]
+        del_photos = []
+        photo_updates = []
+
+        for p_id, p_fpath, p_alb, p_dt in photo_records:
+            if not p_fpath or not is_valid_path(p_fpath, photo_volume_paths):
+                del_photos.append(p_id)
+            else:
+                norm_p = p_fpath.replace("\\", "/").rstrip("/")
+                matched_vol = None
+                for v in photo_volume_paths:
+                    norm_v = v.replace("\\", "/").rstrip("/")
+                    if norm_p.lower().startswith(norm_v.lower() + "/"):
+                        matched_vol = v
+                        break
+                if not matched_vol:
+                    for v in photo_volume_paths:
+                        try:
+                            rel = os.path.relpath(p_fpath, v)
+                            if not rel.startswith(".."):
+                                matched_vol = v
+                                break
+                        except ValueError:
+                            continue
+                
+                target_album = None
+                if matched_vol:
+                    file_dir = os.path.dirname(p_fpath)
+                    new_alb = get_album_name(file_dir, matched_vol)
+                    if p_alb != new_alb:
+                        target_album = new_alb
+                
+                new_dt = None
+                if p_dt is None and os.path.exists(p_fpath):
+                    extracted = extract_date_taken(p_fpath)
+                    if extracted:
+                        new_dt = extracted
+
+                if target_album is not None or new_dt is not None:
+                    photo_updates.append((p_id, target_album, new_dt))
+
+        if del_movies or del_tv or del_photos or photo_updates:
+            with Session(engine) as session:
+                for m_id in del_movies:
+                    m = session.get(Movie, m_id)
+                    if m: session.delete(m)
+                for t_id in del_tv:
+                    t = session.get(TVShow, t_id)
+                    if t: session.delete(t)
+                for p_id in del_photos:
+                    p = session.get(Photo, p_id)
+                    if p: session.delete(p)
+                for p_id, target_alb, new_dt in photo_updates:
+                    p = session.get(Photo, p_id)
+                    if p:
+                        if target_alb is not None:
+                            p.album = target_alb
+                        if new_dt is not None:
+                            p.date_taken = new_dt
+                        session.add(p)
+                try:
+                    session.commit()
+                except Exception as e:
+                    session.rollback()
+                    print(f"[Scanner] Error committing cleanup/reconciliation: {e}")
+
+        await asyncio.sleep(0.05)
 
         # 3. Quick Discovery Phase (Thread-offloaded os.walk)
         with self._lock:
@@ -437,39 +824,70 @@ class ScannerManager:
             self.action = "Discovering new media files..."
 
         def _discover_candidates():
+            if self._abort_event.is_set():
+                return [], [], []
             new_movies = []
             for movies_dir in movie_volume_paths:
+                if self._abort_event.is_set():
+                    return [], [], []
                 if os.path.exists(movies_dir):
                     for root, dirs, files in os.walk(movies_dir):
+                        dirs[:] = [d for d in dirs if not is_recycle_name(d)]
+                        if is_recycle_path(root):
+                            continue
                         for file in files:
+                            if is_recycle_name(file):
+                                continue
                             if file.lower().endswith(VIDEO_EXTENSIONS):
                                 full_path = os.path.join(root, file)
+                                if is_recycle_path(full_path):
+                                    continue
                                 if full_path not in existing_movie_paths:
                                     new_movies.append((full_path, file))
 
             new_shows = []
             for tv_dir in tv_volume_paths:
+                if self._abort_event.is_set():
+                    return [], [], []
                 if os.path.exists(tv_dir):
                     for root, dirs, files in os.walk(tv_dir):
+                        dirs[:] = [d for d in dirs if not is_recycle_name(d)]
+                        if is_recycle_path(root):
+                            continue
                         for file in files:
+                            if is_recycle_name(file):
+                                continue
                             if file.lower().endswith(VIDEO_EXTENSIONS):
                                 full_path = os.path.join(root, file)
+                                if is_recycle_path(full_path):
+                                    continue
                                 if full_path not in existing_tv_paths:
                                     new_shows.append((full_path, file, root, tv_dir))
 
             new_photos = []
             for photo_dir in photo_volume_paths:
+                if self._abort_event.is_set():
+                    return [], [], []
                 if os.path.exists(photo_dir):
                     for root, dirs, files in os.walk(photo_dir):
+                        dirs[:] = [d for d in dirs if not is_recycle_name(d)]
+                        if is_recycle_path(root):
+                            continue
                         for file in files:
+                            if is_recycle_name(file):
+                                continue
                             if file.lower().endswith(PHOTO_EXTENSIONS):
                                 full_path = os.path.join(root, file)
+                                if is_recycle_path(full_path):
+                                    continue
                                 if full_path not in existing_photos or not existing_photos.get(full_path):
                                     new_photos.append((full_path, file, root, photo_dir))
 
             return new_movies, new_shows, new_photos
 
         new_movies, new_shows, new_photos = await asyncio.to_thread(_discover_candidates)
+        if self._abort_event.is_set() or not self.check_scan_necessary():
+            return
         total_items = len(new_movies) + len(new_shows) + len(new_photos)
 
         with self._lock:
@@ -497,7 +915,11 @@ class ScannerManager:
         async with get_http_client() as client:
 
             # 4A. Scan Movies
+            batch_movies = []
             for full_path, file in new_movies:
+                if self._abort_event.is_set() or not self.check_scan_necessary():
+                    print("[Scanner] Aborting movie processing loop.")
+                    break
                 raw_title = os.path.splitext(file)[0]
                 with self._lock:
                     self.phase = "movies"
@@ -537,28 +959,49 @@ class ScannerManager:
 
                 intro_s, intro_e, cred_s, cred_e = await async_extract_chapter_markers(full_path)
 
-                with Session(engine) as session:
-                    if not session.exec(select(Movie).where(Movie.file_path == full_path)).first():
-                        new_movie = Movie(
-                            title=search_title, file_path=full_path, year=year,
-                            plot=plot, poster_filename=poster_filename,
-                            backdrop_filename=backdrop_filename, cast=cast, director=director, rating=rating,
-                            content_rating=content_rating, genres=genres_str,
-                            intro_start=intro_s, intro_end=intro_e, credits_start=cred_s, credits_end=cred_e
-                        )
-                        session.add(new_movie)
+                batch_movies.append(Movie(
+                    title=search_title, file_path=full_path, year=year,
+                    plot=plot, poster_filename=poster_filename,
+                    backdrop_filename=backdrop_filename, cast=cast, director=director, rating=rating,
+                    content_rating=content_rating, genres=genres_str,
+                    intro_start=intro_s, intro_end=intro_e, credits_start=cred_s, credits_end=cred_e
+                ))
+
+                with self._lock:
+                    self.items_scanned += 1
+
+                if len(batch_movies) >= 10:
+                    with Session(engine) as session:
+                        for m in batch_movies:
+                            if not session.exec(select(Movie.id).where(Movie.file_path == m.file_path)).first():
+                                session.add(m)
                         try:
                             session.commit()
                         except Exception as e:
                             session.rollback()
-                            print(f"[Scanner] Skipping duplicate or failed movie {full_path}: {e}")
+                            print(f"[Scanner] Error committing movie batch: {e}")
+                    batch_movies.clear()
+                    await asyncio.sleep(0.05)
 
-                with self._lock:
-                    self.items_scanned += 1
-                await asyncio.sleep(0.01)
+            if batch_movies:
+                with Session(engine) as session:
+                    for m in batch_movies:
+                        if not session.exec(select(Movie.id).where(Movie.file_path == m.file_path)).first():
+                            session.add(m)
+                    try:
+                        session.commit()
+                    except Exception as e:
+                        session.rollback()
+                        print(f"[Scanner] Error committing final movie batch: {e}")
+                batch_movies.clear()
+                await asyncio.sleep(0.05)
 
             # 4B. Scan TV Shows
+            batch_shows = []
             for full_path, file, root, tv_dir in new_shows:
+                if self._abort_event.is_set() or not self.check_scan_necessary():
+                    print("[Scanner] Aborting TV processing loop.")
+                    break
                 raw_title = os.path.splitext(file)[0]
                 with self._lock:
                     self.phase = "tv"
@@ -633,78 +1076,150 @@ class ScannerManager:
 
                 intro_s, intro_e, cred_s, cred_e = await async_extract_chapter_markers(full_path)
 
-                with Session(engine) as session:
-                    if not session.exec(select(TVShow).where(TVShow.file_path == full_path)).first():
-                        new_show = TVShow(
-                            title=search_title, file_path=full_path, year=year,
-                            plot=plot, poster_filename=poster_filename,
-                            backdrop_filename=backdrop_filename, cast=cast, director=director, rating=rating,
-                            season=season, episode=episode, season_poster_filename=season_poster_filename,
-                            content_rating=content_rating, genres=genres_str,
-                            intro_start=intro_s, intro_end=intro_e, credits_start=cred_s, credits_end=cred_e
-                        )
-                        session.add(new_show)
+                batch_shows.append(TVShow(
+                    title=search_title, file_path=full_path, year=year,
+                    plot=plot, poster_filename=poster_filename,
+                    backdrop_filename=backdrop_filename, cast=cast, director=director, rating=rating,
+                    season=season, episode=episode, season_poster_filename=season_poster_filename,
+                    content_rating=content_rating, genres=genres_str,
+                    intro_start=intro_s, intro_end=intro_e, credits_start=cred_s, credits_end=cred_e
+                ))
+
+                with self._lock:
+                    self.items_scanned += 1
+
+                if len(batch_shows) >= 20:
+                    with Session(engine) as session:
+                        for s in batch_shows:
+                            if not session.exec(select(TVShow.id).where(TVShow.file_path == s.file_path)).first():
+                                session.add(s)
                         try:
                             session.commit()
                         except Exception as e:
                             session.rollback()
-                            print(f"[Scanner] Skipping duplicate or failed TV show {full_path}: {e}")
+                            print(f"[Scanner] Error committing TV batch: {e}")
+                    batch_shows.clear()
+                    await asyncio.sleep(0.05)
 
-                with self._lock:
-                    self.items_scanned += 1
-                await asyncio.sleep(0.01)
+            if batch_shows:
+                with Session(engine) as session:
+                    for s in batch_shows:
+                        if not session.exec(select(TVShow.id).where(TVShow.file_path == s.file_path)).first():
+                            session.add(s)
+                    try:
+                        session.commit()
+                    except Exception as e:
+                        session.rollback()
+                        print(f"[Scanner] Error committing final TV batch: {e}")
+                batch_shows.clear()
+                await asyncio.sleep(0.05)
 
             # 4C. Scan Photos & Home Videos
+            batch_photos = []
             for full_path, file, root, photo_dir in new_photos:
+                if self._abort_event.is_set() or not self.check_scan_necessary():
+                    print("[Scanner] Aborting photo processing loop.")
+                    break
                 raw_title = os.path.splitext(file)[0]
                 with self._lock:
                     self.phase = "photos"
                     self.action = f"Scanning Photos ({self.items_scanned + 1}/{self.total_items})"
                     self.current_item = raw_title
 
-                rel_path = os.path.relpath(root, photo_dir)
-                album = rel_path if rel_path != "." else None
+                if is_recycle_path(full_path):
+                    continue
 
-                with Session(engine) as session:
-                    existing = session.exec(select(Photo).where(Photo.file_path == full_path)).first()
-                    if not existing:
-                        photo_obj = Photo(title=raw_title, file_path=full_path, album=album)
-                        session.add(photo_obj)
-                        try:
-                            session.commit()
-                            session.refresh(photo_obj)
-                        except Exception as e:
-                            session.rollback()
-                            print(f"[Scanner] Skipping duplicate photo record {full_path}: {e}")
-                            with self._lock:
-                                self.items_scanned += 1
-                            continue
-                    else:
-                        photo_obj = existing
-                        photo_obj.album = album
+                album = get_album_name(root, photo_dir)
+                date_taken = await asyncio.to_thread(extract_date_taken, full_path)
 
-                    photo_id = photo_obj.id
-
-                thumb_filename = f"photo_{photo_id}_poster.jpg"
+                path_hash = hashlib.md5(full_path.encode('utf-8')).hexdigest()[:16]
+                thumb_filename = f"photo_{path_hash}_poster.jpg"
                 thumb_path = os.path.join(METADATA_DIR, thumb_filename)
                 ext = os.path.splitext(file)[1].lower()
                 is_video = ext in (".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm")
 
-                success = await asyncio.to_thread(_generate_photo_thumbnail, full_path, thumb_path, is_video)
-                if success:
-                    with Session(engine) as session:
-                        p = session.get(Photo, photo_id)
-                        if p:
-                            p.poster_filename = thumb_filename
-                            session.add(p)
-                            try:
-                                session.commit()
-                            except Exception:
-                                session.rollback()
+                if not os.path.exists(thumb_path):
+                    success = await asyncio.to_thread(_generate_photo_thumbnail, full_path, thumb_path, is_video)
+                    poster_fn = thumb_filename if success else None
+                else:
+                    poster_fn = thumb_filename
+
+                batch_photos.append({
+                    "title": raw_title,
+                    "file_path": full_path,
+                    "album": album,
+                    "date_taken": date_taken,
+                    "poster_filename": poster_fn
+                })
 
                 with self._lock:
                     self.items_scanned += 1
-                await asyncio.sleep(0.01)
+
+                if len(batch_photos) >= 30:
+                    with Session(engine) as session:
+                        for p_data in batch_photos:
+                            existing = session.exec(select(Photo).where(Photo.file_path == p_data["file_path"])).first()
+                            if not existing:
+                                session.add(Photo(
+                                    title=p_data["title"],
+                                    file_path=p_data["file_path"],
+                                    album=p_data["album"],
+                                    date_taken=p_data["date_taken"],
+                                    poster_filename=p_data["poster_filename"]
+                                ))
+                            else:
+                                dirty = False
+                                if existing.album != p_data["album"]:
+                                    existing.album = p_data["album"]
+                                    dirty = True
+                                if p_data["date_taken"] and existing.date_taken != p_data["date_taken"]:
+                                    existing.date_taken = p_data["date_taken"]
+                                    dirty = True
+                                if p_data["poster_filename"] and existing.poster_filename != p_data["poster_filename"]:
+                                    existing.poster_filename = p_data["poster_filename"]
+                                    dirty = True
+                                if dirty:
+                                    session.add(existing)
+                        try:
+                            session.commit()
+                        except Exception as e:
+                            session.rollback()
+                            print(f"[Scanner] Error committing photo batch: {e}")
+                    batch_photos.clear()
+                    await asyncio.sleep(0.05)
+
+            if batch_photos:
+                with Session(engine) as session:
+                    for p_data in batch_photos:
+                        existing = session.exec(select(Photo).where(Photo.file_path == p_data["file_path"])).first()
+                        if not existing:
+                            session.add(Photo(
+                                title=p_data["title"],
+                                file_path=p_data["file_path"],
+                                album=p_data["album"],
+                                date_taken=p_data["date_taken"],
+                                poster_filename=p_data["poster_filename"]
+                            ))
+                        else:
+                            dirty = False
+                            if existing.album != p_data["album"]:
+                                existing.album = p_data["album"]
+                                dirty = True
+                            if p_data["date_taken"] and existing.date_taken != p_data["date_taken"]:
+                                existing.date_taken = p_data["date_taken"]
+                                dirty = True
+                            if p_data["poster_filename"] and existing.poster_filename != p_data["poster_filename"]:
+                                existing.poster_filename = p_data["poster_filename"]
+                                dirty = True
+                            if dirty:
+                                session.add(existing)
+                    try:
+                        session.commit()
+                    except Exception as e:
+                        session.rollback()
+                        print(f"[Scanner] Error committing final photo batch: {e}")
+                batch_photos.clear()
+                await asyncio.sleep(0.05)
 
         with self._lock:
             self.action = "Scan complete"

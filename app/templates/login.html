@@ -11,16 +11,18 @@
 
 <body class="center-screen">
     <div class="setup-box">
-        <h1>Login</h1>
+        <h1 class="m-0">Login</h1>
         <form action="/login" method="post" class="text-left" id="loginForm">
             <label for="username">Username</label>
             <input type="text" name="username" id="username" style="margin-bottom: 15px;" required>
             <label for="password">Password</label>
-            <div class="password-wrapper" style="margin-bottom: 15px;">
-                <input type="password" name="password" id="password" required>
-                <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('password', 'loginPasswordIcon')" title="Toggle visibility">
-                    <i data-lucide="eye" id="loginPasswordIcon"></i>
-                </button>
+            <div style="position: relative; margin-bottom: 15px;">
+                <input type="password" name="password" id="password" required
+                    class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
+                <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
+                    onclick="toggleVisibility('password', 'togglePasswordBtn')">
+                    <i data-lucide="eye" id="togglePasswordBtn"></i>
+                </div>
             </div>
             <button type="submit" class="btn w-full">Sign In</button>
         </form>
@@ -72,7 +74,7 @@
             document.getElementById('forgotForm').style.display = 'none';
         }
 
-        function togglePasswordVisibility(inputId, iconId) {
+        function toggleVisibility(inputId, iconId) {
             const input = document.getElementById(inputId);
             const icon = document.getElementById(iconId);
             if (!input || !icon) return;
@@ -85,6 +87,7 @@
             }
             if (window.lucide) lucide.createIcons();
         }
+        const togglePasswordVisibility = toggleVisibility;
 
         if (window.lucide) lucide.createIcons();
     </script>

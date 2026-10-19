@@ -76,6 +76,7 @@ class Photo(SQLModel, table=True):
     title: str
     file_path: str = Field(unique=True)
     date_added: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    date_taken: Optional[datetime] = None
     album: Optional[str] = None
     poster_filename: Optional[str] = None
 
@@ -122,6 +123,7 @@ class SystemConfig(SQLModel, table=True):
 class WatchSession(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     host_id: int = Field(foreign_key="user.id")
+    host_profile_id: Optional[int] = Field(default=None, foreign_key="profile.id")
     media_type: str
     item_id: int
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -131,7 +133,9 @@ class WatchInvite(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     session_id: str = Field(foreign_key="watchsession.id")
     sender_id: int = Field(foreign_key="user.id")
+    sender_profile_id: Optional[int] = Field(default=None, foreign_key="profile.id")
     invited_user_id: int = Field(foreign_key="user.id")
+    invited_profile_id: Optional[int] = Field(default=None, foreign_key="profile.id")
     status: str = Field(default="pending")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

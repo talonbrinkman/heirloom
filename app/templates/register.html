@@ -21,19 +21,23 @@
                 <input type="text" name="username" id="username" required autocomplete="off">
                 
                 <label for="password">Choose a Password</label>
-                <div class="password-wrapper" style="margin-bottom: 15px;">
-                    <input type="password" name="password" id="password" required>
-                    <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('password', 'togglePasswordIcon')" title="Toggle visibility">
-                        <i data-lucide="eye" id="togglePasswordIcon"></i>
-                    </button>
+                <div style="position: relative;">
+                    <input type="password" name="password" id="password" required
+                        class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
+                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
+                        onclick="toggleVisibility('password', 'togglePasswordBtn')">
+                        <i data-lucide="eye" id="togglePasswordBtn"></i>
+                    </div>
                 </div>
 
                 <label for="confirm_password">Confirm Password</label>
-                <div class="password-wrapper" style="margin-bottom: 15px;">
-                    <input type="password" name="confirm_password" id="confirm_password" required>
-                    <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('confirm_password', 'toggleConfirmIcon')" title="Toggle visibility">
-                        <i data-lucide="eye" id="toggleConfirmIcon"></i>
-                    </button>
+                <div style="position: relative;">
+                    <input type="password" name="confirm_password" id="confirm_password" required
+                        class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
+                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
+                        onclick="toggleVisibility('confirm_password', 'toggleConfirmPasswordBtn')">
+                        <i data-lucide="eye" id="toggleConfirmPasswordBtn"></i>
+                    </div>
                 </div>
                 
                 <button type="submit" class="btn w-full" style="margin-top: 10px;">Create Account</button>
@@ -50,10 +54,9 @@
                 notice.style.display = 'block';
             }
 
-            function togglePasswordVisibility(inputId, iconId) {
+            function toggleVisibility(inputId, btnId) {
                 const input = document.getElementById(inputId);
-                const icon = document.getElementById(iconId);
-                if (!input || !icon) return;
+                const icon = document.getElementById(btnId);
                 if (input.type === 'password') {
                     input.type = 'text';
                     icon.setAttribute('data-lucide', 'eye-off');

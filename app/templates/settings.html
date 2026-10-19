@@ -75,6 +75,14 @@
                 });
                 if (res.ok) {
                     flashButton(btn, "Saved!", 3000);
+                    const pwInput = form.querySelector('#newPasswordInput') || form.querySelector('input[type="password"]');
+                    if (pwInput) {
+                        pwInput.value = '';
+                        pwInput.type = 'password';
+                        const toggleBtn = document.getElementById('togglePasswordBtn');
+                        if (toggleBtn) toggleBtn.setAttribute('data-lucide', 'eye');
+                        if (window.lucide) lucide.createIcons();
+                    }
                 } else {
                     console.error("Save failed:", res.statusText);
                 }
@@ -274,6 +282,23 @@
                 if (btn) flashButton(btn, "Saved!", 3000);
                 window.history.replaceState({}, document.title, window.location.pathname);
             }
+            if (urlParams.get('pw_success')) {
+                const btn = document.querySelector('form[action="/settings/change_password"] button[type="submit"]');
+                if (btn) flashButton(btn, "Saved!", 3000);
+                window.history.replaceState({}, document.title, window.location.pathname);
+            }
+
+            // Auto-detect matching volume path for default selection only if not already added and pathInput is empty
+            const pathInput = document.getElementById('pathInput');
+            if (pathInput && !pathInput.value.trim() && !isMediaTypeAdded('movie')) {
+                fetch('/api/suggest_volume_path?media_type=movie')
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data && data.suggested_path && pathInput && !pathInput.value.trim()) {
+                            pathInput.value = data.suggested_path;
+                        }
+                    }).catch(() => {});
+            }
 
             // Prevent spamming / double-submitting standard forms
             document.addEventListener('submit', (e) => {
@@ -305,13 +330,37 @@
             document.getElementById('mediaTypeMenu').classList.toggle('show');
         }
 
-        function selectMediaType(value, label) {
+        function isMediaTypeAdded(type) {
+            return Boolean(document.querySelector(`.volume-list-item[data-media-type="${type}"]`));
+        }
+
+        async function selectMediaType(value, label) {
             document.getElementById('mediaTypeInput').value = value;
             document.getElementById('mediaTypeBtn').innerHTML = label + ' <i data-lucide="chevron-down"></i>';
             document.getElementById('mediaTypeMenu').classList.remove('show');
             document.querySelectorAll('#mediaTypeMenu .res-btn').forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
+            if (event && event.target) event.target.classList.add('active');
             if (window.lucide) lucide.createIcons();
+
+            // Do not query or auto-populate if a volume for this media type has already been added
+            if (isMediaTypeAdded(value)) {
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/suggest_volume_path?media_type=' + encodeURIComponent(value));
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data && data.suggested_path) {
+                        const pathInput = document.getElementById('pathInput');
+                        if (pathInput) {
+                            pathInput.value = data.suggested_path;
+                        }
+                    }
+                }
+            } catch (err) {
+                console.debug("Failed to suggest volume path:", err);
+            }
         }
 
         function setRewindPreset(seconds) {
@@ -331,25 +380,29 @@
 </head>
 
 <body>
-    <div class="container">
-        <div class="header flex justify-start gap-15">
+    <div class="header flex justify-between align-center">
+        <div class="flex align-center gap-15">
             <a href="/" class="icon-link" title="Home">
                 <i data-lucide="arrow-left"></i>
             </a>
             <h1 class="m-0" style="font-size: 1.5rem;">Settings</h1>
         </div>
-
+        {% if is_admin %}
+        <a href="/server-dashboard" id="serverActivityBadge" class="server-activity-badge" style="display: none;" title="Server Action">
+            <span class="activity-pulse-dot"></span>
+            <span id="serverActivityText">Scanning...</span>
+        </a>
+        {% endif %}
+    </div>
+    
+    <div class="container">
         {% if can_change_password %}
         <div class="card">
             <div class="card-header">
                 <h2 class="m-0">My Account, {{ user.username }}</h2>
             </div>
 
-            {% if request.query_params.get("pw_success") %}
-            <div style="color: #4caf50; margin-bottom: 15px; font-weight: bold;">Password changed successfully!</div>
-            {% endif %}
-
-            <form action="/settings/change_password" method="post" class="flex gap-10 align-center m-0">
+            <form action="/settings/change_password" method="post" onsubmit="submitSaveForm(event)" class="flex gap-10 align-center m-0">
                 <div class="flex-1" style="position: relative;">
                     <input type="password" name="new_password" id="newPasswordInput" placeholder="New Password" required
                         class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
@@ -421,7 +474,7 @@
 
             <ul>
                 {% for vp in volume_paths %}
-                <li class="list-item volume-list-item">
+                <li class="list-item volume-list-item" data-media-type="{{ vp.raw_media_type }}">
                     <div class="flex gap-10 align-center volume-info">
                         {% if vp.exists %}
                         <span class="code-text badge-active" style="text-transform: uppercase;" title="Active">{{
@@ -623,7 +676,7 @@
             </form>
         </div>
         <div style="text-align: center; color: #888; font-size: 0.8em; margin-top: 10px;">
-            <strong>v1.1.0</strong>
+            <strong>v1.2.0</strong>
         </div>
     </div>
 
@@ -649,6 +702,52 @@
     </div>
     <script src="/static/lucide.min.js"></script>
     <script>lucide.createIcons();</script>
+    {% if is_admin %}
+    <script>
+        (function initSettingsActivityMonitor() {
+            const badge = document.getElementById('serverActivityBadge');
+            const textEl = document.getElementById('serverActivityText');
+            if (!badge || !textEl) return;
+
+            let pollDelay = 3000;
+            let timer = null;
+
+            async function checkActivity() {
+                if (document.hidden) {
+                    timer = setTimeout(checkActivity, 5000);
+                    return;
+                }
+                try {
+                    const res = await fetch('/api/scanner/status');
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data.is_scanning && data.total_items > 0) {
+                            badge.style.display = 'inline-flex';
+                            badge.classList.remove('complete');
+                            textEl.textContent = data.short_status || `Scanning (${data.items_scanned}/${data.total_items})`;
+                            badge.title = data.current_item ? `${data.action}: ${data.current_item}` : (data.action || 'Library scan in progress');
+                            pollDelay = 3000;
+                        } else {
+                            badge.style.display = 'none';
+                            badge.classList.remove('complete');
+                            pollDelay = data.is_scanning ? 3000 : 8000;
+                        }
+                    } else {
+                        badge.style.display = 'none';
+                        pollDelay = 10000;
+                    }
+                } catch (e) {
+                    badge.style.display = 'none';
+                    pollDelay = 10000;
+                } finally {
+                    timer = setTimeout(checkActivity, pollDelay);
+                }
+            }
+
+            checkActivity();
+        })();
+    </script>
+    {% endif %}
 </body>
 
 </html>

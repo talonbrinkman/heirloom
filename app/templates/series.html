@@ -16,7 +16,7 @@
             <div class="flex gap-15 align-center">
                 <div class="inbox">
                     <a href="#" class="icon-link" id="inboxBtn" onclick="toggleInbox(event)" title="Inbox">
-                        <i data-lucide="inbox"></i>
+                        <i data-lucide="bell"></i>
                         <span id="inboxBadge" class="inbox-badge" style="display: none;"></span>
                     </a>
                     <div id="inboxMenu" class="dropdown-menu inbox-menu" style="display: none;">
@@ -128,9 +128,16 @@
                             {% endif %}
                             
                             {% if user.downloads_access %}
-                            <a href="/download/tv/{{ series.id }}" class="play-btn m-0" download title="Download">
+                            {% set current_ep = (series.episode if series.episode else (selected_ep_dict.episode if selected_ep_dict and selected_ep_dict.episode else 1)) %}
+                            {% set current_season = (selected_ep_dict.season if (selected_ep_dict and selected_ep_dict.season is not none) else (series.season if series.season is not none else 1)) %}
+                            <button type="button" class="play-btn m-0" id="seriesDownloadBtn" onclick="toggleMenu(event, 'series-download-menu')" title="Download">
                                 <i data-lucide="arrow-down-to-line" fill="none"></i>
-                            </a>
+                            </button>
+                            <div class="dropdown-menu" id="series-download-menu">
+                                <button type="button" id="downloadEpisodeBtn" onclick="downloadThisEpisode()">{% if current_season == 0 %}Download Specials Episode {{ current_ep }}{% else %}Download Season {{ current_season }} Episode {{ current_ep }}{% endif %}</button>
+                                <button type="button" id="downloadSeasonBtn" onclick="downloadThisSeason()">{% if current_season == 0 %}Download Specials{% else %}Download Season {{ current_season }}{% endif %}</button>
+                                <button type="button" onclick="downloadEntireShow()">Download {{ title }}</button>
+                            </div>
                             {% endif %}
                             
                             {% if user.watch_together_access %}
@@ -247,6 +254,11 @@
                     }
                 });
 
+                const downloadSeasonBtn = document.getElementById('downloadSeasonBtn');
+                if (downloadSeasonBtn) {
+                    downloadSeasonBtn.textContent = season === 0 ? 'Download Specials' : `Download Season ${season}`;
+                }
+
                 filterEpisodes();
             }
 
@@ -344,8 +356,11 @@
                         const viewportWidth = window.innerWidth;
                         const viewportHeight = window.innerHeight;
 
-                        // Align right edge of menu with right edge of button by default
-                        let left = btnRect.right - menuWidth;
+                        // Align right edge of menu with right edge of button for three-dots button,
+                        // or left edge of button for standard buttons like download
+                        let left = event.currentTarget.classList.contains('three-dots-btn')
+                            ? (btnRect.right - menuWidth)
+                            : btnRect.left;
                         // Prevent spilling off the left edge on mobile (keep 10px margin)
                         if (left < 10) {
                             left = 10;
@@ -372,12 +387,28 @@
             }
 
             document.addEventListener('click', function (event) {
-                if (!event.target.closest('.dropdown-menu') && !event.target.closest('.three-dots-btn')) {
+                if (!event.target.closest('.dropdown-menu') && !event.target.closest('.three-dots-btn') && !event.target.closest('#seriesDownloadBtn')) {
                     document.querySelectorAll('.dropdown-menu.show').forEach(menu => {
                         menu.classList.remove('show');
                     });
                 }
             });
+
+            function downloadThisEpisode() {
+                document.querySelectorAll('.dropdown-menu.show').forEach(menu => menu.classList.remove('show'));
+                window.location.href = '/download/tv/{{ series.id }}';
+            }
+
+            function downloadThisSeason() {
+                document.querySelectorAll('.dropdown-menu.show').forEach(menu => menu.classList.remove('show'));
+                let s = (typeof currentSeason !== 'undefined' && currentSeason !== -1) ? currentSeason : {{ selected_ep_dict.season if selected_ep_dict and selected_ep_dict.season is not none else (series.season if series.season is not none else 1) }};
+                window.location.href = `/download/tv/season/{{ series.id }}?season=${s}`;
+            }
+
+            function downloadEntireShow() {
+                document.querySelectorAll('.dropdown-menu.show').forEach(menu => menu.classList.remove('show'));
+                window.location.href = '/download/tv/show/{{ series.id }}';
+            }
         </script>
         <script src="/static/lucide.min.js"></script>
         <script>lucide.createIcons();</script>
@@ -505,15 +536,32 @@
             const res = await fetch(`/api/users/eligible?media_type=${mediaType}`);
             const users = await res.json();
             
+            const householdUsers = users.filter(u => u.category === 'Household' || u.tag === 'Household');
+            const sharedUsers = users.filter(u => u.category === 'Shared' || u.tag === 'Shared');
+
             if (users.length === 0) {
                 userList.innerHTML = '<div class="empty-state">No eligible users found. Make sure they have Watch Together and library access enabled in settings.</div>';
             } else {
-                userList.innerHTML = users.map(u => `
-                    <label class="toggle-pill">
-                        <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
-                        <span>${u.username}</span>
-                    </label>
-                `).join('');
+                let html = '';
+                if (householdUsers.length > 0) {
+                    html += '<div class="wt-group-title">Household</div>';
+                    html += householdUsers.map(u => `
+                        <label class="toggle-pill">
+                            <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
+                            <span>${u.username}</span>
+                        </label>
+                    `).join('');
+                }
+                if (sharedUsers.length > 0) {
+                    html += '<div class="wt-group-title">Shared</div>';
+                    html += sharedUsers.map(u => `
+                        <label class="toggle-pill">
+                            <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
+                            <span>${u.username}</span>
+                        </label>
+                    `).join('');
+                }
+                userList.innerHTML = html;
             }
         } catch (err) {
             console.error(err);
@@ -523,7 +571,7 @@
     
         async function startWatchTogether() {
             const checkboxes = document.querySelectorAll('.wt-user-checkbox:checked');
-            const userIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+            const targetIds = Array.from(checkboxes).map(cb => cb.value);
             
             try {
                 const res = await fetch('/watch_together/create', {
@@ -532,7 +580,8 @@
                     body: JSON.stringify({
                         media_type: wtCurrentMedia.type,
                         item_id: wtCurrentMedia.id,
-                        invited_user_ids: userIds
+                        invited_user_ids: targetIds,
+                        invited_targets: targetIds
                     })
                 });
                 const data = await res.json();

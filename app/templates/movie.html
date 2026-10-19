@@ -16,7 +16,7 @@
             <div class="flex gap-15 align-center">
                 <div class="inbox">
                     <a href="#" class="icon-link" id="inboxBtn" onclick="toggleInbox(event)" title="Inbox">
-                        <i data-lucide="inbox"></i>
+                        <i data-lucide="bell"></i>
                         <span id="inboxBadge" class="inbox-badge" style="display: none;"></span>
                     </a>
                     <div id="inboxMenu" class="dropdown-menu inbox-menu" style="display: none;">
@@ -282,15 +282,32 @@
             const res = await fetch(`/api/users/eligible?media_type=${mediaType}`);
             const users = await res.json();
             
+            const householdUsers = users.filter(u => u.category === 'Household' || u.tag === 'Household');
+            const sharedUsers = users.filter(u => u.category === 'Shared' || u.tag === 'Shared');
+
             if (users.length === 0) {
                 userList.innerHTML = '<div class="empty-state">No eligible users found. Make sure they have Watch Together and library access enabled in settings.</div>';
             } else {
-                userList.innerHTML = users.map(u => `
-                    <label class="toggle-pill">
-                        <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
-                        <span>${u.username}</span>
-                    </label>
-                `).join('');
+                let html = '';
+                if (householdUsers.length > 0) {
+                    html += '<div class="wt-group-title">Household</div>';
+                    html += householdUsers.map(u => `
+                        <label class="toggle-pill">
+                            <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
+                            <span>${u.username}</span>
+                        </label>
+                    `).join('');
+                }
+                if (sharedUsers.length > 0) {
+                    html += '<div class="wt-group-title">Shared</div>';
+                    html += sharedUsers.map(u => `
+                        <label class="toggle-pill">
+                            <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
+                            <span>${u.username}</span>
+                        </label>
+                    `).join('');
+                }
+                userList.innerHTML = html;
             }
         } catch (err) {
             console.error(err);
@@ -300,7 +317,7 @@
     
         async function startWatchTogether() {
             const checkboxes = document.querySelectorAll('.wt-user-checkbox:checked');
-            const userIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+            const targetIds = Array.from(checkboxes).map(cb => cb.value);
             
             try {
                 const res = await fetch('/watch_together/create', {
@@ -309,7 +326,8 @@
                     body: JSON.stringify({
                         media_type: wtCurrentMedia.type,
                         item_id: wtCurrentMedia.id,
-                        invited_user_ids: userIds
+                        invited_user_ids: targetIds,
+                        invited_targets: targetIds
                     })
                 });
                 const data = await res.json();

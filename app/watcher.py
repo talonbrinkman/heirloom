@@ -5,7 +5,7 @@ from watchdog.events import FileSystemEventHandler
 from sqlmodel import Session, select
 from .database import engine
 from .models import VolumePath
-from .scanner import scan_media_library, VIDEO_EXTENSIONS
+from .scanner import scan_media_library, VIDEO_EXTENSIONS, PHOTO_EXTENSIONS, is_recycle_path
 
 class ScannerDebouncer:
     def __init__(self, delay=3.0):
@@ -30,16 +30,25 @@ scanner_debouncer = ScannerDebouncer()
 
 class MediaEventHandler(FileSystemEventHandler):
     def on_any_event(self, event):
+        # Ignore events originating inside recycle/trash folders
+        if is_recycle_path(event.src_path):
+            return
+        if hasattr(event, 'dest_path') and event.dest_path and is_recycle_path(event.dest_path):
+            return
+
         # Trigger scan on directory events (e.g. moving a folder full of media into the library)
         if event.is_directory:
             scanner_debouncer.trigger_scan()
             return
         
-        # Trigger scan on specific video file events
-        if event.src_path.lower().endswith(VIDEO_EXTENSIONS):
+        # Trigger scan on specific video or photo file events
+        src_lower = event.src_path.lower()
+        if src_lower.endswith(VIDEO_EXTENSIONS) or src_lower.endswith(PHOTO_EXTENSIONS):
             scanner_debouncer.trigger_scan()
-        elif hasattr(event, 'dest_path') and event.dest_path and event.dest_path.lower().endswith(VIDEO_EXTENSIONS):
-            scanner_debouncer.trigger_scan()
+        elif hasattr(event, 'dest_path') and event.dest_path:
+            dest_lower = event.dest_path.lower()
+            if dest_lower.endswith(VIDEO_EXTENSIONS) or dest_lower.endswith(PHOTO_EXTENSIONS):
+                scanner_debouncer.trigger_scan()
 
 observer = Observer()
 

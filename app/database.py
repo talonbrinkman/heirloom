@@ -112,6 +112,13 @@ def create_db_and_tables():
             except Exception:
                 session.rollback()
 
+        # Migration for Photo date_taken
+        try:
+            session.exec(text("ALTER TABLE photo ADD COLUMN date_taken DATETIME"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
         # Migration to fix malformed TV Show titles (e.g. 'Better Call Saul S03 01' or 'Invincible (2021)')
         try:
             from .models import TVShow
@@ -149,6 +156,24 @@ def create_db_and_tables():
 
         try:
             session.exec(text("ALTER TABLE watchlist ADD COLUMN profile_id INTEGER"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
+            session.exec(text("ALTER TABLE watchsession ADD COLUMN host_profile_id INTEGER"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
+            session.exec(text("ALTER TABLE watchinvite ADD COLUMN sender_profile_id INTEGER"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
+            session.exec(text("ALTER TABLE watchinvite ADD COLUMN invited_profile_id INTEGER"))
             session.commit()
         except Exception:
             session.rollback()

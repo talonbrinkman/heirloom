@@ -77,12 +77,21 @@
 </head>
 <body class="photo-body">
     <div class="photo-header">
-        <h1 class="photo-title">{{ photo.title }}</h1>
+        <div>
+            <h1 class="photo-title">{{ photo.title }}</h1>
+            {% set display_date = photo.date_taken or photo.date_added %}
+            {% if display_date %}
+            <div style="color: rgba(255, 255, 255, 0.7); font-size: 0.9em; margin-top: 4px; display: flex; align-items: center; gap: 5px;">
+                <i data-lucide="calendar" style="width: 14px; height: 14px;"></i>
+                <span>{{ display_date.strftime('%B %d, %Y') }}</span>
+            </div>
+            {% endif %}
+        </div>
         <div class="flex gap-15">
             {% if user.downloads_access %}
-            <a href="/photo_file/{{ photo.id }}" download class="close-btn"><i data-lucide="download"></i></a>
+            <a href="/photo_file/{{ photo.id }}" download class="close-btn" title="Download"><i data-lucide="download"></i></a>
             {% endif %}
-            <a href="/" class="close-btn"><i data-lucide="x"></i></a>
+            <a href="{% if photo.album %}/library/photo?album={{ photo.album|urlencode }}{% else %}/library/photo{% endif %}" class="close-btn" title="Close" id="photoCloseBtn"><i data-lucide="x"></i></a>
         </div>
     </div>
     
@@ -191,6 +200,25 @@
         }
     });
     
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            const closeBtn = document.getElementById('photoCloseBtn');
+            if (closeBtn && closeBtn.href) {
+                window.location.href = closeBtn.href;
+            }
+        } else if (e.key === 'ArrowLeft') {
+            const leftArrow = document.querySelector('.left-arrow');
+            if (leftArrow && leftArrow.href) {
+                window.location.href = leftArrow.href;
+            }
+        } else if (e.key === 'ArrowRight') {
+            const rightArrow = document.querySelector('.right-arrow');
+            if (rightArrow && rightArrow.href) {
+                window.location.href = rightArrow.href;
+            }
+        }
+    });
+
     setInterval(loadInbox, 10000);
     document.addEventListener('DOMContentLoaded', loadInbox);
 </script>

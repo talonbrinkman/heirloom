@@ -11,22 +11,14 @@
 </head>
 
 <body>
-    <div class="server-dashboard-container">
-        <!-- Top Header Navigation -->
-        <div class="dashboard-header-bar">
-            <div class="flex gap-15 align-center">
-                <a href="/" class="icon-link" title="Return to Dashboard">
-                    <i data-lucide="arrow-left"></i>
-                </a>
-                <div class="flex align-center gap-10">
-                    <h1 class="m-0" style="font-size: 1.5rem;">Server Dashboard</h1>
-                    <div id="serverDashboardActivityBadge" class="server-activity-badge" style="display: none;" title="Library Activity">
-                        <span id="serverDashboardActivityText" class="server-activity-text">Scanning...</span>
-                    </div>
-                </div>
-            </div>
-        </div>
+    <div class="header flex justify-start gap-15">
+        <a href="/" class="icon-link" title="Home">
+            <i data-lucide="arrow-left"></i>
+        </a>
+        <h1 class="m-0" style="font-size: 1.5rem;">Server Dashboard</h1>
+    </div>
 
+    <div class="server-dashboard-container">
         <!-- KPI Grid: Top Overview -->
         <div class="dashboard-kpi-grid">
             <!-- Active Streams -->
@@ -76,7 +68,6 @@
                     <i data-lucide="clock-arrow-up" style="width: 18px; height: 18px;"></i>
                 </div>
                 <div class="kpi-value" id="kpiUptime" style="font-size: 1.55rem;">{{ metrics.uptime_str }}</div>
-                <div class="kpi-subtext">Heirloom Media Server</div>
             </div>
         </div>
 
@@ -411,16 +402,11 @@
             const textEl = document.getElementById('serverDashboardActivityText');
             if (!badge || !textEl) return;
 
-            if (scanner.is_scanning) {
+            if (scanner.is_scanning && scanner.total_items > 0) {
                 badge.style.display = 'inline-flex';
                 badge.classList.remove('complete');
-                textEl.textContent = scanner.short_status || 'Scanning...';
+                textEl.textContent = scanner.short_status || `Scanning (${scanner.items_scanned}/${scanner.total_items})`;
                 badge.title = scanner.current_item ? `${scanner.action}: ${scanner.current_item}` : (scanner.action || 'Library scan in progress');
-            } else if (scanner.recently_completed) {
-                badge.style.display = 'inline-flex';
-                badge.classList.add('complete');
-                textEl.textContent = 'Scan Complete';
-                badge.title = scanner.last_summary || 'Library scan complete';
             } else {
                 badge.style.display = 'none';
                 badge.classList.remove('complete');

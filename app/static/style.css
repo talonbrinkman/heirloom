@@ -74,18 +74,26 @@
     display: none;
 }
 
+html,
+body {
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+}
+
 html {
     -webkit-text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
 }
 
 body {
+    display: flex;
+    flex-direction: column;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     background-color: var(--bg);
     color: var(--text);
     margin: 0;
-    padding: 20px;
-    overflow-x: hidden;
+    padding: 0;
 }
 
 img,
@@ -130,6 +138,10 @@ form {
    ========================================================================== */
 
 .container {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    width: 100%;
     max-width: 1000px;
     margin: 0 auto;
     padding: 20px;
@@ -145,31 +157,36 @@ form {
 
 /* Top bar (logo, search, inbox, settings) */
 .header {
+    flex-shrink: 0;
+    z-index: 10;
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 15px;
-    padding: 15px 30px;
-    margin-bottom: 20px;
+    padding: calc(var(--padding) * 2);
+    margin-bottom: 0;
     font-size: 0.9em;
+    background: linear-gradient(black 0%, transparent 100%);
 }
 
 /* Sidebar + main content */
 .layout-wrapper {
     display: flex;
+    flex: 1;
+    min-height: 0;
+    width: 100%;
     max-width: 1400px;
     margin: 0 auto;
-    padding: 0 var(--padding);
+    padding: 0 calc(var(--padding) * 2);
 }
 
 .sidebar {
     width: 170px;
-    margin-right: 15px;
     display: flex;
     flex-direction: column;
     gap: 8px;
     flex-shrink: 0;
-    overflow: hidden;
+    overflow-y: auto;
 }
 
 .sidebar-link {
@@ -180,18 +197,19 @@ form {
     color: var(--text-muted);
     border-radius: var(--radius);
     transition: color 0.2s;
-    font-size: 14px;
+    font-size: 1em;
     font-weight: 500;
     white-space: nowrap;
 }
 
 .sidebar-link svg {
-    flex-shrink: 0;
-    min-width: 24px;
-    min-height: 24px;
+    height: 100%;
+    aspect-ratio: 1;
 }
 
-.sidebar-link:hover,
+.sidebar-link:hover {
+    color: var(--text);
+}
 .sidebar-link.active {
     color: var(--accent);
 }
@@ -199,7 +217,9 @@ form {
 .main-content {
     flex: 1;
     min-width: 0;
-    /* stops flex children from overflowing */
+    min-height: 0;
+    overflow-y: auto;
+    padding-bottom: 40px;
 }
 
 /* Generic content section */
@@ -779,12 +799,12 @@ input[type="checkbox"]:checked {
 
 .dropdown-menu {
     position: absolute;
-    top: 35px;
-    right: 5px;
+    top: var(--padding);
+    right: 0;
     min-width: 150px;
     max-width: calc(100vw - 20px);
     box-sizing: border-box;
-    padding: 4px;
+    padding: var(--padding);
     display: none;
     flex-direction: column;
     background: var(--surface);
@@ -979,7 +999,20 @@ input[type="checkbox"]:checked {
 
 .modal-list .toggle-pill {
     display: flex;
-    margin-bottom: 5px;
+    margin-bottom: 6px;
+}
+
+.wt-group-title {
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 12px 0 6px 0;
+}
+
+.wt-group-title:first-child {
+    margin-top: 0;
 }
 
 /* Directory browser */
@@ -1967,6 +2000,10 @@ video::-webkit-media-text-track-display,
    ========================================================================== */
 
 .server-dashboard-container {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    width: 100%;
     max-width: 1300px;
     margin: 0 auto;
     padding: 24px 20px 60px 20px;
@@ -2122,15 +2159,7 @@ video::-webkit-media-text-track-display,
 .disk-percent {
     font-size: 0.85rem;
     font-weight: 600;
-    color: var(--text);
-}
-
-.disk-percent.warning {
-    color: #ff9800;
-}
-
-.disk-percent.danger {
-    color: #f44336;
+    color: var(--text-muted);
 }
 
 .disk-bar-bg {
@@ -2142,14 +2171,6 @@ video::-webkit-media-text-track-display,
     background: var(--accent);
     border-radius: 9999px;
     transition: width 0.5s ease;
-}
-
-.disk-bar-fill.warning {
-    background: #ff9800;
-}
-
-.disk-bar-fill.danger {
-    background: #f44336;
 }
 
 .disk-item-footer {
@@ -2258,6 +2279,50 @@ video::-webkit-media-text-track-display,
     height: 44px;
     color: var(--text-muted);
     opacity: 0.6;
+}
+
+/* Empty volume state (shown when no media volumes are mounted) */
+.no-volumes-card {
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: var(--text-muted);
+}
+
+.no-volumes-card svg {
+    width: 48px;
+    height: 48px;
+    color: var(--text-muted);
+    opacity: 0.7;
+    margin-bottom: 4px;
+}
+
+.no-volumes-card h2 {
+    color: var(--text);
+    font-size: 1.3rem;
+    margin: 0;
+}
+
+.no-volumes-card p {
+    margin: 0;
+    max-width: 440px;
+    font-size: 0.95rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+
+.no-volumes-card a {
+    transition: 0.2s;
+    color: inherit;
+    font-weight: inherit;
+    text-decoration: underline;
+}
+
+.no-volumes-card a:hover {
+    color: var(--text)
 }
 
 /* Table Container with Height Limit & Sticky Header (Server Dashboard) */
@@ -2500,7 +2565,7 @@ video::-webkit-media-text-track-display,
         position: fixed;
         top: 0;
         left: 0;
-        max-width: calc(100vw - 20px);
+        width: 65%;
         height: 100vh;
         background: var(--bg);
         backdrop-filter: blur(5px);
@@ -2569,6 +2634,7 @@ video::-webkit-media-text-track-display,
         font-size: 14px;
         font-weight: normal;
         transition: background 0.15s ease;
+        text-wrap: nowrap;
     }
 
     .mobile-menu-link:hover,
@@ -2605,12 +2671,10 @@ video::-webkit-media-text-track-display,
     /* Badges inside mobile menu (activity, inbox) */
     .mobile-menu-badge {
         margin-left: auto;
-        font-size: 11px;
-        padding: 2px 7px;
-        border-radius: var(--radius);
-        background: rgba(229, 9, 20, 0.2);
-        color: var(--accent);
-        border: 1px solid rgba(229, 9, 20, 0.4);
+        font-size: 1em;
+        color: var(--text-muted);
+        padding: 0 var(--padding);
+        text-wrap: nowrap;
     }
 
     /* Mobile inbox dropdown inside menu */
@@ -3507,23 +3571,16 @@ video::-webkit-media-text-track-display,
 }
 
 .profile-header-avatar svg {
-    width: 14px;
-    height: 14px;
+    height: 75%;
+    aspect-ratio: 1;
 }
 
 .profile-header-name {
-    font-size: 0.85rem;
-    font-weight: 600;
     max-width: 110px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    padding-right: 4px;
-}
-
-.profile-header-chevron {
-    width: 14px;
-    height: 14px;
+    padding-right: var(--padding);
     color: var(--text-muted);
 }
 
@@ -3576,10 +3633,12 @@ video::-webkit-media-text-track-display,
     transition: 0.2s;
     background-color: var(--accent-transparent);
     border: 1px solid var(--accent);
+    color: var(--accent);
 }
 
 .profile-dropdown-item.text-danger:hover {
     background-color: var(--accent);
+    color: var(--text);
 }
 
 /* PIN Keypad Modal */
@@ -3812,43 +3871,4 @@ video::-webkit-media-text-track-display,
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-}
-
-/* Password Field with Eye Toggle */
-.password-wrapper {
-    position: relative;
-    display: flex;
-    align-items: center;
-    width: 100%;
-}
-
-.password-wrapper input {
-    width: 100%;
-    padding-right: 42px !important;
-    box-sizing: border-box;
-}
-
-.password-toggle-btn {
-    position: absolute;
-    right: 12px;
-    top: 50%;
-    transform: translateY(-50%);
-    background: transparent;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 4px;
-    transition: color 0.15s ease;
-}
-
-.password-toggle-btn:hover {
-    color: var(--text);
-}
-
-.password-toggle-btn svg {
-    width: 18px;
-    height: 18px;
 }

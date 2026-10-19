@@ -147,21 +147,41 @@
                 <i data-lucide="home"></i>
                 Home
             </a>
+            {% if has_movies and user.movies_access %}
             <a href="/library/movie" class="sidebar-link">
                 <i data-lucide="film"></i>
                 Movies
             </a>
+            {% endif %}
+            {% if has_tv and user.tv_access %}
             <a href="/library/tv" class="sidebar-link">
                 <i data-lucide="tv"></i>
                 TV Shows
             </a>
+            {% endif %}
+            {% if has_photos and user.photos_access %}
             <a href="/library/photo" class="sidebar-link">
                 <i data-lucide="image"></i>
                 Photos
             </a>
+            {% endif %}
         </div>
 
         <div class="main-content">
+            {% if not has_movies and not has_tv and not has_photos %}
+            <div class="card">
+                <div class="no-volumes-card">
+                    <i data-lucide="hard-drive"></i>
+                    <h2>No Media Found</h2>
+                    {% if user.is_admin and (current_profile is none or current_profile.is_primary) %}
+                    <p>No media volumes were detected. Add your movie, TV show, or photo folders in <a href="/settings">settings</a> to begin populating your library.</p>
+                    {% else %}
+                    <p>The administrator hasn't added any content yet. Please check back later.</p>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+
             {% if history %}
             <div class="card">
                 <h2>Recently Watching</h2>
@@ -539,7 +559,7 @@
                                 </div>
                             </div>
                             <div class="media-title">{{ p.title }}</div>
-                            <div class="media-year">{{ p.date_added.strftime('%b %d, %Y') }}</div>
+                            <div class="media-year">{{ (p.date_taken or p.date_added).strftime('%b %d, %Y') }}</div>
                         </div>
                         {% endfor %}
                     </div>
@@ -931,15 +951,32 @@
                 const res = await fetch(`/api/users/eligible?media_type=${mediaType}`);
                 const users = await res.json();
 
+                const householdUsers = users.filter(u => u.category === 'Household' || u.tag === 'Household');
+                const sharedUsers = users.filter(u => u.category === 'Shared' || u.tag === 'Shared');
+
                 if (users.length === 0) {
                     userList.innerHTML = '<div class="empty-state">No eligible users found. Make sure they have Watch Together and library access enabled in settings.</div>';
                 } else {
-                    userList.innerHTML = users.map(u => `
-                    <label class="toggle-pill">
-                        <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
-                        <span>${u.username}</span>
-                    </label>
-                `).join('');
+                    let html = '';
+                    if (householdUsers.length > 0) {
+                        html += '<div class="wt-group-title">Household</div>';
+                        html += householdUsers.map(u => `
+                            <label class="toggle-pill">
+                                <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
+                                <span>${u.username}</span>
+                            </label>
+                        `).join('');
+                    }
+                    if (sharedUsers.length > 0) {
+                        html += '<div class="wt-group-title">Shared</div>';
+                        html += sharedUsers.map(u => `
+                            <label class="toggle-pill">
+                                <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
+                                <span>${u.username}</span>
+                            </label>
+                        `).join('');
+                    }
+                    userList.innerHTML = html;
                 }
             } catch (err) {
                 console.error(err);
@@ -949,7 +986,7 @@
 
         async function startWatchTogether() {
             const checkboxes = document.querySelectorAll('.wt-user-checkbox:checked');
-            const userIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+            const targetIds = Array.from(checkboxes).map(cb => cb.value);
 
             try {
                 const res = await fetch('/watch_together/create', {
@@ -958,7 +995,8 @@
                     body: JSON.stringify({
                         media_type: wtCurrentMedia.type,
                         item_id: wtCurrentMedia.id,
-                        invited_user_ids: userIds
+                        invited_user_ids: targetIds,
+                        invited_targets: targetIds
                     })
                 });
                 const data = await res.json();
@@ -1052,31 +1090,21 @@
                         const mobileBadge = document.getElementById('mobileServerActivityBadge');
                         const mobileTextEl = document.getElementById('mobileServerActivityText');
 
-                        if (data.is_scanning) {
+                        if (data.is_scanning && data.total_items > 0) {
                             badge.style.display = 'inline-flex';
                             badge.classList.remove('complete');
-                            textEl.textContent = data.short_status || 'Scanning...';
+                            textEl.textContent = data.short_status || `Scanning (${data.items_scanned}/${data.total_items})`;
                             badge.title = data.current_item ? `${data.action}: ${data.current_item}` : (data.action || 'Library scan in progress');
                             if (mobileBadge && mobileTextEl) {
                                 mobileBadge.style.display = 'inline-flex';
-                                mobileTextEl.textContent = data.short_status || 'Scanning...';
-                            }
-                            pollDelay = 1500;
-                        } else if (data.recently_completed) {
-                            badge.style.display = 'inline-flex';
-                            badge.classList.add('complete');
-                            textEl.textContent = 'Scan Complete';
-                            badge.title = data.last_summary || 'Library scan complete';
-                            if (mobileBadge && mobileTextEl) {
-                                mobileBadge.style.display = 'inline-flex';
-                                mobileTextEl.textContent = 'Done';
+                                mobileTextEl.textContent = data.short_status || `Scanning (${data.items_scanned}/${data.total_items})`;
                             }
                             pollDelay = 3000;
                         } else {
                             badge.style.display = 'none';
                             badge.classList.remove('complete');
                             if (mobileBadge) mobileBadge.style.display = 'none';
-                            pollDelay = 6000;
+                            pollDelay = data.is_scanning ? 3000 : 8000;
                         }
                     } else {
                         badge.style.display = 'none';

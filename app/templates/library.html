@@ -37,7 +37,7 @@
             {% endif %}
             <div class="inbox desktop-only">
                 <a href="#" class="icon-link" id="inboxBtn" onclick="toggleInbox(event)" title="Inbox">
-                    <i data-lucide="inbox"></i>
+                    <i data-lucide="bell"></i>
                     <span id="inboxBadge" class="inbox-badge" style="display: none;"></span>
                 </a>
                 <div id="inboxMenu" class="dropdown-menu inbox-menu" style="display: none;">
@@ -105,7 +105,7 @@
             {% endif %}
 
             <a href="#" class="mobile-menu-link" id="mobileInboxToggle" onclick="toggleMobileInbox(event)">
-                <i data-lucide="inbox"></i>
+                <i data-lucide="bell"></i>
                 <span>Inbox</span>
                 <span id="mobileInboxBadge" class="mobile-menu-badge" style="display: none;"></span>
             </a>
@@ -145,15 +145,19 @@
                 <i data-lucide="home"></i>
                 Home
             </a>
+            {% if has_movies and user.movies_access %}
             <a href="/library/movie" class="sidebar-link {% if media_type == 'movie' %}active{% endif %}">
                 <i data-lucide="film"></i>
                 Movies
             </a>
+            {% endif %}
+            {% if has_tv and user.tv_access %}
             <a href="/library/tv" class="sidebar-link {% if media_type == 'tv' %}active{% endif %}">
                 <i data-lucide="tv"></i>
                 TV Shows
             </a>
-            {% if user.photos_access %}
+            {% endif %}
+            {% if has_photos and user.photos_access %}
             <a href="/library/photo" class="sidebar-link {% if media_type == 'photo' %}active{% endif %}">
                 <i data-lucide="image"></i>
                 Photos
@@ -167,10 +171,19 @@
                     <h2 class="m-0">
                         {% if media_type == 'movie' %}Movies ({{ total_count }})
                         {% elif media_type == 'photo' %}
-                        <a href="/library/photo" style="text-decoration: none; color: inherit;">Photos ({{ total_count
-                            }})</a>
-                        {% if album %}
-                        <span style="color: #666; margin: 0 5px;">/</span> <span style="color: #aaa;">{{ album }}</span>
+                        <a href="/library/photo" style="text-decoration: none; color: inherit;">Photos</a>
+                        {% if album_breadcrumbs %}
+                            {% for b in album_breadcrumbs %}
+                            <span style="color: #666; margin: 0 6px;">/</span>
+                            {% if loop.last %}
+                            <span style="color: #fff; font-weight: 600;">{{ b.name }}</span>
+                            {% else %}
+                            <a href="/library/photo?album={{ b.path | urlencode }}" style="text-decoration: none; color: #aaa; transition: color 0.2s;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#aaa'">{{ b.name }}</a>
+                            {% endif %}
+                            {% endfor %}
+                            <span style="font-size: 0.85em; color: #888; font-weight: normal; margin-left: 6px;">({{ total_count }})</span>
+                        {% else %}
+                            <span style="font-size: 0.85em; color: #888; font-weight: normal; margin-left: 4px;">({{ total_count }})</span>
                         {% endif %}
                         {% else %}TV Shows ({{ total_count }}){% endif %}
                     </h2>
@@ -437,12 +450,14 @@
 
                     let hoverContent = '';
                     if (isAlbum) {
-                        hoverContent = `<div class="album-title-overlay" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; font-weight: bold; font-size: 1.2rem; text-align: center; width: 90%; z-index: 2; pointer-events: none; text-shadow: 1px 1px 4px rgba(0,0,0,0.8);">${m.title}</div>`;
+                        hoverContent = `<div class="album-title-overlay" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; font-weight: 600; font-size: 1.15rem; text-align: center; width: 85%; z-index: 2; pointer-events: none; text-shadow: 0 2px 8px rgba(0,0,0,0.9);">${m.title}</div>`;
                     } else {
-                        hoverContent = `
+                        const playButtonHtml = mediaType !== 'photo' ? `
                                 <a href="/play/${mediaType}/${m.id}" class="icon-btn hover-play">
                                     <i data-lucide="play" fill="currentColor"></i>
-                                </a>
+                                </a>` : '';
+                        hoverContent = `
+                                ${playButtonHtml}
                                 <button class="icon-btn three-dots-btn" onclick="toggleMenu(event, 'menu-item-${globalIndex}')">
                                     <i data-lucide="more-vertical" fill="white"></i>
                                 </button>
@@ -664,15 +679,32 @@
                 const res = await fetch(`/api/users/eligible?media_type=${mediaType}`);
                 const users = await res.json();
 
+                const householdUsers = users.filter(u => u.category === 'Household' || u.tag === 'Household');
+                const sharedUsers = users.filter(u => u.category === 'Shared' || u.tag === 'Shared');
+
                 if (users.length === 0) {
                     userList.innerHTML = '<div class="empty-state">No eligible users found. Make sure they have Watch Together and library access enabled in settings.</div>';
                 } else {
-                    userList.innerHTML = users.map(u => `
-                    <label class="toggle-pill">
-                        <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
-                        <span>${u.username}</span>
-                    </label>
-                `).join('');
+                    let html = '';
+                    if (householdUsers.length > 0) {
+                        html += '<div class="wt-group-title">Household</div>';
+                        html += householdUsers.map(u => `
+                            <label class="toggle-pill">
+                                <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
+                                <span>${u.username}</span>
+                            </label>
+                        `).join('');
+                    }
+                    if (sharedUsers.length > 0) {
+                        html += '<div class="wt-group-title">Shared</div>';
+                        html += sharedUsers.map(u => `
+                            <label class="toggle-pill">
+                                <input type="checkbox" class="hidden-checkbox wt-user-checkbox" value="${u.id}">
+                                <span>${u.username}</span>
+                            </label>
+                        `).join('');
+                    }
+                    userList.innerHTML = html;
                 }
             } catch (err) {
                 console.error(err);
@@ -682,7 +714,7 @@
 
         async function startWatchTogether() {
             const checkboxes = document.querySelectorAll('.wt-user-checkbox:checked');
-            const userIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+            const targetIds = Array.from(checkboxes).map(cb => cb.value);
 
             try {
                 const res = await fetch('/watch_together/create', {
@@ -691,7 +723,8 @@
                     body: JSON.stringify({
                         media_type: wtCurrentMedia.type,
                         item_id: wtCurrentMedia.id,
-                        invited_user_ids: userIds
+                        invited_user_ids: targetIds,
+                        invited_targets: targetIds
                     })
                 });
                 const data = await res.json();
@@ -785,31 +818,21 @@
                         const mobileBadge = document.getElementById('mobileServerActivityBadge');
                         const mobileTextEl = document.getElementById('mobileServerActivityText');
 
-                        if (data.is_scanning) {
+                        if (data.is_scanning && data.total_items > 0) {
                             badge.style.display = 'inline-flex';
                             badge.classList.remove('complete');
-                            textEl.textContent = data.short_status || 'Scanning...';
+                            textEl.textContent = data.short_status || `Scanning (${data.items_scanned}/${data.total_items})`;
                             badge.title = data.current_item ? `${data.action}: ${data.current_item}` : (data.action || 'Library scan in progress');
                             if (mobileBadge && mobileTextEl) {
                                 mobileBadge.style.display = 'inline-flex';
-                                mobileTextEl.textContent = data.short_status || 'Scanning...';
-                            }
-                            pollDelay = 1500;
-                        } else if (data.recently_completed) {
-                            badge.style.display = 'inline-flex';
-                            badge.classList.add('complete');
-                            textEl.textContent = 'Scan Complete';
-                            badge.title = data.last_summary || 'Library scan complete';
-                            if (mobileBadge && mobileTextEl) {
-                                mobileBadge.style.display = 'inline-flex';
-                                mobileTextEl.textContent = 'Done';
+                                mobileTextEl.textContent = data.short_status || `Scanning (${data.items_scanned}/${data.total_items})`;
                             }
                             pollDelay = 3000;
                         } else {
                             badge.style.display = 'none';
                             badge.classList.remove('complete');
                             if (mobileBadge) mobileBadge.style.display = 'none';
-                            pollDelay = 6000;
+                            pollDelay = data.is_scanning ? 3000 : 8000;
                         }
                     } else {
                         badge.style.display = 'none';
