@@ -6,6 +6,7 @@
     <title>Heirloom</title>
     <link rel="stylesheet" href="/static/style.css">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <script src="/static/fix-match.js"></script>
 </head>
 
 <body>
@@ -174,10 +175,18 @@
                     <i data-lucide="hard-drive"></i>
                     <h2>No Media Found</h2>
                     {% if user.is_admin and (current_profile is none or current_profile.is_primary) %}
-                    <p>No media volumes were detected. Add your movie, TV show, or photo folders in <a href="/settings">settings</a> to begin populating your library.</p>
+                    <p>No media volumes were detected. Add your movie, TV show, or photo folders in <a href="/settings" class="inline-link">settings</a> to begin populating your library.</p>
                     {% else %}
                     <p>The administrator hasn't added any content yet. Please check back later.</p>
                     {% endif %}
+                </div>
+            </div>
+            {% elif not (has_movies and user.movies_access) and not (has_tv and user.tv_access) and not (has_photos and user.photos_access) %}
+            <div class="card">
+                <div class="no-volumes-card">
+                    <i data-lucide="hard-drive"></i>
+                    <h2>No Media Found</h2>
+                    <p>The administrator hasn't shared any content yet. Please check back later.</p>
                 </div>
             </div>
             {% endif %}
@@ -244,6 +253,9 @@
                                     <form action="/watchlist/add/{{ h.media_type }}/{{ h.item.id }}" method="post">
                                         <button type="submit">Add to Watchlist</button>
                                     </form>
+                                    {% endif %}
+                                    {% if user.is_admin %}
+                                    <button type="button" class="fix-match-btn" data-media-type="{{ h.media_type }}" data-item-id="{{ h.item.id }}" data-title="{{ h.item.title }}" data-year="{{ h.item.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
                                     {% endif %}
                                 </div>
                             </div>
@@ -316,6 +328,9 @@
                                             {% endif %}
                                         </button>
                                     </form>
+                                    {% if user.is_admin %}
+                                    <button type="button" class="fix-match-btn" data-media-type="{{ r.media_type }}" data-item-id="{{ r.item.id }}" data-title="{{ r.item.title }}" data-year="{{ r.item.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
+                                    {% endif %}
                                 </div>
                             </div>
                             <div class="media-title">{{ r.item.title }}</div>
@@ -378,6 +393,9 @@
                                     <form action="/watchlist/remove/{{ w.db_id }}" method="post">
                                         <button type="submit">Remove from Watchlist</button>
                                     </form>
+                                    {% if user.is_admin %}
+                                    <button type="button" class="fix-match-btn" data-media-type="{{ w.media_type }}" data-item-id="{{ w.item.id }}" data-title="{{ w.item.title }}" data-year="{{ w.item.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
+                                    {% endif %}
                                 </div>
                             </div>
                             <div class="media-title">{{ w.item.title }}</div>
@@ -445,6 +463,9 @@
                                         <button type="submit">Add to Watchlist</button>
                                     </form>
                                     {% endif %}
+                                    {% if user.is_admin %}
+                                    <button type="button" class="fix-match-btn" data-media-type="movie" data-item-id="{{ m.id }}" data-title="{{ m.title }}" data-year="{{ m.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
+                                    {% endif %}
                                 </div>
                             </div>
                             <div class="media-title">{{ m.title }}</div>
@@ -510,6 +531,9 @@
                                     <form action="/watchlist/add/tv/{{ t.id }}" method="post">
                                         <button type="submit">Add to Watchlist</button>
                                     </form>
+                                    {% endif %}
+                                    {% if user.is_admin %}
+                                    <button type="button" class="fix-match-btn" data-media-type="tv" data-item-id="{{ t.id }}" data-title="{{ t.title }}" data-year="{{ t.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
                                     {% endif %}
                                 </div>
                             </div>

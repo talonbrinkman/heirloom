@@ -6,6 +6,7 @@
         <link rel="stylesheet" href="/static/style.css">
         <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
         <script src="https://unpkg.com/lucide@latest"></script>
+        <script src="/static/password-strength.js"></script>
     </head>
     <body class="center-screen">
         <div class="setup-box">
@@ -18,13 +19,19 @@
                 <input type="text" name="username" id="username" required autocomplete="off">
                 
                 <label for="password">Password</label>
-                <div style="position: relative; margin-bottom: 15px;">
+                <div style="position: relative;">
                     <input type="password" name="password" id="password" required
                         class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
                     <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
                         onclick="toggleVisibility('password', 'togglePasswordBtn')">
                         <i data-lucide="eye" id="togglePasswordBtn"></i>
                     </div>
+                </div>
+                <div class="password-strength-container" data-for="password">
+                    <div class="password-strength-bar">
+                        <div class="password-strength-fill"></div>
+                    </div>
+                    <div class="password-strength-text"></div>
                 </div>
 
                 <label for="confirm_password">Confirm Password</label>
@@ -46,9 +53,21 @@
 
             const params = new URLSearchParams(window.location.search);
             const notice = document.getElementById('errorNotice');
-            if (params.get('error') === 'passwords_mismatch') {
-                notice.textContent = 'Passwords do not match. Please try again.';
+            let noticeTimeout = null;
+
+            function showNotice(msg) {
+                if (!notice) return;
+                notice.textContent = msg;
                 notice.style.display = 'block';
+                if (noticeTimeout) clearTimeout(noticeTimeout);
+                noticeTimeout = setTimeout(() => {
+                    notice.style.display = 'none';
+                    notice.textContent = '';
+                }, 3000);
+            }
+
+            if (params.get('error') === 'passwords_mismatch') {
+                showNotice('Passwords do not match. Please try again.');
             }
 
             function toggleVisibility(inputId, btnId) {
@@ -70,8 +89,7 @@
                 const p1 = document.getElementById('password').value;
                 const p2 = document.getElementById('confirm_password').value;
                 if (p1 !== p2) {
-                    notice.textContent = 'Passwords do not match. Please try again.';
-                    notice.style.display = 'block';
+                    showNotice('Passwords do not match. Please try again.');
                     document.getElementById('confirm_password').focus();
                     return false;
                 }

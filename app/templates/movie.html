@@ -4,6 +4,7 @@
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Heirloom - {{ movie.title }}</title>
         <link rel="stylesheet" href="/static/style.css">
+        <script src="/static/fix-match.js"></script>
     </head>
     <body {% if movie.backdrop_filename %}class="has-backdrop" style="--backdrop-url: url('/metadata/{{ movie.backdrop_filename }}');"{% endif %}>
         <div class="header">
@@ -128,6 +129,12 @@
                             {% if user.watch_together_access %}
                             <button class="play-btn m-0 watch-together-btn" onclick="openWatchTogether('movie', {{ movie.id }})">
                                 <i data-lucide="users"></i>
+                            </button>
+                            {% endif %}
+                            
+                            {% if user.is_admin %}
+                            <button type="button" class="play-btn m-0 fix-match-btn" data-media-type="movie" data-item-id="{{ movie.id }}" data-title="{{ movie.title }}" data-year="{{ movie.year or '' }}" onclick="triggerFixMatch(this)" title="Fix Match">
+                                <i data-lucide="wrench"></i>
                             </button>
                             {% endif %}
                         </div>

@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Heirloom</title>
     <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/fix-match.js"></script>
 </head>
 
 <body>
@@ -403,6 +404,7 @@
             const albumParam = album ? `&album=${encodeURIComponent(album)}` : '';
             const downloadsAccess = "{{ 'true' if user.downloads_access else 'false' }}" === 'true';
             const watchTogetherAccess = "{{ 'true' if user.watch_together_access else 'false' }}" === 'true';
+            const isAdmin = "{{ 'true' if user.is_admin else 'false' }}" === 'true';
 
             try {
                 const res = await fetch(`/api/library/${mediaType}?page=${page}&limit=50&sort=${currentSort}${albumParam}`);
@@ -473,6 +475,9 @@
                                     </form>
                                     ` : ''}
                                     ${watchlistForm}
+                                    ${(isAdmin && mediaType !== 'photo' && !isAlbum) ? `
+                                    <button type="button" class="fix-match-btn" data-media-type="${mediaType}" data-item-id="${m.id}" data-title="${encodeURIComponent(m.title)}" data-year="${m.year || ''}" onclick="triggerFixMatchEncoded(this)">Fix Match</button>
+                                    ` : ''}
                                 </div>
                             `;
                     }

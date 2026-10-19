@@ -47,17 +47,22 @@
 
     <script>
         const params = new URLSearchParams(window.location.search);
-        if (params.get('error') === 'passwords_mismatch') showNotice('Passwords do not match. Please try again.', 'var(--danger)');
+        if (params.get('error') === 'passwords_mismatch') showNotice('Passwords do not match. Please try again.', 'var(--danger)', true);
         else if (params.get('error')) showNotice('Invalid username or password.', 'var(--danger)');
         if (params.get('reset')) showNotice('Password reset request sent. An admin will review it shortly.', 'var(--accent-primary)');
         if (params.get('reset_success')) showNotice('Password changed successfully! You can now log in.', '#10B981');
         if (params.get('reset_error')) showNotice('This reset link is invalid or has already been used.', 'var(--danger)');
 
-        function showNotice(msg, color) {
+        function showNotice(msg, color, autoDismiss = false) {
             const notice = document.createElement('div');
             notice.style.cssText = `text-align: center; margin-top: 15px; padding: 10px 15px; border-radius: 8px; background: ${color}22; border: 1px solid ${color}44; color: ${color}; font-size: 0.9em;`;
             notice.textContent = msg;
             document.querySelector('.setup-box').insertBefore(notice, document.querySelector('.setup-box h1').nextSibling);
+            if (autoDismiss) {
+                setTimeout(() => {
+                    notice.remove();
+                }, 3000);
+            }
         }
 
         function showForgotPassword(e) {

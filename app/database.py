@@ -148,6 +148,22 @@ def create_db_and_tables():
         except Exception:
             session.rollback()
 
+        # InviteCode permissions migration
+        for col, dt, default in [
+            ("movies_access", "BOOLEAN", 0),
+            ("tv_access", "BOOLEAN", 0),
+            ("photos_access", "BOOLEAN", 0),
+            ("downloads_access", "BOOLEAN", 0),
+            ("watch_together_access", "BOOLEAN", 0),
+            ("kids_mode", "BOOLEAN", 0),
+            ("can_manage_profiles", "BOOLEAN", 1),
+        ]:
+            try:
+                session.exec(text(f"ALTER TABLE invitecode ADD COLUMN {col} {dt} DEFAULT {default}"))
+                session.commit()
+            except Exception:
+                session.rollback()
+
         try:
             session.exec(text("ALTER TABLE watchhistory ADD COLUMN profile_id INTEGER"))
             session.commit()

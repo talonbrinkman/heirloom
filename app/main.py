@@ -20,7 +20,7 @@ from collections import defaultdict, Counter
 from datetime import datetime, timezone, timedelta
 from .database import create_db_and_tables, get_session, engine
 from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile
-from .scanner import scan_media_library, scanner_manager, is_recycle_name, is_recycle_path
+from .scanner import scan_media_library, scanner_manager, is_recycle_name, is_recycle_path, async_download_image, async_fetch_additional_details, SafeHTTPClient, httpx
 from .watcher import start_watcher, stop_watcher, scanner_debouncer
 from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time, sanitize_vtt_content
 from .hls_manager import hls_manager
@@ -599,7 +599,18 @@ async def process_setup(request: Request, username: str = Form(...), password: s
         return RedirectResponse(url="/login?error=passwords_mismatch", status_code=303)
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
-    new_user = User(username=username, password_hash=hashed, is_admin=True, session_token=str(uuid.uuid4()))
+    new_user = User(
+        username=username,
+        password_hash=hashed,
+        is_admin=True,
+        session_token=str(uuid.uuid4()),
+        movies_access=True,
+        tv_access=True,
+        photos_access=True,
+        downloads_access=True,
+        watch_together_access=True,
+        can_manage_profiles=True
+    )
     session.add(new_user)
     session.commit()
 
@@ -637,11 +648,23 @@ async def process_register(request: Request, username: str = Form(...), password
     if not invite or invite.used or (expires and expires < datetime.now(timezone.utc)):
         record_failed_attempt(request)
         raise HTTPException(status_code=400, detail="Invalid, used, or expired invite code")
-    if session.exec(select(User).where(User.username == username)).first():
-        raise HTTPException(status_code=400, detail="Username taken")
+    if session.exec(select(User).where(User.username == username.strip())).first():
+        return RedirectResponse(url=f"/register?invite={invite_code}&error=username_taken", status_code=303)
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
-    new_user = User(username=username, password_hash=hashed, is_admin=False, session_token=str(uuid.uuid4()), kids_mode=False)
+    new_user = User(
+        username=username,
+        password_hash=hashed,
+        is_admin=False,
+        session_token=str(uuid.uuid4()),
+        movies_access=bool(invite.movies_access),
+        tv_access=bool(invite.tv_access),
+        photos_access=bool(invite.photos_access),
+        downloads_access=bool(invite.downloads_access),
+        watch_together_access=bool(invite.watch_together_access),
+        kids_mode=bool(invite.kids_mode),
+        can_manage_profiles=bool(invite.can_manage_profiles)
+    )
     session.add(new_user)
     session.delete(invite)
     session.commit()
@@ -809,6 +832,45 @@ async def verify_profile_pin(
         return JSONResponse(status_code=400, content={"success": False, "error": "Incorrect PIN"})
 
     clear_rate_limit(rate_key)
+    unlock_token = make_profile_unlock_token(profile.id, current_user.session_token or "")
+    resp = JSONResponse(content={"success": True, "redirect": "/"})
+    resp.set_cookie(key="active_profile_id", value=str(profile.id), httponly=False, max_age=60*60*24*30, samesite="lax", secure=is_secure)
+    resp.set_cookie(key=f"profile_unlocked_{profile.id}", value=unlock_token, httponly=True, max_age=60*60*24*7, samesite="lax", secure=is_secure)
+    return resp
+
+class ResetPinWithPasswordRequest(BaseModel):
+    password: str
+
+@app.post("/api/profile/{profile_id}/reset-pin-with-password")
+async def reset_pin_with_password(
+    profile_id: int,
+    body: ResetPinWithPasswordRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    client_ip = get_client_ip(request)
+    rate_key = f"reset_pin_{current_user.id}_{client_ip}"
+    check_rate_limit(rate_key, max_attempts=5, window_seconds=60, error_message="Too many failed password attempts. Please wait 1 minute.")
+
+    profile = session.get(Profile, profile_id)
+    if not profile or profile.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    pwd = body.password.strip() if body.password else ""
+    if not pwd or not bcrypt.checkpw(pwd.encode('utf-8'), current_user.password_hash.encode('utf-8')):
+        record_failed_attempt(rate_key)
+        return JSONResponse(status_code=400, content={"success": False, "error": "Incorrect account password"})
+
+    clear_rate_limit(rate_key)
+    profile.pin_hash = None
+    session.add(profile)
+    session.commit()
+
+    is_secure = is_request_secure(request)
     unlock_token = make_profile_unlock_token(profile.id, current_user.session_token or "")
     resp = JSONResponse(content={"success": True, "redirect": "/"})
     resp.set_cookie(key="active_profile_id", value=str(profile.id), httponly=False, max_age=60*60*24*30, samesite="lax", secure=is_secure)
@@ -3645,6 +3707,11 @@ async def view_settings(
                 "media_type": display_type,
                 "exists": os.path.exists(v.path)
             })
+        mounted_volumes = {
+            "movie": any(v.media_type == "movie" and os.path.exists(v.path) for v in v_paths),
+            "tv": any(v.media_type == "tv" and os.path.exists(v.path) for v in v_paths),
+            "photo": any(v.media_type == "photo" and os.path.exists(v.path) for v in v_paths),
+        }
         remote_url_config = session.exec(select(SystemConfig).where(SystemConfig.key == "remote_access_url")).first()
         remote_url = remote_url_config.value if remote_url_config else ""
         if remote_url:
@@ -3655,13 +3722,15 @@ async def view_settings(
         
         hw_accel_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
         hw_accel_profile = hw_accel_config.value if hw_accel_config else "auto"
+    else:
+        mounted_volumes = {"movie": False, "tv": False, "photo": False}
     
     rewind_seconds = current_profile.rewind_seconds if (current_profile and current_profile.rewind_seconds is not None) else (current_user.rewind_seconds or 0)
     
     return templates.TemplateResponse(request=request, name="settings.html", context={
         "user": current_user, "current_profile": current_profile,
         "is_admin": is_admin, "can_change_password": can_change_password,
-        "invites": invites, "users": users, "volume_paths": volume_paths, 
+        "invites": invites, "users": users, "volume_paths": volume_paths, "mounted_volumes": mounted_volumes,
         "host_url": host_url, "remote_url": remote_url, "tmdb_key": tmdb_key, "hw_accel_profile": hw_accel_profile,
         "rewind_seconds": rewind_seconds
     })
@@ -3741,6 +3810,191 @@ async def save_tmdb_key(
     # Trigger a rescan to fetch metadata for existing items
     scanner_debouncer.trigger_scan(delay=0.5)
     return RedirectResponse(url="/settings", status_code=303)
+
+class FixMatchRequest(BaseModel):
+    media_type: str
+    item_id: int
+    tmdb_id: int
+
+@app.get("/api/media/matches")
+async def search_media_matches(
+    media_type: str = Query(...),
+    query: str = Query(...),
+    year: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user or not is_actual_admin(current_user, current_profile):
+        raise HTTPException(status_code=403, detail="Admin permissions required")
+
+    config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
+    tmdb_key = config.value if config else os.getenv("TMDB_API_KEY", "")
+    if not tmdb_key:
+        return JSONResponse(status_code=400, content={"error": "TMDB API key is not configured. Please add your key in Settings > Metadata Integration."})
+
+    endpoint = "https://api.themoviedb.org/3/search/movie" if media_type == "movie" else "https://api.themoviedb.org/3/search/tv"
+    params = {"query": query.strip(), "api_key": tmdb_key}
+    if year and year.strip():
+        if media_type == "movie":
+            params["year"] = year.strip()
+        else:
+            params["first_air_date_year"] = year.strip()
+
+    raw_client = httpx.AsyncClient(timeout=10.0) if httpx is not None else None
+    try:
+        client = SafeHTTPClient(raw_client)
+        res = await client.get(endpoint, params=params)
+        if res.status_code != 200:
+            return JSONResponse(status_code=res.status_code, content={"error": f"TMDB search failed (HTTP {res.status_code})"})
+
+        results_data = res.json().get("results", [])
+        candidates = []
+        for r in results_data[:10]:
+            title = r.get("title") if media_type == "movie" else r.get("name")
+            release_date = r.get("release_date") if media_type == "movie" else r.get("first_air_date")
+            rel_year = release_date[:4] if release_date else ""
+            poster_path = r.get("poster_path")
+            poster_url = f"https://image.tmdb.org/t/p/w185{poster_path}" if poster_path else ""
+            candidates.append({
+                "tmdb_id": r.get("id"),
+                "title": title or "Unknown",
+                "year": rel_year,
+                "overview": r.get("overview") or "",
+                "poster_url": poster_url
+            })
+        return {"candidates": candidates}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Failed to search matches: {str(e)}"})
+    finally:
+        if raw_client is not None:
+            await raw_client.aclose()
+
+@app.post("/api/media/fix_match")
+async def fix_media_match(
+    data: FixMatchRequest,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user or not is_actual_admin(current_user, current_profile):
+        raise HTTPException(status_code=403, detail="Admin permissions required")
+
+    config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
+    tmdb_key = config.value if config else os.getenv("TMDB_API_KEY", "")
+    if not tmdb_key:
+        return JSONResponse(status_code=400, content={"error": "TMDB API key is not configured."})
+
+    media_type = data.media_type
+    item_id = data.item_id
+    tmdb_id = data.tmdb_id
+
+    raw_client = httpx.AsyncClient(timeout=15.0) if httpx is not None else None
+    try:
+        client = SafeHTTPClient(raw_client)
+        if media_type == "movie":
+            movie = session.get(Movie, item_id)
+            if not movie:
+                raise HTTPException(status_code=404, detail="Movie not found")
+
+            url = f"https://api.themoviedb.org/3/movie/{tmdb_id}"
+            res = await client.get(url, params={"api_key": tmdb_key})
+            if res.status_code != 200:
+                return JSONResponse(status_code=400, content={"error": "Failed to fetch movie details from TMDB."})
+            m_data = res.json()
+
+            poster_filename = await async_download_image(client, m_data.get("poster_path"), "movie", tmdb_id, "poster")
+            backdrop_filename = await async_download_image(client, m_data.get("backdrop_path"), "movie", tmdb_id, "backdrop")
+            cast, director, content_rating, genres_str = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_key)
+
+            movie.title = m_data.get("title") or movie.title
+            movie.year = (m_data.get("release_date") or "")[:4] or movie.year
+            movie.plot = m_data.get("overview") or movie.plot
+            movie.rating = m_data.get("vote_average") or movie.rating
+            if poster_filename:
+                movie.poster_filename = poster_filename
+            if backdrop_filename:
+                movie.backdrop_filename = backdrop_filename
+            if cast:
+                movie.cast = cast
+            if director:
+                movie.director = director
+            if content_rating:
+                movie.content_rating = content_rating
+            if genres_str:
+                movie.genres = genres_str
+
+            session.add(movie)
+            session.commit()
+            return {"success": True, "title": movie.title}
+
+        elif media_type == "tv":
+            show = session.get(TVShow, item_id)
+            if not show:
+                raise HTTPException(status_code=404, detail="TV Show not found")
+
+            old_title = show.title
+            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}"
+            res = await client.get(url, params={"api_key": tmdb_key})
+            if res.status_code != 200:
+                return JSONResponse(status_code=400, content={"error": "Failed to fetch TV details from TMDB."})
+            s_data = res.json()
+
+            poster_filename = await async_download_image(client, s_data.get("poster_path"), "tv", tmdb_id, "poster")
+            backdrop_filename = await async_download_image(client, s_data.get("backdrop_path"), "tv", tmdb_id, "backdrop")
+            cast, director, content_rating, genres_str = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_key)
+
+            new_title = s_data.get("name") or old_title
+            new_year = (s_data.get("first_air_date") or "")[:4] or show.year
+
+            episodes = session.exec(select(TVShow).where(TVShow.title == old_title)).all()
+            if not episodes:
+                episodes = [show]
+
+            seasons = {ep.season for ep in episodes if ep.season is not None}
+            season_posters = {}
+            for s in seasons:
+                try:
+                    s_res = await client.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s}", params={"api_key": tmdb_key})
+                    if s_res.status_code == 200:
+                        s_poster_path = s_res.json().get("poster_path")
+                        if s_poster_path:
+                            season_posters[s] = await async_download_image(client, s_poster_path, f"tv_s{s}", tmdb_id, "poster")
+                except Exception:
+                    pass
+
+            for ep in episodes:
+                ep.title = new_title
+                ep.year = new_year
+                ep.plot = s_data.get("overview") or ep.plot
+                ep.rating = s_data.get("vote_average") or ep.rating
+                if poster_filename:
+                    ep.poster_filename = poster_filename
+                if backdrop_filename:
+                    ep.backdrop_filename = backdrop_filename
+                if cast:
+                    ep.cast = cast
+                if director:
+                    ep.director = director
+                if content_rating:
+                    ep.content_rating = content_rating
+                if genres_str:
+                    ep.genres = genres_str
+                if ep.season in season_posters and season_posters[ep.season]:
+                    ep.season_poster_filename = season_posters[ep.season]
+                session.add(ep)
+
+            session.commit()
+            return {"success": True, "title": new_title}
+        else:
+            raise HTTPException(status_code=400, detail="Invalid media type")
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Failed to fix match: {str(e)}"})
+    finally:
+        if raw_client is not None:
+            await raw_client.aclose()
 
 @app.post("/settings/remote_access")
 async def save_remote_access(
@@ -4005,6 +4259,43 @@ async def delete_invite(
         session.commit()
     return RedirectResponse(url="/settings", status_code=303)
 
+@app.post("/settings/update_invite/{invite_id}")
+async def update_invite(
+    invite_id: int,
+    movies_access: str = Form(None),
+    tv_access: str = Form(None),
+    photos_access: str = Form(None),
+    downloads_access: str = Form(None),
+    watch_together_access: str = Form(None),
+    kids_mode: str = Form(None),
+    can_manage_profiles: str = Form(None),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
+    invite = session.get(InviteCode, invite_id)
+    if invite:
+        v_paths = session.exec(select(VolumePath)).all()
+        has_movies = any(v.media_type == "movie" and os.path.exists(v.path) for v in v_paths)
+        has_tv = any(v.media_type == "tv" and os.path.exists(v.path) for v in v_paths)
+        has_photos = any(v.media_type == "photo" and os.path.exists(v.path) for v in v_paths)
+
+        if has_movies:
+            invite.movies_access = movies_access == "on"
+        if has_tv:
+            invite.tv_access = tv_access == "on"
+        if has_photos:
+            invite.photos_access = photos_access == "on"
+
+        invite.downloads_access = downloads_access == "on"
+        invite.watch_together_access = watch_together_access == "on"
+        invite.kids_mode = kids_mode == "on"
+        invite.can_manage_profiles = can_manage_profiles == "on"
+        session.add(invite)
+        session.commit()
+    return {"success": True}
+
 @app.post("/settings/update_user/{user_id}")
 async def update_user(
     user_id: int,
@@ -4022,15 +4313,25 @@ async def update_user(
     if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
     user = session.get(User, user_id)
     if user and not user.is_admin:
-        user.movies_access = movies_access == "on"
-        user.tv_access = tv_access == "on"
-        user.photos_access = photos_access == "on"
+        v_paths = session.exec(select(VolumePath)).all()
+        has_movies = any(v.media_type == "movie" and os.path.exists(v.path) for v in v_paths)
+        has_tv = any(v.media_type == "tv" and os.path.exists(v.path) for v in v_paths)
+        has_photos = any(v.media_type == "photo" and os.path.exists(v.path) for v in v_paths)
+
+        if has_movies:
+            user.movies_access = movies_access == "on"
+        if has_tv:
+            user.tv_access = tv_access == "on"
+        if has_photos:
+            user.photos_access = photos_access == "on"
+
         user.downloads_access = downloads_access == "on"
         user.watch_together_access = watch_together_access == "on"
         user.kids_mode = kids_mode == "on"
         user.can_manage_profiles = can_manage_profiles == "on"
+        session.add(user)
         session.commit()
-    return RedirectResponse(url="/settings", status_code=303)
+    return {"success": True}
 
 @app.post("/settings/delete_user/{user_id}")
 async def delete_user(

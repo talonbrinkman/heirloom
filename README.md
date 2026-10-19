@@ -118,10 +118,10 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 - **Fast Profile Switching & Multi-User PINs**: Organize family and shared accounts into distinct household profiles (up to 6 per account). Each profile maintains its own watch history, in-progress resume states, watchlists, and personal rewind buffers. Secure individual profiles with 4–15 digit numeric PIN locks powered by bcrypt hashing and HMAC session authorization, tag profiles with Kids Mode to restrict media to family-friendly ratings (G and PG), and personalize profiles with vibrant color palettes and custom icon avatars. Switch between profiles seamlessly via the top navigation dropdown or the dedicated "Who's Watching?" hub with active `OWNER` and `KIDS` badges.
 - **Mobile-First Responsive Interface**: Enjoy a streamlined, touch-optimized experience on smartphones and tablets featuring collapsible on-demand search, touch carousels, and thumb-friendly controls.
 - **Real-Time Telemetry & Volume Monitoring**: Access live stream health, real-time playback timestamps, and mounted media storage metrics directly from the Server Dashboard with automated background telemetry.
+- **Instant "Fix Match" Resolution**: Quickly resolve mismatched titles or incorrect metadata directly from the three-dots dropdown menu on any media card or detail view. Search TMDB with live, debounced inputs, preview matching candidates complete with poster thumbnails and plot overviews, and update movie or TV series metadata, backdrops, and season artwork with a single click.
 
 ## 🔮 Upcoming Improvements
 
-- **Manual "Fix Match" & Metadata Editor**: Search alternative TMDB/IMDb candidates, resolve mismatched titles, and customize artwork directly from the web interface.
 - **Real-Time HDR to SDR Tone Mapping**: Hardware-accelerated color space conversion (VA-API, NVENC, OpenCL) to prevent washed-out colors when streaming 4K HDR10 and Dolby Vision media to SDR displays.
 - **Bitmap & Image Subtitle Burn-In**: Dynamic video filter pipeline to burn Blu-ray (PGS) and DVD (VobSub) bitmap subtitles directly into transcoding streams.
 - **Curated Collections & Franchises**: Automatic and custom multi-title groupings (e.g., Marvel Cinematic Universe, Harry Potter) with unified collection views and playlists.
@@ -131,7 +131,6 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 - **Actor & Director Filmography Hubs**: Dedicated talent pages linking all matching movies and series across your local library.
 - **Music Library & Audio Player**: FLAC/MP3/ALAC playback with ID3 tag parsing, album artwork, artist discographies, and playlists.
 - **Mobile Offline Sync**: Transcode and download media to phones and tablets for offline airplane and travel playback.
-- **Live TV & DVR Tuner Support**: Network tuner integration (HDHomeRun, M3U) with Electronic Program Guide (EPG) and scheduled recording.
 
 
 ## 🤝 Contributing

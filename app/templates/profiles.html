@@ -109,6 +109,38 @@
                 <button type="button" class="btn btn-secondary flex-1" onclick="closePinModal()">Cancel</button>
                 <button type="submit" id="pinSubmitBtn" class="btn btn-primary flex-1">Unlock</button>
             </div>
+
+            <div style="text-align: center; margin-top: 15px;">
+                <button type="button" class="btn-link" style="background: none; border: none; color: var(--text-muted); font-size: 0.85rem; cursor: pointer; text-decoration: underline;" onclick="openForgotPinModal()">Forgot PIN?</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- ========================================================
+     Forgot PIN Modal (Reset PIN via Account Password)
+     ======================================================== -->
+<div id="forgotPinModal" class="modal-overlay" style="display: none;">
+    <div class="pin-modal-card">
+        <div class="pin-modal-avatar" style="background-color: var(--surface-hover);">
+            <i data-lucide="key-round"></i>
+        </div>
+        <h2 class="pin-modal-title">Reset Profile PIN</h2>
+        <p class="pin-modal-subtext">Enter your account password for <strong>{{ user.username }}</strong> to reset the PIN on this profile.</p>
+
+        <form id="forgotPinForm" onsubmit="submitForgotPinForm(event)" class="w-full m-0">
+            <div style="position: relative; margin-bottom: 15px; text-align: left;">
+                <input type="password" id="forgotPinPasswordInput" class="w-full m-0" placeholder="Account Password" required style="padding-right: 40px; box-sizing: border-box;">
+                <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;" onclick="toggleForgotPinPasswordVisibility()">
+                    <i data-lucide="eye" id="toggleForgotPinPasswordBtn"></i>
+                </div>
+            </div>
+            <div id="forgotPinError" class="pin-error-text"></div>
+
+            <div class="flex gap-10 w-full" style="margin-top: 15px;">
+                <button type="button" class="btn btn-secondary flex-1" onclick="closeForgotPinModal()">Cancel</button>
+                <button type="submit" id="forgotPinSubmitBtn" class="btn btn-primary flex-1">Reset & Unlock</button>
+            </div>
         </form>
     </div>
 </div>
@@ -307,6 +339,66 @@
         card.classList.add('pin-shake');
         document.getElementById('pinInput').value = '';
         document.getElementById('pinInput').focus();
+    }
+
+    function openForgotPinModal() {
+        if (!pendingProfileId) return;
+        document.getElementById('pinModal').style.display = 'none';
+        document.getElementById('forgotPinPasswordInput').value = '';
+        document.getElementById('forgotPinError').textContent = '';
+        document.getElementById('forgotPinModal').style.display = 'flex';
+        if (window.lucide) lucide.createIcons();
+        setTimeout(() => document.getElementById('forgotPinPasswordInput').focus(), 50);
+    }
+
+    function closeForgotPinModal() {
+        document.getElementById('forgotPinModal').style.display = 'none';
+        pendingProfileId = null;
+    }
+
+    function toggleForgotPinPasswordVisibility() {
+        const input = document.getElementById('forgotPinPasswordInput');
+        const icon = document.getElementById('toggleForgotPinPasswordBtn');
+        if (!input || !icon) return;
+        if (input.type === 'password') {
+            input.type = 'text';
+            icon.setAttribute('data-lucide', 'eye-off');
+        } else {
+            input.type = 'password';
+            icon.setAttribute('data-lucide', 'eye');
+        }
+        if (window.lucide) lucide.createIcons();
+    }
+
+    async function submitForgotPinForm(e) {
+        e.preventDefault();
+        const pwd = document.getElementById('forgotPinPasswordInput').value;
+        if (!pwd) return;
+
+        const submitBtn = document.getElementById('forgotPinSubmitBtn');
+        const errorEl = document.getElementById('forgotPinError');
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Verifying...";
+        errorEl.textContent = "";
+
+        try {
+            const resp = await fetch(`/api/profile/${pendingProfileId}/reset-pin-with-password`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: pwd })
+            });
+            const data = await resp.json();
+            if (resp.ok && data.success) {
+                window.location.href = data.redirect || '/';
+            } else {
+                errorEl.textContent = data.error || "Incorrect account password. Please try again.";
+            }
+        } catch (err) {
+            errorEl.textContent = "Network error. Please try again.";
+        } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Reset & Unlock";
+        }
     }
 
     async function selectProfile(id) {

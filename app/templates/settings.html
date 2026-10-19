@@ -6,6 +6,7 @@
     <title>Heirloom</title>
     <link rel="stylesheet" href="/static/style.css">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <script src="/static/password-strength.js"></script>
     <script>
         function copyToClipboard(text, btn) {
             if (navigator.clipboard && window.isSecureContext) {
@@ -78,6 +79,7 @@
                     const pwInput = form.querySelector('#newPasswordInput') || form.querySelector('input[type="password"]');
                     if (pwInput) {
                         pwInput.value = '';
+                        pwInput.dispatchEvent(new Event('input'));
                         pwInput.type = 'password';
                         const toggleBtn = document.getElementById('togglePasswordBtn');
                         if (toggleBtn) toggleBtn.setAttribute('data-lucide', 'eye');
@@ -402,13 +404,21 @@
                 <h2 class="m-0">My Account, {{ user.username }}</h2>
             </div>
 
-            <form action="/settings/change_password" method="post" onsubmit="submitSaveForm(event)" class="flex gap-10 align-center m-0">
-                <div class="flex-1" style="position: relative;">
-                    <input type="password" name="new_password" id="newPasswordInput" placeholder="New Password" required
-                        class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
-                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
-                        onclick="togglePasswordVisibility()">
-                        <i data-lucide="eye" id="togglePasswordBtn"></i>
+            <form action="/settings/change_password" method="post" onsubmit="submitSaveForm(event)" class="flex gap-10 m-0" style="align-items: flex-start;">
+                <div class="flex-1">
+                    <div style="position: relative;">
+                        <input type="password" name="new_password" id="newPasswordInput" placeholder="New Password" required
+                            class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
+                        <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
+                            onclick="togglePasswordVisibility()">
+                            <i data-lucide="eye" id="togglePasswordBtn"></i>
+                        </div>
+                    </div>
+                    <div class="password-strength-container" data-for="newPasswordInput">
+                        <div class="password-strength-bar">
+                            <div class="password-strength-fill"></div>
+                        </div>
+                        <div class="password-strength-text"></div>
                     </div>
                 </div>
                 <button type="submit" class="btn btn-primary"><i data-lucide="rotate-ccw-key"></i> Change
@@ -510,7 +520,7 @@
             <ul>
                 {% for u in users %}
                 <li class="list-item user-list-item">
-                    <div class="user-header-row">
+                    <div class="user-header-row align-center">
                         <div class="user-name-label">
                             <strong>{{ u.username }}</strong> {% if u.is_admin %}<span style="color: var(--text-muted); font-size: 0.85em; font-weight: normal;">(Admin)</span>{% endif %}
                         </div>
@@ -527,18 +537,24 @@
                         <!-- Auto-submit on change removes the need for a button -->
                         <form action="/settings/update_user/{{ u.id }}" method="post" class="m-0 user-permissions-form">
                             <div class="user-permissions-group">
+                                {% if mounted_volumes.movie %}
                                 <label class="toggle-pill"><input type="checkbox" name="movies_access"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         u.movies_access %}checked{% endif %}>
                                     <span>Movies</span></label>
+                                {% endif %}
+                                {% if mounted_volumes.tv %}
                                 <label class="toggle-pill"><input type="checkbox" name="tv_access"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.tv_access
                                         %}checked{% endif %}>
                                     <span>TV Shows</span></label>
+                                {% endif %}
+                                {% if mounted_volumes.photo %}
                                 <label class="toggle-pill"><input type="checkbox" name="photos_access"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         u.photos_access %}checked{% endif %}>
                                     <span>Photos</span></label>
+                                {% endif %}
                             </div>
                             <div class="user-permissions-group">
                                 <label class="toggle-pill"><input type="checkbox" name="downloads_access"
@@ -566,18 +582,62 @@
 
                 {% for invite in invites %}
                 <li class="list-item invite-list-item">
-                    <div class="invite-info">
-                        <strong>Pending User Invitation</strong>
-                        <div class="share-link">Expires {{ invite.expires_at.strftime('%m/%d/%y') }} (Code: <span
-                                class="code-text">{{ invite.code }}</span>)</div>
+                    <div class="user-header-row align-center">
+                        <div class="invite-info">
+                            <strong>Pending User Invitation</strong>
+                            <div class="share-link">Expires {{ invite.expires_at.strftime('%m/%d/%y') }} (Code: <span
+                                    class="code-text">{{ invite.code }}</span>)</div>
+                        </div>
+                        <div class="flex gap-10 align-center invite-actions">
+                            <button type="button" class="btn btn-secondary btn-sm"
+                                onclick="copyToClipboard('{{ host_url }}/register?invite={{ invite.code }}', this)"><i
+                                    data-lucide="copy"></i> Copy Link</button>
+                            <form action="/settings/delete_invite/{{ invite.id }}" method="post" class="m-0">
+                                <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i>
+                                    Delete</button>
+                            </form>
+                        </div>
                     </div>
-                    <div class="flex gap-10 invite-actions">
-                        <button type="button" class="btn btn-secondary btn-sm"
-                            onclick="copyToClipboard('{{ host_url }}/register?invite={{ invite.code }}', this)"><i
-                                data-lucide="copy"></i> Copy Link</button>
-                        <form action="/settings/delete_invite/{{ invite.id }}" method="post" class="m-0">
-                            <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i>
-                                Delete</button>
+                    <div class="user-controls-row">
+                        <form action="/settings/update_invite/{{ invite.id }}" method="post" class="m-0 user-permissions-form">
+                            <div class="user-permissions-group">
+                                {% if mounted_volumes.movie %}
+                                <label class="toggle-pill"><input type="checkbox" name="movies_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        invite.movies_access %}checked{% endif %}>
+                                    <span>Movies</span></label>
+                                {% endif %}
+                                {% if mounted_volumes.tv %}
+                                <label class="toggle-pill"><input type="checkbox" name="tv_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if invite.tv_access
+                                        %}checked{% endif %}>
+                                    <span>TV Shows</span></label>
+                                {% endif %}
+                                {% if mounted_volumes.photo %}
+                                <label class="toggle-pill"><input type="checkbox" name="photos_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        invite.photos_access %}checked{% endif %}>
+                                    <span>Photos</span></label>
+                                {% endif %}
+                            </div>
+                            <div class="user-permissions-group">
+                                <label class="toggle-pill"><input type="checkbox" name="downloads_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        invite.downloads_access %}checked{% endif %}>
+                                    <span>Downloads</span></label>
+                                <label class="toggle-pill"><input type="checkbox" name="watch_together_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        invite.watch_together_access %}checked{% endif %}>
+                                    <span>Watch Together</span></label>
+                                <label class="toggle-pill"><input type="checkbox" name="kids_mode"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if invite.kids_mode
+                                        %}checked{% endif %}>
+                                    <span>Kids Only</span></label>
+                                <label class="toggle-pill"><input type="checkbox" name="can_manage_profiles"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        invite.can_manage_profiles %}checked{% endif %}>
+                                    <span>Household Profiles</span></label>
+                            </div>
                         </form>
                     </div>
                 </li>
@@ -587,9 +647,9 @@
 
         <div class="card">
             <h2 class="mt-0">Metadata Integration (TMDB)</h2>
-            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Provide a free TMDB API Key to automatically
-                download beautiful backdrops, cast, and crew information for your media.</p>
-            {% if tmdb_key %}
+            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Provide a free TMDB API key to automatically
+                enrich your library with high-resolution artwork, cast, crew, and metadata. To obtain a key, create a free account on <a href="https://www.themoviedb.org/" class="inline-link" target="_blank">The Movie Database (TMDB)</a>, navigate to <strong>Settings &gt; API</strong>, and generate an API key.</p>
+             {% if tmdb_key %}
             <p style="color: var(--status-active); font-size: 0.9em; font-weight: bold;" class="mb-15"><i
                     data-lucide="check-circle"
                     style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i> TMDB API Key is
@@ -676,7 +736,7 @@
             </form>
         </div>
         <div style="text-align: center; color: #888; font-size: 0.8em; margin-top: 10px;">
-            <strong>v1.2.0</strong>
+            <strong>v1.3.0</strong>
         </div>
     </div>
 

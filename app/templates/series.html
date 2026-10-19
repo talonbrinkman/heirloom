@@ -4,6 +4,7 @@
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Heirloom - {{ title }}</title>
         <link rel="stylesheet" href="/static/style.css">
+        <script src="/static/fix-match.js"></script>
     </head>
     <body {% if series.backdrop_filename %}class="has-backdrop" style="--backdrop-url: url('/metadata/{{ series.backdrop_filename }}');"{% endif %}>
         <div class="header">
@@ -145,6 +146,12 @@
                                 <i data-lucide="users"></i>
                             </button>
                             {% endif %}
+                            
+                            {% if user.is_admin %}
+                            <button type="button" class="play-btn m-0 fix-match-btn" data-media-type="tv" data-item-id="{{ series.id }}" data-title="{{ title }}" data-year="{{ series.year or '' }}" onclick="triggerFixMatch(this)" title="Fix Match">
+                                <i data-lucide="wrench"></i>
+                            </button>
+                            {% endif %}
                         </div>
                         
                         {% if cast_list %}
@@ -222,6 +229,9 @@
                                         <form action="/download/tv/{{ ep.id }}" method="get">
                                             <button type="submit">Download</button>
                                         </form>
+                                        {% endif %}
+                                        {% if user.is_admin %}
+                                        <button type="button" class="fix-match-btn" data-media-type="tv" data-item-id="{{ ep.id }}" data-title="{{ title }}" data-year="{{ series.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
                                         {% endif %}
                                     </div>
                                 </div>
