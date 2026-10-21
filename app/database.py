@@ -14,16 +14,25 @@ sqlite_url = f"sqlite:///{sqlite_file_name}"
 engine = create_engine(
     sqlite_url,
     echo=False,
-    connect_args={"timeout": 30, "check_same_thread": False},
+    connect_args={"timeout": 60, "check_same_thread": False},
     poolclass=NullPool
 )
 
 @event.listens_for(engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA synchronous=NORMAL")
-    cursor.execute("PRAGMA busy_timeout=30000")
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        pass
+    try:
+        cursor.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
+    try:
+        cursor.execute("PRAGMA busy_timeout=60000")
+    except Exception:
+        pass
     cursor.close()
 
 def create_db_and_tables():
@@ -104,6 +113,14 @@ def create_db_and_tables():
             except Exception:
                 session.rollback()
 
+        # Migrations for Movie trailer_key and tmdb_id
+        for col, dt in [("trailer_key", "VARCHAR"), ("tmdb_id", "INTEGER")]:
+            try:
+                session.exec(text(f"ALTER TABLE movie ADD COLUMN {col} {dt}"))
+                session.commit()
+            except Exception:
+                session.rollback()
+
         # Migrations for WatchHistory current_time and duration
         for col in ["current_time", "duration"]:
             try:
@@ -144,6 +161,12 @@ def create_db_and_tables():
         try:
             session.exec(text("ALTER TABLE user ADD COLUMN can_manage_profiles BOOLEAN DEFAULT 1"))
             session.exec(text("UPDATE user SET can_manage_profiles = 1 WHERE can_manage_profiles IS NULL"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
+            session.exec(text("ALTER TABLE profile ADD COLUMN pin VARCHAR"))
             session.commit()
         except Exception:
             session.rollback()

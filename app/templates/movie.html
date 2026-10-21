@@ -87,10 +87,35 @@
                         </div>
                         
                         <div class="flex gap-15 mb-20">
+                            {% if movie_versions and movie_versions|length > 1 %}
+                            <button type="button" class="play-btn m-0" id="moviePlayBtn" onclick="toggleMenu(event, 'movie-version-menu')" title="{% if has_progress %}Resume{% else %}Play{% endif %}">
+                                <i data-lucide="play" fill="currentColor"></i>
+                                <span>{% if has_progress %}Resume{% else %}Play{% endif %}</span>
+                            </button>
+                            <div class="dropdown-menu" id="movie-version-menu">
+                                {% for v in movie_versions %}
+                                <button type="button" class="version-menu-item {% if v.is_current %}active{% endif %}" onclick="window.location.href='/play/movie/{{ v.id }}'">
+                                    <div class="version-item-header">
+                                        <span class="version-resolution">{{ v.resolution }}</span>
+                                        <span class="version-size">{{ v.file_size }}</span>
+                                    </div>
+                                    <div class="version-filename" title="{{ v.filename }}">{{ v.filename }}</div>
+                                </button>
+                                {% endfor %}
+                            </div>
+                            {% else %}
                             <a href="/play/movie/{{ movie.id }}" class="play-btn m-0">
                                 <i data-lucide="play" fill="currentColor"></i>
-                                {% if has_progress %}Resume{% else %}Play{% endif %}
+                                <span>{% if has_progress %}Resume{% else %}Play{% endif %}</span>
                             </a>
+                            {% endif %}
+
+                            {% if has_progress %}
+                            <a href="/play/movie/{{ movie.id }}?restart=1" class="play-btn m-0 restart-btn" title="Restart from beginning">
+                                <i data-lucide="rotate-ccw"></i>
+                                Restart
+                            </a>
+                            {% endif %}
                             
                             {% if is_watched %}
                             <form action="/history/mark_unwatched/movie/{{ movie.id }}" method="post" title="Mark as Unwatched">
@@ -131,6 +156,10 @@
                                 <i data-lucide="users"></i>
                             </button>
                             {% endif %}
+                            
+                            <a href="/play/movie/{{ movie.id }}?trailer=1" class="play-btn m-0 trailer-btn" title="Watch Trailer">
+                                <i data-lucide="clapperboard"></i>
+                            </a>
                             
                             {% if user.is_admin %}
                             <button type="button" class="play-btn m-0 fix-match-btn" data-media-type="movie" data-item-id="{{ movie.id }}" data-title="{{ movie.title }}" data-year="{{ movie.year or '' }}" onclick="triggerFixMatch(this)" title="Fix Match">
@@ -392,7 +421,70 @@
                 window.location.href = '/profiles';
             }
         }
+
+        function toggleMenu(event, menuId) {
+            event.preventDefault();
+            event.stopPropagation();
+
+            document.querySelectorAll('.dropdown-menu.show').forEach(menu => {
+                if (menu.id !== menuId) {
+                    menu.classList.remove('show');
+                }
+            });
+
+            const menu = document.getElementById(menuId);
+            if (menu) {
+                const isShowing = !menu.classList.contains('show');
+                if (isShowing) {
+                    document.body.appendChild(menu);
+                    menu.style.position = 'fixed';
+                    menu.style.visibility = 'hidden';
+                    menu.classList.add('show');
+
+                    const btnRect = event.currentTarget.getBoundingClientRect();
+                    const menuRect = menu.getBoundingClientRect();
+                    const menuWidth = menuRect.width || 270;
+                    const menuHeight = menuRect.height || 150;
+                    const viewportWidth = window.innerWidth;
+                    const viewportHeight = window.innerHeight;
+
+                    let left = btnRect.left;
+                    if (left < 10) left = 10;
+                    if (left + menuWidth > viewportWidth - 10) {
+                        left = Math.max(10, viewportWidth - menuWidth - 10);
+                    }
+
+                    let top = btnRect.bottom + 5;
+                    if (top + menuHeight > viewportHeight - 10 && btnRect.top - menuHeight - 5 > 10) {
+                        top = btnRect.top - menuHeight - 5;
+                    }
+
+                    menu.style.left = left + 'px';
+                    menu.style.right = 'auto';
+                    menu.style.top = top + 'px';
+                    menu.style.visibility = 'visible';
+                } else {
+                    menu.classList.remove('show');
+                }
+            }
+        }
+
+        document.addEventListener('click', () => {
+            document.querySelectorAll('.dropdown-menu.show').forEach(m => m.classList.remove('show'));
+        });
     </script>
 
+    {% if request.query_params.get('no_trailer') %}
+    <div id="noTrailerToast" style="position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: var(--surface); color: var(--text); padding: 12px 24px; border-radius: var(--radius); border: 1px solid var(--accent); z-index: 1000; box-shadow: 0 4px 20px rgba(0,0,0,0.6); display: flex; align-items: center; gap: 10px;">
+        <i data-lucide="info" style="color: var(--accent);"></i>
+        <span>No trailer available for this movie.</span>
+    </div>
+    <script>
+        setTimeout(() => {
+            const el = document.getElementById('noTrailerToast');
+            if (el) el.style.display = 'none';
+        }, 4000);
+    </script>
+    {% endif %}
 </body>
 </html>

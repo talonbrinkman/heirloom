@@ -54,6 +54,16 @@
 </head>
 
 <body class="player-body">
+    {% if is_trailer and trailer_source == "youtube" %}
+    <iframe id="youtubeTrailerIframe" class="player-video"
+        src="https://www.youtube-nocookie.com/embed/{{ trailer_youtube_key }}?autoplay=1&enablejsapi=1&rel=0&iv_load_policy=3"
+        frameborder="0"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+        allowfullscreen
+        style="position: absolute; inset: 0; width: 100%; height: 100%; border: 0; z-index: 5; background: #000;">
+    </iframe>
+    <video id="mediaPlayer" class="player-video" style="display: none;" playsinline webkit-playsinline crossorigin="anonymous"></video>
+    {% else %}
     <video id="mediaPlayer" class="player-video" playsinline webkit-playsinline crossorigin="anonymous">
         Your browser does not support HTML video.
         {% if subtitle_tracks and subtitle_tracks|length > 0 %}
@@ -70,8 +80,9 @@
             src="{{ subtitle_url }}{% if token %}&token={{ token }}{% endif %}">
         {% endif %}
     </video>
+    {% endif %}
 
-    <div id="loadingSpinner" class="loading-spinner"{% if sync_session_id %} style="opacity: 1;"{% endif %}>
+    <div id="loadingSpinner" class="loading-spinner"{% if sync_session_id %} style="opacity: 1;"{% elif is_trailer and trailer_source == 'youtube' %} style="display: none;"{% endif %}>
         <i data-lucide="loader-circle"></i>
         {% if sync_session_id %}
         <div id="syncLoadingInfo" class="sync-loading-info">
@@ -94,11 +105,13 @@
     </div>
     {% endif %}
 
-    <div id="playerOverlay" class="player-overlay pointer-events-none">
-        <div class="pointer-events-auto player-header">
+    <div id="playerOverlay" class="player-overlay pointer-events-none"{% if is_trailer and trailer_source == 'youtube' %} style="opacity: 1;"{% endif %}>
+        <div class="pointer-events-auto player-header" style="z-index: 25;">
             <div style="flex: 1;">
                 <h1 class="player-title">{{ item.title }}</h1>
-                {% if season_episode %}
+                {% if is_trailer %}
+                <div class="player-subtitle">Trailer{% if trailer_source == 'local' %} • Local File{% else %} • YouTube{% endif %}</div>
+                {% elif season_episode %}
                 <div class="player-subtitle">{{ season_episode | safe }}</div>
                 {% elif item.year %}
                 <div class="player-subtitle">{{ item.year }}</div>
@@ -118,6 +131,7 @@
 
 
 
+        {% if not (is_trailer and trailer_source == 'youtube') %}
         <div class="player-controls pointer-events-auto">
             <!-- Skip Intro & Skip Credits Marker Buttons -->
             <div class="skip-action-container pointer-events-auto" id="skipActionContainer">
@@ -201,12 +215,8 @@
                                 <div class="settings-header">Subtitles</div>
                                 <button class="sub-btn active" data-sub-id="off" onclick="setSubtitleTrack('off')">Off</button>
                                 {% for track in subtitle_tracks %}
-                                    {% if track.is_text %}
-                                    <button class="sub-btn" data-sub-id="{{ track.id }}"
-                                        onclick="setSubtitleTrack('{{ track.id }}')">{{ track.label }}</button>
-                                    {% else %}
-                                    <button class="sub-btn disabled" disabled title="Bitmap subtitle format (requires burn-in transcode)" style="opacity: 0.45; cursor: not-allowed;">{{ track.label }}</button>
-                                    {% endif %}
+                                <button class="sub-btn" data-sub-id="{{ track.id }}" data-is-bitmap="{{ 'true' if not track.is_text else 'false' }}"
+                                    onclick="setSubtitleTrack('{{ track.id }}')">{{ track.label }}</button>
                                 {% endfor %}
                             </div>
                             {% elif subtitle_url %}
@@ -258,6 +268,7 @@
                 </div>
             </div>
         </div>
+        {% endif %}
     </div>
 
     <script>
@@ -307,10 +318,34 @@
         let savedVolume = localStorage.getItem('player_volume');
         savedVolume = savedVolume !== null ? parseFloat(savedVolume) : 1;
 
-        let savedSub = localStorage.getItem('player_sub_track_{{ media_type }}_{{ item.id }}') ||
-                       localStorage.getItem('player_preferred_sub');
-        let activeSubtitleId = savedSub || '';
-        if (!activeSubtitleId) {
+        const subtitleTracksData = {{ subtitle_tracks | tojson | safe }} || [];
+        function isBitmapSubtitle(trackId) {
+            if (!trackId || trackId === 'off') return false;
+            const tr = subtitleTracksData.find(t => t.id === trackId || String(t.stream_index) === String(trackId));
+            return tr ? !tr.is_text : false;
+        }
+
+        const savedSubForThisItem = localStorage.getItem('player_sub_track_{{ media_type }}_{{ item.id }}');
+        const genericPreferredSub = localStorage.getItem('player_preferred_sub');
+        let activeSubtitleId = savedSubForThisItem || genericPreferredSub || '';
+        let activeBurnSub = null;
+
+        // Default to non-burn-in:
+        // 1. Only enable bitmap burn-in on initial load if the user EXPLICITLY chose it for this specific item.
+        // A generic preference from another title should never trigger burn-in transcode!
+        if (savedSubForThisItem && isBitmapSubtitle(savedSubForThisItem)) {
+            activeBurnSub = savedSubForThisItem;
+            activeSubtitleId = savedSubForThisItem;
+        } else if (activeSubtitleId && isBitmapSubtitle(activeSubtitleId)) {
+            // Revert generic preference to non-burn-in text track or 'off'
+            const defaultTrackEl = video.querySelector('track[default]') || video.querySelector('track[data-track-id]');
+            if (defaultTrackEl && localStorage.getItem('player_subtitles') !== 'false') {
+                activeSubtitleId = defaultTrackEl.getAttribute('data-track-id') || 'off';
+            } else {
+                activeSubtitleId = 'off';
+            }
+            activeBurnSub = null;
+        } else if (!activeSubtitleId) {
             const defaultTrackEl = video.querySelector('track[default]') || video.querySelector('track[data-track-id]');
             if (defaultTrackEl && localStorage.getItem('player_subtitles') !== 'false') {
                 activeSubtitleId = defaultTrackEl.getAttribute('data-track-id') || '';
@@ -337,7 +372,13 @@
         offsetStart = hostResumePos;
         console.log(`[Watch Together] Non-host joining session at host playback position: ${formatTime(offsetStart)} (${offsetStart.toFixed(1)}s)`);
         {% else %}
-        if (totalDuration > 0 && savedProgress > 0 && savedProgress < 100) {
+        const urlParams = new URLSearchParams(window.location.search);
+        const isRestart = urlParams.get('restart') === '1' || "{{ is_restart }}" === "True";
+        if (isRestart) {
+            savedProgress = 0;
+            offsetStart = 0;
+            console.log("[Playback] Restart requested: starting playback at 0:00");
+        } else if (totalDuration > 0 && savedProgress > 0 && savedProgress < 100) {
             let resumePos = (savedProgress / 100) * totalDuration;
             {% if not sync_session_id %}
             if (rewindSeconds > 0) {
@@ -509,8 +550,14 @@
         }
 
         async function updatePlaybackStats() {
+            {% if is_trailer %}
+            return;
+            {% endif %}
             const startTime = performance.now();
             let infoUrl = `/stream-info/{{ media_type }}/{{ item.id }}?res=${encodeURIComponent(currentRes)}&start=${offsetStart}&audio_track=${currentAudioTrack}&_t=${Date.now()}`;
+            if (activeBurnSub) {
+                infoUrl += `&burn_sub=${encodeURIComponent(activeBurnSub)}`;
+            }
             {% if token %}
             infoUrl += `&token={{ token }}`;
             {% endif %}
@@ -774,8 +821,24 @@
         }
 
         function loadVideoSource() {
+            {% if is_trailer and trailer_source == 'youtube' %}
+            if (loadingSpinner) loadingSpinner.style.opacity = '0';
+            return;
+            {% endif %}
+            {% if is_trailer and trailer_source == 'local' %}
+            isHlsActive = false;
+            if (loadingSpinner) loadingSpinner.style.opacity = '0';
+            video.src = "{{ trailer_stream_url }}";
+            video.load();
+            video.play().catch(e => console.log('Autoplay prevented:', e));
+            return;
+            {% endif %}
             let masterUrl = `/hls/{{ media_type }}/{{ item.id }}/master.m3u8?audio_track=${currentAudioTrack}`;
             let legacyUrl = `/stream/{{ media_type }}/{{ item.id }}?res=${currentRes}&start=${offsetStart}&audio_track=${currentAudioTrack}`;
+            if (activeBurnSub) {
+                masterUrl += `&burn_sub=${encodeURIComponent(activeBurnSub)}`;
+                legacyUrl += `&burn_sub=${encodeURIComponent(activeBurnSub)}`;
+            }
             {% if token %}
             masterUrl += `&token={{ token }}`;
             legacyUrl += `&token={{ token }}`;
@@ -1023,6 +1086,9 @@
             }
 
             // Sync progress to backend
+            {% if is_trailer %}
+            return;
+            {% endif %}
             const now = Date.now();
             if (now - lastUpdate > 5000 && effectiveDuration > 0) {
                 const currentProgress = (actualTime / effectiveDuration) * 100;
@@ -1108,6 +1174,10 @@
         }
 
         function exitPlayer() {
+            {% if is_trailer %}
+            window.location.href = "/movie/{{ item.id }}";
+            return;
+            {% endif %}
             {% if is_mobile %}
             if (window.FlutterApp) {
                 window.FlutterApp.postMessage('close');
@@ -1210,6 +1280,14 @@
             if (!video.textTracks || video.textTracks.length === 0) return;
             const trackEls = video.querySelectorAll('track');
             
+            // If burn-in is active, hide all text tracks so nothing duplicates
+            if (activeBurnSub) {
+                for (let i = 0; i < video.textTracks.length; i++) {
+                    video.textTracks[i].mode = 'hidden';
+                }
+                return;
+            }
+
             // If activeSubtitleId is not set yet, pick default or first track if subtitlesEnabled
             if (!activeSubtitleId || activeSubtitleId === '') {
                 if (trackEls.length > 0) {
@@ -1234,22 +1312,71 @@
         }
 
         function setSubtitleTrack(trackId) {
+            const wasBurnSub = Boolean(activeBurnSub);
+            const isTargetBitmap = isBitmapSubtitle(trackId);
+
             if (!trackId || trackId === 'off') {
                 subtitlesEnabled = false;
                 activeSubtitleId = 'off';
+                activeBurnSub = null;
                 localStorage.setItem('player_subtitles', 'false');
                 localStorage.setItem('player_sub_track_{{ media_type }}_{{ item.id }}', 'off');
                 localStorage.setItem('player_preferred_sub', 'off');
-            } else {
+
+                if (wasBurnSub) {
+                    // Revert from burn-in transcode stream back to clean direct stream/remux
+                    pendingInitialSeek = getActualTime();
+                    offsetStart = pendingInitialSeek;
+                    loadVideoSource();
+                } else {
+                    applySubtitlesToVideo();
+                }
+            } else if (isTargetBitmap) {
+                const newBurnSub = trackId;
+                const burnChanged = (activeBurnSub !== newBurnSub);
                 subtitlesEnabled = true;
                 activeSubtitleId = trackId;
+                activeBurnSub = newBurnSub;
                 localStorage.setItem('player_subtitles', 'true');
                 localStorage.setItem('player_sub_track_{{ media_type }}_{{ item.id }}', trackId);
                 localStorage.setItem('player_preferred_sub', trackId);
                 localStorage.setItem('player_last_active_sub', trackId);
+
+                // Disable any native WebVTT cues
+                if (video.textTracks) {
+                    for (let i = 0; i < video.textTracks.length; i++) {
+                        video.textTracks[i].mode = 'hidden';
+                    }
+                }
+
+                if (burnChanged) {
+                    // Reload stream at current playback time with subtitle burn-in pipeline
+                    pendingInitialSeek = getActualTime();
+                    offsetStart = pendingInitialSeek;
+                    loadVideoSource();
+                }
+            } else {
+                // Text track selected (WebVTT native playback)
+                subtitlesEnabled = true;
+                activeSubtitleId = trackId;
+                activeBurnSub = null;
+                localStorage.setItem('player_subtitles', 'true');
+                localStorage.setItem('player_sub_track_{{ media_type }}_{{ item.id }}', trackId);
+                localStorage.setItem('player_preferred_sub', trackId);
+                localStorage.setItem('player_last_active_sub', trackId);
+
+                if (wasBurnSub) {
+                    // Switch back from burn-in to direct stream with native text track
+                    pendingInitialSeek = getActualTime();
+                    offsetStart = pendingInitialSeek;
+                    loadVideoSource();
+                } else {
+                    applySubtitlesToVideo();
+                }
             }
-            applySubtitlesToVideo();
+
             updateSubtitleUI();
+            updatePlaybackStats();
             
             const settingsMenu = document.getElementById('settingsMenu');
             if (settingsMenu && settingsMenu.classList.contains('show')) {
@@ -1262,16 +1389,25 @@
                 setSubtitleTrack('off');
             } else {
                 let targetSub = localStorage.getItem('player_last_active_sub');
-                const trackEls = video.querySelectorAll('track');
+                // When toggling on, prefer non-burn-in text tracks first
+                if (!targetSub || targetSub === 'off' || isBitmapSubtitle(targetSub)) {
+                    const firstTextTrack = subtitleTracksData.find(t => t.is_text);
+                    if (firstTextTrack) {
+                        targetSub = firstTextTrack.id;
+                    }
+                }
                 if (!targetSub || targetSub === 'off') {
-                    if (trackEls.length > 0) {
-                        targetSub = trackEls[0].getAttribute('data-track-id');
+                    if (subtitleTracksData && subtitleTracksData.length > 0) {
+                        targetSub = subtitleTracksData[0].id;
+                    } else {
+                        const trackEls = video.querySelectorAll('track');
+                        if (trackEls.length > 0) {
+                            targetSub = trackEls[0].getAttribute('data-track-id');
+                        }
                     }
                 }
                 if (targetSub && targetSub !== 'off') {
                     setSubtitleTrack(targetSub);
-                } else if (trackEls.length > 0) {
-                    setSubtitleTrack(trackEls[0].getAttribute('data-track-id'));
                 }
             }
         }
@@ -1654,6 +1790,9 @@
 
         // Notify server that active stream stopped on exit
         window.addEventListener('beforeunload', () => {
+            {% if is_trailer %}
+            return;
+            {% endif %}
             try {
                 let stopUrl = '/progress/{{ media_type }}/{{ item.id }}/stop';
                 {% if token %}

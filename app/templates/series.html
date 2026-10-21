@@ -100,6 +100,13 @@
                                 {% if has_progress %}Resume{% else %}Play{% endif %}
                             </a>
                             
+                            {% if has_progress %}
+                            <a href="{{ resume_link }}{% if '?' in resume_link %}&{% else %}?{% endif %}restart=1" class="play-btn m-0 restart-btn" title="Restart episode from beginning">
+                                <i data-lucide="rotate-ccw"></i>
+                                Restart
+                            </a>
+                            {% endif %}
+                            
                             {% if is_series_watched %}
                             <form action="/history/mark_unwatched/tv/{{ series.id }}" method="post" title="Mark Series as Unwatched">
                                 <button type="submit" class="play-btn m-0" style="background: var(--accent);">
@@ -237,7 +244,7 @@
                                 </div>
                                 <div class="media-year" title="{{ ep.season_episode }}">
                                     {% for part in ep.season_episode.replace('<br>', ' • ').split(' • ') %}
-                                    <span class="media-year-line">{{ part }}</span>
+                                    <span class="media-year-line">{% if 'Season ' in part and ' Episode ' in part %}Episode {{ part.split(' Episode ')[1] }}{% else %}{{ part }}{% endif %}</span>
                                     {% endfor %}
                                 </div>
                             </div>

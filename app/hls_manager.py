@@ -5,10 +5,12 @@ import time
 import math
 import threading
 import re
+import urllib.parse
 from typing import Optional, Dict
 from .ffmpeg_setup import (
     get_ffmpeg_path, probe_media_streams, get_video_transcode_args, 
-    get_working_encoder, get_keyframe_before_time
+    get_working_encoder, get_keyframe_before_time, get_video_transcode_pipeline,
+    parse_burn_sub_index
 )
 
 SEGMENT_DURATION = 6.0  # 6.0 seconds per HLS chunk
@@ -30,7 +32,8 @@ class HLSTranscodeWorker:
         res: str,
         audio_track: int,
         start_segment: int,
-        hw_profile: str
+        hw_profile: str,
+        burn_sub: Optional[int] = None
     ):
         self.session_key = session_key
         self.media_path = media_path
@@ -39,6 +42,7 @@ class HLSTranscodeWorker:
         self.audio_track = audio_track
         self.start_segment = start_segment
         self.hw_profile = hw_profile
+        self.burn_sub = burn_sub
         self.process: Optional[subprocess.Popen] = None
         self.last_active: float = time.time()
         self.lock = threading.Lock()
@@ -55,7 +59,9 @@ class HLSTranscodeWorker:
             audio_tracks = probe.get("audio_tracks", [])
             selected_track = audio_tracks[self.audio_track] if (0 <= self.audio_track < len(audio_tracks)) else (audio_tracks[0] if audio_tracks else None)
             track_can_copy = selected_track.get("can_direct_stream", False) if selected_track else False
-            can_direct_stream_video = (self.res == "original" and probe.get("can_direct_stream_video", False))
+            
+            # Video stream copy is only possible when no subtitle burn-in is requested
+            can_direct_stream_video = (self.res == "original" and probe.get("can_direct_stream_video", False) and self.burn_sub is None)
 
             cmd = [get_ffmpeg_path(), "-v", "error", "-y"]
             if start_time > 0:
@@ -65,22 +71,31 @@ class HLSTranscodeWorker:
 
             cmd.extend(["-i", self.media_path])
 
-            cmd.extend(["-map", "0:v:0"])
-            if selected_track:
-                cmd.extend(["-map", f"0:a:{self.audio_track}"])
-            else:
-                cmd.append("-an")
-            cmd.extend(["-sn", "-map_chapters", "-1"])
-
             if can_direct_stream_video:
+                cmd.extend(["-map", "0:v:0"])
+                if selected_track:
+                    cmd.extend(["-map", f"0:a:{self.audio_track}"])
+                else:
+                    cmd.append("-an")
+                cmd.extend(["-sn", "-map_chapters", "-1"])
                 cmd.extend(["-c:v", "copy"])
                 if track_can_copy:
                     cmd.extend(["-c:a", "copy"])
                 else:
                     cmd.extend(["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-af", "aresample=async=1"])
             else:
-                transcode_args = get_video_transcode_args(res=self.res, profile=self.hw_profile)
-                cmd.extend(transcode_args)
+                pipeline_args, v_map, _ = get_video_transcode_pipeline(
+                    res=self.res,
+                    profile=self.hw_profile,
+                    burn_sub_stream=self.burn_sub
+                )
+                cmd.extend(pipeline_args)
+                cmd.extend(["-map", v_map])
+                if selected_track:
+                    cmd.extend(["-map", f"0:a:{self.audio_track}"])
+                else:
+                    cmd.append("-an")
+                cmd.extend(["-sn", "-map_chapters", "-1"])
                 cmd.extend(["-force_key_frames", f"expr:gte(t,n_forced*{int(SEGMENT_DURATION)})"])
                 if selected_track:
                     cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ac", "2", "-af", "aresample=async=1"])
@@ -247,6 +262,7 @@ class HLSManager:
         item_id: int,
         file_path: str,
         audio_track: int = 0,
+        burn_sub: Optional[str] = None,
         token: Optional[str] = None
     ) -> str:
         """Constructs an HLS Master Playlist listing all available quality variants for ABR."""
@@ -282,6 +298,7 @@ class HLSManager:
         ]
 
         token_param = f"&token={token}" if token else ""
+        sub_param = f"&burn_sub={urllib.parse.quote(str(burn_sub))}" if burn_sub else ""
 
         for res_key, w, h, br, name in active_tiers:
             codec_str = 'avc1.640028,mp4a.40.2' if h >= 1080 else 'avc1.4d401f,mp4a.40.2'
@@ -289,7 +306,7 @@ class HLSManager:
                 f'#EXT-X-STREAM-INF:BANDWIDTH={int(br * 1.15)},AVERAGE-BANDWIDTH={int(br)},'
                 f'RESOLUTION={w}x{h},CODECS="{codec_str}",NAME="{name}"'
             )
-            lines.append(f"variant_{res_key}.m3u8?audio_track={audio_track}{token_param}")
+            lines.append(f"variant_{res_key}.m3u8?audio_track={audio_track}{sub_param}{token_param}")
             lines.append("")
 
         return "\n".join(lines)
@@ -301,6 +318,7 @@ class HLSManager:
         res: str,
         duration: float,
         audio_track: int = 0,
+        burn_sub: Optional[str] = None,
         token: Optional[str] = None
     ) -> str:
         """Constructs an HLS VOD Media Playlist mapping all segments across total duration."""
@@ -320,12 +338,13 @@ class HLSManager:
         ]
 
         token_param = f"&token={token}" if token else ""
+        sub_param = f"&burn_sub={urllib.parse.quote(str(burn_sub))}" if burn_sub else ""
 
         for i in range(num_segments):
             seg_start = i * SEGMENT_DURATION
             seg_len = min(SEGMENT_DURATION, duration - seg_start)
             lines.append(f"#EXTINF:{seg_len:.6f},")
-            lines.append(f"segment_{res}_{i}.ts?audio_track={audio_track}{token_param}")
+            lines.append(f"segment_{res}_{i}.ts?audio_track={audio_track}{sub_param}{token_param}")
 
         lines.append("#EXT-X-ENDLIST")
         return "\n".join(lines)
@@ -338,18 +357,23 @@ class HLSManager:
         res: str,
         audio_track: int,
         segment_idx: int,
+        burn_sub: Optional[str] = None,
         hw_profile: str = "auto"
     ) -> Optional[str]:
         """
         Retrieves a completed .ts segment, spawning or advancing the transcode worker as needed.
         """
+        probe = probe_media_streams(file_path)
+        sub_idx = parse_burn_sub_index(burn_sub, probe.get("subtitle_tracks", []))
+        sub_key = f"s{sub_idx}" if sub_idx is not None else "snone"
+
         cache_base = get_hls_cache_dir()
-        session_folder = f"{media_type}_{item_id}_{res}_a{audio_track}"
+        session_folder = f"{media_type}_{item_id}_{res}_a{audio_track}_{sub_key}"
         output_dir = os.path.join(cache_base, session_folder)
         target_seg = os.path.join(output_dir, f"seg_{segment_idx:04d}.ts")
 
         # 1. If segment already on disk and finalized, return immediately
-        worker_key = f"{media_type}_{item_id}_{res}_{audio_track}"
+        worker_key = f"{media_type}_{item_id}_{res}_{audio_track}_{sub_key}"
         with self.lock:
             existing_worker = self.workers.get(worker_key)
             if existing_worker:
@@ -375,11 +399,6 @@ class HLSManager:
         with self.lock:
             worker = self.workers.get(worker_key)
             latest_idx = worker.get_latest_segment_idx() if worker else -1
-            # Check if current worker is producing towards segment_idx
-            # The worker is kept only if currently running and segment_idx is within its immediate queue:
-            # between worker.start_segment and (latest_idx + 2).
-            # If segment_idx is beyond latest_idx + 2, the user has sought forward;
-            # if segment_idx < worker.start_segment, the user has sought backward.
             if (
                 worker and 
                 not worker.is_stopped and
@@ -400,7 +419,8 @@ class HLSManager:
                     res=res,
                     audio_track=audio_track,
                     start_segment=segment_idx,
-                    hw_profile=hw_profile
+                    hw_profile=hw_profile,
+                    burn_sub=sub_idx
                 )
                 self.workers[worker_key] = worker
                 worker_to_start = worker

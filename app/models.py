@@ -26,6 +26,7 @@ class Profile(SQLModel, table=True):
     avatar_icon: Optional[str] = Field(default="user")
     is_primary: bool = Field(default=False)
     is_kids: bool = Field(default=False)
+    pin: Optional[str] = Field(default=None)
     pin_hash: Optional[str] = Field(default=None)
     rewind_seconds: int = Field(default=0)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -48,6 +49,8 @@ class Movie(SQLModel, table=True):
     intro_end: Optional[float] = None
     credits_start: Optional[float] = None
     credits_end: Optional[float] = None
+    trailer_key: Optional[str] = None
+    tmdb_id: Optional[int] = None
 
 class TVShow(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

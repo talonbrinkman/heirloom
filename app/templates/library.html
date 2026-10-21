@@ -482,9 +482,13 @@
                             `;
                     }
 
+                    const targetUrl = (mediaType === 'photo' && !isAlbum)
+                        ? `${m.url}?from=${encodeURIComponent(window.location.pathname + window.location.search)}`
+                        : m.url;
+
                     card.innerHTML = `
                             <div class="${posterClass}">
-                                <a href="${m.url}">
+                                <a href="${targetUrl}">
                                     ${posterHtml}
                                 </a>
                                 ${hoverContent}

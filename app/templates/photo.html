@@ -91,15 +91,16 @@
             {% if user.downloads_access %}
             <a href="/photo_file/{{ photo.id }}" download class="close-btn" title="Download"><i data-lucide="download"></i></a>
             {% endif %}
-            <a href="{% if photo.album %}/library/photo?album={{ photo.album|urlencode }}{% else %}/library/photo{% endif %}" class="close-btn" title="Close" id="photoCloseBtn"><i data-lucide="x"></i></a>
+            <a href="{{ close_url }}" class="close-btn" title="Close" id="photoCloseBtn"><i data-lucide="x"></i></a>
         </div>
     </div>
     
+    {% set from_query = ('?from=' + close_url|urlencode) if close_url else '' %}
     {% if next_photo_id %}
-    <a href="/photo/{{ next_photo_id }}" class="photo-arrow left-arrow"><i data-lucide="chevron-left"></i></a>
+    <a href="/photo/{{ next_photo_id }}{{ from_query }}" class="photo-arrow left-arrow"><i data-lucide="chevron-left"></i></a>
     {% endif %}
     {% if prev_photo_id %}
-    <a href="/photo/{{ prev_photo_id }}" class="photo-arrow right-arrow"><i data-lucide="chevron-right"></i></a>
+    <a href="/photo/{{ prev_photo_id }}{{ from_query }}" class="photo-arrow right-arrow"><i data-lucide="chevron-right"></i></a>
     {% endif %}
 
     {% if is_video %}

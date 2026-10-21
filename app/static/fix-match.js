@@ -179,14 +179,13 @@ async function searchFixMatches() {
         }
 
         resultsContainer.innerHTML = candidates.map(c => `
-            <div class="fix-match-item">
+            <div class="fix-match-item" onclick="applyFixMatch(${c.tmdb_id}, this)">
                 <img src="${c.poster_url || ''}" class="fix-match-poster" onerror="this.style.opacity='0.2'">
                 <div class="fix-match-info">
                     <div class="fix-match-title" title="${escapeHtml(c.title)}">${escapeHtml(c.title)}</div>
                     <div class="fix-match-year">${c.year ? c.year : 'Unknown Year'}</div>
                     <div class="fix-match-overview">${escapeHtml(c.overview || 'No overview available.')}</div>
                 </div>
-                <button type="button" class="btn btn-sm" onclick="applyFixMatch(${c.tmdb_id}, this)">Match</button>
             </div>
         `).join('');
 

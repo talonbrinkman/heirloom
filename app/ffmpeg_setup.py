@@ -4,6 +4,7 @@ import shutil
 import json
 import re
 import time
+from typing import Optional, Union
 
 LANG_MAP = {
     "eng": "English", "en": "English",
@@ -103,6 +104,7 @@ def get_sidecar_subtitles(file_path: str) -> list[dict]:
                     "filename": fname,
                     "codec": ext_clean,
                     "is_text": True,
+                    "is_bitmap": False,
                     "language": lang_code,
                     "title": fname,
                     "label": label,
@@ -417,16 +419,81 @@ def get_working_encoder(profile: str = "auto") -> tuple[str, list[str]]:
     # Fallback to software CPU libx264
     return "software", ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]
 
+def parse_burn_sub_index(burn_sub: Optional[Union[str, int]], subtitle_tracks: list[dict]) -> Optional[int]:
+    """
+    Resolves a burn_sub track identifier (e.g. 'stream:2', '2', or a track ID)
+    into an absolute media container stream index.
+    Returns None if subtitle should not be burned in or track is not found.
+    """
+    if not burn_sub:
+        return None
+    sub_str = str(burn_sub).strip().lower()
+    if sub_str in ("", "off", "none", "false", "0"):
+        return None
+    if sub_str.startswith("stream:"):
+        raw_idx = sub_str.replace("stream:", "")
+        try:
+            target_idx = int(raw_idx)
+            for s in subtitle_tracks:
+                if s.get("stream_index") == target_idx:
+                    return target_idx
+            return target_idx
+        except ValueError:
+            return None
+    try:
+        target_idx = int(sub_str)
+        for s in subtitle_tracks:
+            if s.get("stream_index") == target_idx:
+                return target_idx
+    except ValueError:
+        pass
+    for s in subtitle_tracks:
+        if s.get("id") == burn_sub:
+            return s.get("stream_index")
+    return None
+
+def get_video_transcode_pipeline(
+    res: str = "original",
+    profile: str = "auto",
+    burn_sub_stream: Optional[int] = None
+) -> tuple[list[str], str, str]:
+    """
+    Constructs FFmpeg video encoding parameters, filter graph, and stream mapping.
+    Handles hardware acceleration, resolution downscaling, and dynamic bitmap subtitle burn-in.
+    Returns: (pipeline_ffmpeg_args, video_map_specifier, encoder_type)
+    """
+    enc_type, base_args = get_working_encoder(profile)
+    
+    if burn_sub_stream is not None:
+        # Dynamic filter_complex pipeline: burns bitmap subtitles directly into video frames
+        if enc_type == "vaapi":
+            if res != "original":
+                fc = f"[0:v:0][0:{burn_sub_stream}]overlay,scale=-2:{res},format=nv12,hwupload[v]"
+            else:
+                fc = f"[0:v:0][0:{burn_sub_stream}]overlay,format=nv12,hwupload[v]"
+            args = ["-vaapi_device", "/dev/dri/renderD128", "-filter_complex", fc, "-c:v", "h264_vaapi"]
+        else:
+            if res != "original":
+                fc = f"[0:v:0][0:{burn_sub_stream}]overlay[vsub];[vsub]scale=-2:{res}[v]"
+            else:
+                fc = f"[0:v:0][0:{burn_sub_stream}]overlay[v]"
+            args = ["-filter_complex", fc] + list(base_args)
+        return args, "[v]", enc_type
+    else:
+        # Standard video transcode without subtitle burn-in
+        if res != "original":
+            if enc_type == "vaapi":
+                args = ["-vaapi_device", "/dev/dri/renderD128", "-vf", f"format=nv12,hwupload,scale_vaapi=-2:{res}", "-c:v", "h264_vaapi"]
+            else:
+                args = list(base_args) + ["-vf", f"scale=-2:{res}"]
+        else:
+            args = list(base_args)
+        return args, "0:v:0", enc_type
+
 def get_video_transcode_args(res: str = "original", profile: str = "auto") -> list[str]:
     """Generates FFmpeg video encoding parameters based on resolution and hardware profile."""
-    enc_type, base_args = get_working_encoder(profile)
-    cmd = list(base_args)
-    if res != "original":
-        if enc_type == "vaapi":
-            cmd = ["-vaapi_device", "/dev/dri/renderD128", "-vf", f"format=nv12,hwupload,scale_vaapi=-2:{res}", "-c:v", "h264_vaapi"]
-        else:
-            cmd.extend(["-vf", f"scale=-2:{res}"])
-    return cmd
+    args, _, _ = get_video_transcode_pipeline(res=res, profile=profile, burn_sub_stream=None)
+    return args
 
 _media_probe_cache: dict[str, tuple[float, dict]] = {}
 
@@ -561,6 +628,7 @@ def probe_media_streams(file_path: str) -> dict:
                 
                 # Check if text-based or bitmap (PGS / DVDsub)
                 is_text = c_name in ("subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text")
+                is_bitmap = not is_text
                 
                 lang_clean = lang.lower().strip()
                 friendly_lang = LANG_MAP.get(lang_clean, lang.upper() if lang else f"Track {idx + 1}")
@@ -577,7 +645,8 @@ def probe_media_streams(file_path: str) -> dict:
                 if is_sdh and "sdh" not in (title or "").lower():
                     details.append("SDH")
                 if not is_text:
-                    details.append(c_name.upper() if c_name else "Bitmap")
+                    codec_display = "PGS" if "pgs" in c_name else ("VobSub" if "dvd" in c_name else (c_name.upper() if c_name else "Bitmap"))
+                    details.append(f"{codec_display} (Burn-in)")
 
                 if details:
                     label = f"{parts[0]} [{', '.join(details)}]"
@@ -590,6 +659,7 @@ def probe_media_streams(file_path: str) -> dict:
                     "stream_index": stream_idx,
                     "codec": c_name,
                     "is_text": is_text,
+                    "is_bitmap": is_bitmap,
                     "language": lang_clean or "und",
                     "title": title,
                     "label": label,

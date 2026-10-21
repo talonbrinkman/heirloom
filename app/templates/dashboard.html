@@ -558,7 +558,7 @@
                         {% for p in recent_photos %}
                         <div class="media-card photo-card">
                             <div class="poster-container photo-poster-container">
-                                <a href="/photo/{{ p.id }}">
+                                <a href="/photo/{{ p.id }}?from=/">
                                     {% if p.poster_filename %}
                                     <img src="/metadata/{{ p.poster_filename }}" class="poster">
                                     {% else %}
@@ -566,9 +566,6 @@
                                         <i data-lucide="image"></i>
                                     </div>
                                     {% endif %}
-                                </a>
-                                <a href="/photo/{{ p.id }}" class="icon-btn hover-play">
-                                    <i data-lucide="play" fill="currentColor"></i>
                                 </a>
                                 <button class="icon-btn three-dots-btn"
                                     onclick="toggleMenu(event, 'menu-recent-photos-{{ loop.index }}')">

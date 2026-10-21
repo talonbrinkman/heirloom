@@ -21,12 +21,13 @@
              data-color="{{ p.avatar_color }}"
              data-icon="{{ p.avatar_icon or 'user' }}"
              data-kids="{{ '1' if p.is_kids else '0' }}"
-             data-has-pin="{{ '1' if p.pin_hash else '0' }}"
+             data-has-pin="{{ '1' if (p.has_pin or p.pin_hash) else '0' }}"
+             data-pin="{{ p.pin or '' }}"
              data-is-primary="{{ '1' if p.is_primary else '0' }}"
              onclick="handleProfileCardClick(this)">
             <div class="profile-avatar-box" style="background-color: {{ p.avatar_color }};">
                 <i data-lucide="{{ p.avatar_icon or 'user' }}"></i>
-                {% if p.pin_hash %}
+                {% if p.has_pin or p.pin_hash %}
                 <div class="profile-badge-lock" title="PIN Protected">
                     <i data-lucide="lock"></i>
                 </div>
@@ -204,22 +205,17 @@
                 <label style="font-size: 0.9rem; font-weight: 600; display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
                     <i data-lucide="lock" style="width: 16px; height: 16px; color: var(--accent);"></i> Profile Lock (PIN)
                 </label>
-                <p style="font-size: 0.8rem; color: var(--text-muted); margin: 0 0 10px 0;">Protect this profile with a 4 to 15 digit numeric PIN.</p>
+                <p style="font-size: 0.8rem; color: var(--text-muted); margin: 0 0 10px 0;">Protect this profile with a 4 to 15 digit numeric PIN. Leave blank to remove PIN and unlock.</p>
 
-                <div id="pinCurrentStatus" style="display: none; margin-bottom: 10px;">
-                    <div style="display: flex; align-items: center; justify-content: space-between; font-size: 0.85rem;">
-                        <span style="color: #10b981;"><i data-lucide="check" style="width: 14px; height: 14px; vertical-align: middle;"></i> PIN currently active</span>
-                        <label class="toggle-pill" style="margin: 0; padding: 4px 10px; font-size: 0.8rem;">
-                            <input type="checkbox" id="removePinCheckbox" class="hidden-checkbox" onchange="toggleRemovePin(this)">
-                            <span>Remove PIN</span>
-                        </label>
-                    </div>
-                </div>
-
-                <div id="pinInputWrapper">
+                <div style="position: relative;">
                     <input type="password" id="profilePinInput" class="w-full m-0" 
-                           placeholder="Enter 4–15 digits (numbers only)" 
-                           inputmode="numeric" pattern="[0-9]*" maxlength="15">
+                           placeholder="Enter 4–15 digits (or leave blank to unlock)" 
+                           inputmode="numeric" pattern="[0-9]*" maxlength="15"
+                           style="padding-right: 40px; box-sizing: border-box;">
+                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: var(--text-muted); display: flex;" 
+                         onclick="toggleProfilePinVisibility()" title="Toggle PIN visibility">
+                        <i data-lucide="eye" id="toggleProfilePinBtn"></i>
+                    </div>
                 </div>
             </div>
 
@@ -454,9 +450,13 @@
         document.getElementById('editProfileId').value = "";
         document.getElementById('profileNameInput').value = "";
         document.getElementById('profileKidsInput').checked = false;
-        document.getElementById('profilePinInput').value = "";
-        document.getElementById('pinCurrentStatus').style.display = "none";
-        document.getElementById('pinInputWrapper').style.display = "block";
+        
+        const pinInput = document.getElementById('profilePinInput');
+        pinInput.type = "password";
+        pinInput.value = "";
+        const eyeBtn = document.getElementById('toggleProfilePinBtn');
+        if (eyeBtn) eyeBtn.setAttribute('data-lucide', 'eye');
+
         document.getElementById('deleteProfileBtn').style.display = "none";
         document.getElementById('formError').style.display = "none";
 
@@ -466,6 +466,7 @@
         const firstIcon = document.querySelector('.icon-swatch-btn');
         if (firstIcon) selectIcon(firstIcon);
 
+        if (window.lucide) lucide.createIcons();
         document.getElementById('profileEditModal').style.display = "flex";
         document.getElementById('profileNameInput').focus();
     }
@@ -478,22 +479,20 @@
         const isKids = card.dataset.kids === '1';
         const hasPin = card.dataset.hasPin === '1';
         const isPrimary = card.dataset.isPrimary === '1';
+        const pin = card.dataset.pin || (hasPin ? '••••' : '');
 
         document.getElementById('modalTitle').textContent = "Edit Profile";
         document.getElementById('editProfileId').value = id;
         document.getElementById('profileNameInput').value = name;
         document.getElementById('profileKidsInput').checked = isKids;
-        document.getElementById('profilePinInput').value = "";
-        document.getElementById('formError').style.display = "none";
+        
+        const pinInput = document.getElementById('profilePinInput');
+        pinInput.type = "password";
+        pinInput.value = pin;
+        const eyeBtn = document.getElementById('toggleProfilePinBtn');
+        if (eyeBtn) eyeBtn.setAttribute('data-lucide', 'eye');
 
-        if (hasPin) {
-            document.getElementById('pinCurrentStatus').style.display = "block";
-            document.getElementById('removePinCheckbox').checked = false;
-            document.getElementById('pinInputWrapper').style.display = "none";
-        } else {
-            document.getElementById('pinCurrentStatus').style.display = "none";
-            document.getElementById('pinInputWrapper').style.display = "block";
-        }
+        document.getElementById('formError').style.display = "none";
 
         // Only allow deleting non-primary profiles
         document.getElementById('deleteProfileBtn').style.display = isPrimary ? "none" : "inline-flex";
@@ -506,6 +505,7 @@
         const iconEl = document.querySelector(`.icon-swatch-btn[data-icon="${icon}"]`) || document.querySelector('.icon-swatch-btn');
         if (iconEl) selectIcon(iconEl);
 
+        if (window.lucide) lucide.createIcons();
         document.getElementById('profileEditModal').style.display = "flex";
         document.getElementById('profileNameInput').focus();
     }
@@ -514,14 +514,18 @@
         document.getElementById('profileEditModal').style.display = "none";
     }
 
-    function toggleRemovePin(checkbox) {
-        const wrapper = document.getElementById('pinInputWrapper');
-        if (checkbox.checked) {
-            wrapper.style.display = "none";
-            document.getElementById('profilePinInput').value = "";
+    function toggleProfilePinVisibility() {
+        const input = document.getElementById('profilePinInput');
+        const icon = document.getElementById('toggleProfilePinBtn');
+        if (!input || !icon) return;
+        if (input.type === 'password') {
+            input.type = 'text';
+            icon.setAttribute('data-lucide', 'eye-off');
         } else {
-            wrapper.style.display = "block";
+            input.type = 'password';
+            icon.setAttribute('data-lucide', 'eye');
         }
+        if (window.lucide) lucide.createIcons();
     }
 
     async function saveProfile(e) {
@@ -529,12 +533,13 @@
         const id = document.getElementById('editProfileId').value;
         const name = document.getElementById('profileNameInput').value.trim();
         const isKids = document.getElementById('profileKidsInput').checked;
-        const removePin = document.getElementById('removePinCheckbox') ? document.getElementById('removePinCheckbox').checked : false;
         const pin = document.getElementById('profilePinInput').value.trim();
 
-        if (pin && (pin.length < 4 || pin.length > 15 || !/^\d+$/.test(pin))) {
-            showFormError("PIN must be 4 to 15 digits (numbers only).");
-            return;
+        if (pin && pin !== '__EXISTING_PIN__' && pin !== '••••' && pin !== '••••••••') {
+            if (pin.length < 4 || pin.length > 15 || !/^\d+$/.test(pin)) {
+                showFormError("PIN must be 4 to 15 digits (numbers only).");
+                return;
+            }
         }
 
         const payload = {
@@ -542,8 +547,8 @@
             avatar_color: activeColor,
             avatar_icon: activeIcon,
             is_kids: isKids,
-            pin: pin || null,
-            remove_pin: removePin
+            pin: pin,
+            remove_pin: !pin
         };
 
         const isNew = !id;

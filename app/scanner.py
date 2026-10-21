@@ -329,13 +329,107 @@ async def async_download_image(client: Any, image_path: Optional[str], prefix: s
             return None
     return filename
 
+def find_local_trailer(file_path: str) -> Optional[str]:
+    """
+    Locates a local trailer file for a movie based on standard Plex/Jellyfin/Emby conventions:
+    1. Exact movie stem + -trailer / .trailer in the same directory:
+       e.g. 'Movie (2020)-trailer.mp4', 'Movie.trailer.mkv'
+    2. 'trailer.mp4' / 'trailer.mkv' in the same directory
+    3. Any file ending in '-trailer.*' in the same directory matching movie stem
+    4. Subdirectory 'Trailers/' or 'trailers/' or 'trailer/' containing video files
+    """
+    if not file_path:
+        return None
+    try:
+        norm_path = os.path.normpath(file_path)
+        if not os.path.exists(norm_path):
+            return None
+        parent_dir = os.path.dirname(norm_path)
+        if not os.path.isdir(parent_dir):
+            return None
+
+        base_name, _ = os.path.splitext(os.path.basename(norm_path))
+        video_exts = {".mp4", ".mkv", ".webm", ".m4v", ".mov", ".avi", ".ts"}
+
+        # 1. Exact priority checks in the same directory:
+        exact_stems = [
+            f"{base_name}-trailer",
+            f"{base_name}.trailer",
+            f"{base_name}_trailer",
+            f"{base_name} - trailer",
+            "trailer",
+        ]
+        for stem in exact_stems:
+            for ext in video_exts:
+                candidate = os.path.join(parent_dir, f"{stem}{ext}")
+                if os.path.isfile(candidate) and os.path.normcase(candidate) != os.path.normcase(norm_path):
+                    return candidate
+
+        # 2. Case-insensitive scan in movie's directory
+        lower_base = base_name.lower()
+        with os.scandir(parent_dir) as it:
+            for entry in it:
+                if entry.is_file():
+                    if os.path.normcase(entry.path) == os.path.normcase(norm_path):
+                        continue
+                    e_name, e_ext = os.path.splitext(entry.name)
+                    if e_ext.lower() in video_exts:
+                        e_low = e_name.lower()
+                        if e_low in ("trailer", f"{lower_base}-trailer", f"{lower_base}.trailer", f"{lower_base}_trailer", f"{lower_base} - trailer"):
+                            return entry.path
+                        if ("-trailer" in e_low or ".trailer" in e_low or "_trailer" in e_low) and lower_base in e_low:
+                            return entry.path
+                elif entry.is_dir() and entry.name.lower() in ("trailers", "trailer"):
+                    with os.scandir(entry.path) as sub_it:
+                        for sub_entry in sub_it:
+                            if sub_entry.is_file():
+                                _, s_ext = os.path.splitext(sub_entry.name)
+                                if s_ext.lower() in video_exts:
+                                    return sub_entry.path
+    except Exception as e:
+        print(f"[Scanner] Error checking local trailer for {file_path}: {e}")
+    return None
+
+def extract_tmdb_trailer_key(videos: list) -> Optional[str]:
+    """Selects the best YouTube trailer video key from TMDB video results."""
+    if not videos or not isinstance(videos, list):
+        return None
+    yt_trailers = [
+        v for v in videos
+        if isinstance(v, dict) and v.get("site") == "YouTube" and v.get("key") and v.get("type") == "Trailer"
+    ]
+    if not yt_trailers:
+        yt_trailers = [
+            v for v in videos
+            if isinstance(v, dict) and v.get("site") == "YouTube" and v.get("key") and v.get("type") in ("Teaser", "Clip")
+        ]
+    if not yt_trailers:
+        return None
+
+    # Priority 1: Official trailer in English
+    official_en = [t for t in yt_trailers if t.get("official") and t.get("iso_639_1") == "en"]
+    if official_en:
+        return official_en[0].get("key")
+
+    # Priority 2: Any English trailer
+    en = [t for t in yt_trailers if t.get("iso_639_1") == "en"]
+    if en:
+        return en[0].get("key")
+
+    # Priority 3: Any official trailer
+    official = [t for t in yt_trailers if t.get("official")]
+    if official:
+        return official[0].get("key")
+
+    return yt_trailers[0].get("key")
+
 async def async_fetch_additional_details(client: Any, tmdb_id: int, media_type: str, api_key: str):
-    """Asynchronously fetches credits, ratings, and genres from TMDB."""
+    """Asynchronously fetches credits, ratings, genres, and trailers from TMDB."""
     try:
         if media_type == "movie":
-            url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}&append_to_response=credits,release_dates"
+            url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}&append_to_response=credits,release_dates,videos"
         else:
-            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}&append_to_response=credits,content_ratings"
+            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}&append_to_response=credits,content_ratings,videos"
             
         res = await client.get(url, timeout=10.0)
         if res.status_code == 200:
@@ -379,11 +473,14 @@ async def async_fetch_additional_details(client: Any, tmdb_id: int, media_type: 
                         if result.get("rating"):
                             content_rating = result.get("rating")
                             break
+
+            videos = data.get("videos", {}).get("results", [])
+            trailer_key = extract_tmdb_trailer_key(videos)
                             
-            return cast_str, dir_str, content_rating, genres_str
+            return cast_str, dir_str, content_rating, genres_str, trailer_key
     except Exception:
         pass
-    return None, None, None, None
+    return None, None, None, None, None
 
 async def async_extract_chapter_markers(file_path: str):
     """Non-blocking chapter marker extraction using asyncio.create_subprocess_exec."""
@@ -940,6 +1037,7 @@ class ScannerManager:
                 plot, poster_filename, backdrop_filename = None, None, None
                 cast, director = None, None
                 rating, content_rating, genres_str = None, None, None
+                tmdb_id, trailer_key = None, None
 
                 if tmdb_api_key:
                     params = {"query": search_title, "api_key": tmdb_api_key}
@@ -960,7 +1058,7 @@ class ScannerManager:
                             search_title = data.get("title", search_title)
                             year = data.get("release_date", "")[:4]
                             
-                            cast, director, content_rating, genres_str = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_api_key)
+                            cast, director, content_rating, genres_str, trailer_key = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_api_key)
                     except Exception as e:
                         print(f"[Scanner] Movie TMDB lookup failed for {search_title}: {e}")
 
@@ -971,7 +1069,8 @@ class ScannerManager:
                     plot=plot, poster_filename=poster_filename,
                     backdrop_filename=backdrop_filename, cast=cast, director=director, rating=rating,
                     content_rating=content_rating, genres=genres_str,
-                    intro_start=intro_s, intro_end=intro_e, credits_start=cred_s, credits_end=cred_e
+                    intro_start=intro_s, intro_end=intro_e, credits_start=cred_s, credits_end=cred_e,
+                    trailer_key=trailer_key, tmdb_id=tmdb_id
                 ))
 
                 with self._lock:
@@ -1067,7 +1166,7 @@ class ScannerManager:
                             if not year:
                                 year = data.get("first_air_date", "")[:4]
                                 
-                            cast, director, content_rating, genres_str = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_api_key)
+                            cast, director, content_rating, genres_str, _ = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_api_key)
                             
                             if season is not None:
                                 s_res = await client.get(
