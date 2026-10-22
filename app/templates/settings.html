@@ -365,6 +365,8 @@
                             pathInput.value = data.suggested_path;
                         }
                     }).catch(() => {});
+            }
+
             if (pathInput) {
                 pathInput.addEventListener('input', () => autoDetectMediaTypeFromPath(pathInput.value));
                 pathInput.addEventListener('change', () => autoDetectMediaTypeFromPath(pathInput.value));
