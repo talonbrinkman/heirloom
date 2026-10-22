@@ -22,8 +22,12 @@ By leveraging a lightweight, API-first architecture using Python and FastAPI, He
 - Smart Remuxing & Direct Stream
 - Multi-Audio Track Selection
 - Multi-Track Subtitle Extraction (Embedded & Sidecar WebVTT)
+- Subtitle Bitmap Burn-In
 - Adaptive Bitrate (ABR) & HLS Streaming
 - Hardware-Accelerated Transcoding
+- Multi-Version Coexistence & Instant Restart
+- Instant "Fix Match" Resolution
+- Music Library & Persistent Audio Player
 - Cross-Platform REST API
 - Frictionless Docker Deployment
 
@@ -68,6 +72,7 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
      - /path/to/your/tv:/media/tv:ro
      - /path/to/your/movies:/media/movies:ro
      - /path/to/your/photos:/media/photos:ro
+     - /path/to/your/music:/media/music:ro
    ```
 
 4. **(Optional) Enable Hardware-Accelerated Transcoding (GPU):**
@@ -116,10 +121,11 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 - **Multi-Track Subtitles & Bitmap Burn-In**: Stream embedded text subtitles (SRT, WebVTT, ASS/SSA, MOV text) and external sidecar files dynamically extracted to WebVTT with keyframe-accurate seek synchronization. For Blu-ray (PGS) and DVD (VobSub) bitmap subtitle formats incompatible with browser text rendering, Heirloom dynamically burns subtitles directly into the video transcode stream with full resolution scaling and ABR support. Toggle captions instantly with the dedicated player button or the `C` keyboard shortcut, select specific subtitle tracks directly from the player settings menu with persistent per-title memory, and close the player anytime with `Esc`.
 - **Adaptive Bitrate (ABR) & HLS Streaming**: Enjoy buffer-free playback with native HTTP Live Streaming (HLS). Heirloom automatically generates master and variant VOD playlists, dynamically scaling stream bitrates (Original, 1080p, 720p, 480p, 360p) based on real-time client bandwidth and device capabilities. Select **Auto** for hands-free dynamic switching, or manually lock your preferred quality tier with instant, zero-reload level transitions. Completely self-hosted and offline-ready with bundled Hls.js and native iOS/Safari fallback.
 - **Fast Profile Switching & Multi-User PINs**: Organize family and shared accounts into distinct household profiles (up to 6 per account). Each profile maintains its own watch history, in-progress resume states, watchlists, and personal rewind buffers. Secure individual profiles with 4–15 digit numeric PIN locks powered by bcrypt hashing and HMAC session authorization, tag profiles with Kids Mode to restrict media to family-friendly ratings (G and PG), and personalize profiles with vibrant color palettes and custom icon avatars. Switch between profiles seamlessly via the top navigation dropdown or the dedicated "Who's Watching?" hub with active `OWNER` and `KIDS` badges.
-- **Mobile-First Responsive Interface**: Enjoy a streamlined, touch-optimized experience on smartphones and tablets featuring collapsible on-demand search, touch carousels, and thumb-friendly controls.
+- **Mobile-First Responsive Interface**: Enjoy a streamlined, touch-optimized experience on smartphones and tablets featuring collapsible on-demand search, touch carousels, thumb-friendly controls, perfectly square responsive cards for photos and music, horizontal overflow-scrollable subnavigation for music views and playlists, and an adaptive two-row bottom audio player bar.
 - **Real-Time Telemetry & Volume Monitoring**: Access live stream health, real-time playback timestamps, and mounted media storage metrics directly from the Server Dashboard with automated background telemetry.
 - **Instant "Fix Match" Resolution**: Quickly resolve mismatched titles or incorrect metadata directly from the three-dots dropdown menu on any media card or detail view. Search TMDB with live, debounced inputs, preview matching candidates complete with poster thumbnails and plot overviews, and update movie or TV series metadata, backdrops, and season artwork with a single click.
-- **Multi-Version Coexistence & Instant Restart**: Seamlessly organize multiple file editions (e.g., 4K Remux, 1080p SDR, 720p) of the same title under a unified media card. Inspect editions via an elegant dropdown menu listing file names, video resolutions, and file sizes. Switch editions with one click, retain watch progress across versions, and restart media anytime from the beginning with the dedicated "Restart" button.
+- **Multi-Version Coexistence & Instant Restart**: Seamlessly organize multiple file editions (e.g., 4K Remux, 1080p SDR, 720p) of the same title under a unified media card. Switch editions with one click, retain watch progress across versions, and restart media anytime from the beginning with the dedicated "Restart" button.
+- **Music Library & Persistent Audio Player**: High-fidelity audio playback (FLAC, MP3, ALAC, AAC, OGG, WAV) featuring file-first ID3 tag and Vorbis comment extraction (title, artist, album, year, genre, track & disc numbers, bitrate), embedded cover art extraction with local folder fallback, artist discographies, playlists, queue management (play next, add to queue, queue drawer), seamless persistent bottom player bar that follows you across page navigations, MediaSession API integration (OS media keys, lock screen controls), and out-of-the-box TheAudioDB artist bio and album art enrichment (using the built-in free tier key `123` with zero configuration required).
 
 ## 🔮 Upcoming Improvements
 
@@ -128,7 +134,6 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 - **Granular Parental Controls & Rating Sliders**: Advanced content restriction thresholds (e.g., custom PG-13, R, TV-MA levels) and tag-based blocklists beyond standard Kids Mode.
 - **Smart TV & Native Client Ecosystem**: Dedicated native client applications for Apple TV, Android TV / Google TV, Roku, and Fire TV.
 - **Actor & Director Filmography Hubs**: Dedicated talent pages linking all matching movies and series across your local library.
-- **Music Library & Audio Player**: FLAC/MP3/ALAC playback with ID3 tag parsing, album artwork, artist discographies, and playlists.
 - **Mobile Offline Sync**: Transcode and download media to phones and tablets for offline airplane and travel playback.
 
 

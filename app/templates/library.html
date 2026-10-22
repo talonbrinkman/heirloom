@@ -95,6 +95,33 @@
                 <span>Dashboard</span>
             </a>
 
+            {% if has_movies and user.movies_access %}
+            <a href="/library/movie" class="mobile-menu-link {% if media_type == 'movie' %}active{% endif %}">
+                <i data-lucide="film"></i>
+                <span>Movies</span>
+            </a>
+            {% endif %}
+            {% if has_tv and user.tv_access %}
+            <a href="/library/tv" class="mobile-menu-link {% if media_type == 'tv' %}active{% endif %}">
+                <i data-lucide="tv"></i>
+                <span>TV Shows</span>
+            </a>
+            {% endif %}
+            {% if has_photos and user.photos_access %}
+            <a href="/library/photo" class="mobile-menu-link {% if media_type == 'photo' %}active{% endif %}">
+                <i data-lucide="image"></i>
+                <span>Photos</span>
+            </a>
+            {% endif %}
+            {% if has_music and user.music_access %}
+            <a href="/library/music" class="mobile-menu-link {% if media_type == 'music' %}active{% endif %}">
+                <i data-lucide="music"></i>
+                <span>Music</span>
+            </a>
+            {% endif %}
+
+            <div class="mobile-menu-divider"></div>
+
             {% if user.is_admin and (current_profile is none or current_profile.is_primary) %}
             <a href="/server-dashboard" class="mobile-menu-link">
                 <i data-lucide="gauge"></i>
@@ -164,10 +191,38 @@
                 Photos
             </a>
             {% endif %}
+            {% if has_music and user.music_access %}
+            <a href="/library/music" class="sidebar-link {% if media_type == 'music' %}active{% endif %}">
+                <i data-lucide="music"></i>
+                Music
+            </a>
+            {% endif %}
         </div>
 
         <div class="main-content">
             <div class="card">
+                {% if media_type == 'music' %}
+                <div class="music-subnav">
+                    <a href="/library/music?view=albums" class="music-tab {% if music_view == 'albums' %}active{% endif %}">
+                        <i data-lucide="disc"></i> Albums
+                    </a>
+                    <a href="/library/music?view=artists" class="music-tab {% if music_view == 'artists' %}active{% endif %}">
+                        <i data-lucide="mic-2"></i> Artists
+                    </a>
+                    <a href="/library/music?view=tracks" class="music-tab {% if music_view == 'tracks' %}active{% endif %}">
+                        <i data-lucide="music"></i> Tracks
+                    </a>
+                    <a href="/library/music?view=playlists" class="music-tab {% if music_view == 'playlists' %}active{% endif %}">
+                        <i data-lucide="list-music"></i> Playlists
+                    </a>
+                    {% if music_view == 'playlists' %}
+                    <button type="button" class="btn btn-primary btn-sm" onclick="promptCreatePlaylist()" style="margin-left: auto; padding: 6px 14px; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 6px;">
+                        <i data-lucide="plus"></i> New Playlist
+                    </button>
+                    {% endif %}
+                </div>
+                {% endif %}
+
                 <div class="flex justify-between align-center mb-15">
                     <h2 class="m-0">
                         {% if media_type == 'movie' %}Movies ({{ total_count }})
@@ -186,6 +241,11 @@
                         {% else %}
                             <span style="font-size: 0.85em; color: #888; font-weight: normal; margin-left: 4px;">({{ total_count }})</span>
                         {% endif %}
+                        {% elif media_type == 'music' %}
+                            {% if music_view == 'artists' %}Artists ({{ total_count }})
+                            {% elif music_view == 'tracks' %}Tracks ({{ total_count }})
+                            {% elif music_view == 'playlists' %}Playlists ({{ total_count }})
+                            {% else %}Albums ({{ total_count }}){% endif %}
                         {% else %}TV Shows ({{ total_count }}){% endif %}
                     </h2>
                     <div style="position: relative;">
@@ -306,15 +366,23 @@
                     if (data.items.length === 0) {
                         resultsContainer.innerHTML = '<div class="empty-state">No results found</div>';
                     } else {
-                        resultsContainer.innerHTML = data.items.map(item => `
+                        resultsContainer.innerHTML = data.items.map(item => {
+                            let iconName = 'film';
+                            let typeLabel = 'Movie';
+                            if (item.type === 'photo') { iconName = 'image'; typeLabel = 'Photo'; }
+                            else if (item.type === 'tv') { iconName = 'tv'; typeLabel = 'TV Show'; }
+                            else if (item.type === 'music') { iconName = 'music'; typeLabel = 'Music'; }
+
+                            return `
                             <a href="${item.url}" class="search-result">
-                                ${item.poster ? `<img src="/metadata/${item.poster}" class="search-result-thumb">` : `<div class="search-result-thumb"><i data-lucide="${item.type === 'photo' ? 'image' : (item.type === 'tv' ? 'tv' : 'film')}"></i></div>`}
+                                ${item.poster ? `<img src="/metadata/${item.poster}" class="search-result-thumb">` : `<div class="search-result-thumb"><i data-lucide="${iconName}"></i></div>`}
                                 <div>
                                     <strong>${item.title}</strong>
-                                    <small>${item.year ? item.year + ' • ' : ''}${item.type === 'movie' ? 'Movie' : (item.type === 'tv' ? 'TV Show' : 'Photo')}</small>
+                                    <small>${item.year ? item.year + ' • ' : ''}${typeLabel}</small>
                                 </div>
                             </a>
-                        `).join('');
+                            `;
+                        }).join('');
                         lucide.createIcons();
                     }
                     resultsContainer.style.display = 'flex';
@@ -402,12 +470,14 @@
             const urlParams = new URLSearchParams(window.location.search);
             const album = urlParams.get('album');
             const albumParam = album ? `&album=${encodeURIComponent(album)}` : '';
+            const musicView = urlParams.get('view') || 'albums';
+            const viewParam = mediaType === 'music' ? `&view=${encodeURIComponent(musicView)}` : '';
             const downloadsAccess = "{{ 'true' if user.downloads_access else 'false' }}" === 'true';
             const watchTogetherAccess = "{{ 'true' if user.watch_together_access else 'false' }}" === 'true';
             const isAdmin = "{{ 'true' if user.is_admin else 'false' }}" === 'true';
 
             try {
-                const res = await fetch(`/api/library/${mediaType}?page=${page}&limit=50&sort=${currentSort}${albumParam}`);
+                const res = await fetch(`/api/library/${mediaType}?page=${page}&limit=50&sort=${currentSort}${albumParam}${viewParam}`);
                 const data = await res.json();
 
                 const grid = document.getElementById('mediaGrid');
@@ -421,38 +491,73 @@
                 }
 
                 data.items.forEach((m, index) => {
-                    // Removed inline album header grouping, handled as folders now
-
                     const globalIndex = ((page - 1) * 50) + index;
                     const card = document.createElement('div');
-                    card.className = mediaType === 'photo' ? 'media-card photo-card' : 'media-card';
+                    const cardClass = mediaType === 'photo' ? 'media-card photo-card' : (mediaType === 'music' ? 'media-card music-card' : 'media-card');
+                    card.className = cardClass;
                     card.setAttribute('data-id', m.id);
 
                     const isAlbum = m.type === 'album';
+                    const isArtist = m.type === 'artist';
+                    const isTrack = m.type === 'track';
+                    const isPlaylist = m.type === 'playlist';
 
-                    const watchlistForm = (mediaType === 'photo' || isAlbum) ? '' : (m.in_watchlist
+                    const watchlistForm = (mediaType === 'photo' || mediaType === 'music' || isAlbum) ? '' : (m.in_watchlist
                         ? `<form action="/watchlist/remove_by_item/${mediaType}/${m.id}" method="post"><button type="submit">Remove from Watchlist</button></form>`
                         : `<form action="/watchlist/add/${mediaType}/${m.id}" method="post"><button type="submit">Add to Watchlist</button></form>`);
 
-                    const watchToggleForm = (mediaType === 'photo' || isAlbum) ? '' : (m.is_watched
+                    const watchToggleForm = (mediaType === 'photo' || mediaType === 'music' || isAlbum) ? '' : (m.is_watched
                         ? `<form action="/history/mark_unwatched/${mediaType}/${m.id}" method="post"><button type="submit">Mark as Unwatched</button></form>`
                         : `<form action="/history/mark_watched/${mediaType}/${m.id}" method="post"><button type="submit">Mark as Watched</button></form>`);
 
-                    const watchedBadgeHtml = (mediaType !== 'photo' && !isAlbum && m.is_watched)
+                    const watchedBadgeHtml = (mediaType !== 'photo' && mediaType !== 'music' && !isAlbum && m.is_watched)
                         ? `<div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>`
                         : '';
 
+                    let posterStyle = '';
+                    if (isAlbum && mediaType === 'photo') {
+                        posterStyle = 'filter: blur(8px) brightness(0.6); transform: scale(1.1);';
+                    }
+
+                    const placeholderIcon = isArtist ? 'mic-2' : (isPlaylist ? 'list-music' : (isAlbum || isTrack ? 'disc' : 'film'));
                     const posterHtml = m.poster_filename
-                        ? `<img src="/metadata/${m.poster_filename}" class="poster" ${isAlbum ? 'style="filter: blur(8px) brightness(0.6); transform: scale(1.1);"' : ''}>`
-                        : `<div class="poster-placeholder" ${isAlbum ? 'style="background: var(--bg-tertiary);"' : ''}></div>`;
+                        ? `<img src="/metadata/${m.poster_filename}" class="poster" style="${posterStyle}">`
+                        : `<div class="poster-placeholder"><i data-lucide="${placeholderIcon}"></i></div>`;
 
-                    const yearHtml = m.year && !isAlbum ? `<div class="media-year">${m.year}</div>` : '';
-
-                    const posterClass = mediaType === 'photo' ? 'poster-container photo-poster-container' : 'poster-container';
+                    const yearHtml = m.year && !(mediaType === 'photo' && isAlbum) ? `<div class="media-year">${m.year}</div>` : '';
+                    const posterClass = mediaType === 'photo' ? 'poster-container photo-poster-container' : (mediaType === 'music' ? 'poster-container music-poster-container' : 'poster-container');
 
                     let hoverContent = '';
-                    if (isAlbum) {
+                    if (isAlbum && mediaType === 'photo') {
                         hoverContent = `<div class="album-title-overlay" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; font-weight: 600; font-size: 1.15rem; text-align: center; width: 85%; z-index: 2; pointer-events: none; text-shadow: 0 2px 8px rgba(0,0,0,0.9);">${m.title}</div>`;
+                    } else if (mediaType === 'music') {
+                        let playCall = '';
+                        if (isAlbum) playCall = `HeirloomPlayer.playAlbum(${m.id})`;
+                        else if (isArtist) playCall = `HeirloomPlayer.playArtist(${m.id})`;
+                        else if (isPlaylist) playCall = `HeirloomPlayer.playPlaylist(${m.id})`;
+                        else if (isTrack) playCall = `HeirloomPlayer.playTrack({ id: ${m.id}, title: '${encodeURIComponent(m.title)}', artist_name: '${encodeURIComponent(m.artist_name || '')}', cover_url: '${m.poster_filename ? '/metadata/' + m.poster_filename : ''}' })`;
+
+                        const downloadUrl = isAlbum ? `/download/album/${m.id}` : (isTrack ? `/download/track/${m.id}` : '');
+                        hoverContent = `
+                            <button type="button" class="icon-btn hover-play" onclick="event.preventDefault(); event.stopPropagation(); ${playCall}">
+                                <i data-lucide="play" fill="currentColor"></i>
+                            </button>
+                            ${(downloadUrl && downloadsAccess) || isTrack ? `
+                            <button class="icon-btn three-dots-btn" onclick="toggleMenu(event, 'menu-item-${globalIndex}')">
+                                <i data-lucide="more-vertical" fill="white"></i>
+                            </button>
+                            <div class="dropdown-menu" id="menu-item-${globalIndex}">
+                                ${downloadUrl && downloadsAccess ? `
+                                <form action="${downloadUrl}" method="get">
+                                    <button type="submit">Download</button>
+                                </form>
+                                ` : ''}
+                                ${isTrack ? `
+                                <button type="button" onclick="openAddToPlaylistModal(${m.id}, '${encodeURIComponent(m.title)}')">Add to Playlist</button>
+                                ` : ''}
+                            </div>
+                            ` : ''}
+                        `;
                     } else {
                         const playButtonHtml = mediaType !== 'photo' ? `
                                 <a href="/play/${mediaType}/${m.id}" class="icon-btn hover-play">
@@ -482,7 +587,7 @@
                             `;
                     }
 
-                    const targetUrl = (mediaType === 'photo' && !isAlbum)
+                    const targetUrl = ((mediaType === 'photo' && !isAlbum) || mediaType === 'music')
                         ? `${m.url}?from=${encodeURIComponent(window.location.pathname + window.location.search)}`
                         : m.url;
 
@@ -493,7 +598,7 @@
                                 </a>
                                 ${hoverContent}
                             </div>
-                            ${!isAlbum ? `<div class="media-title">${m.title}</div>` : ''}
+                            ${!(mediaType === 'photo' && isAlbum) ? `<div class="media-title">${m.title}</div>` : ''}
                             ${yearHtml}
                         `;
                     grid.appendChild(card);
@@ -533,8 +638,29 @@
 
             if (sentinel) observer.observe(sentinel);
         });
+        async function promptCreatePlaylist() {
+            const name = prompt("Enter a name for the new playlist:");
+            if (!name || !name.trim()) return;
+            try {
+                const res = await fetch('/api/playlists', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name.trim() })
+                });
+                const data = await res.json();
+                if (data.success && data.playlist) {
+                    window.location.href = `/playlist/${data.playlist.id}`;
+                } else {
+                    alert('Failed to create playlist.');
+                }
+            } catch (err) {
+                console.error(err);
+                alert('Error creating playlist.');
+            }
+        }
     </script>
     <script src="/static/lucide.min.js"></script>
+    <script src="/static/audio-player.js"></script>
     <script>lucide.createIcons();</script>
 
     <script>

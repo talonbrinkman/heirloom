@@ -20,7 +20,7 @@ import urllib.parse
 from collections import defaultdict, Counter
 from datetime import datetime, timezone, timedelta
 from .database import create_db_and_tables, get_session, engine
-from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile
+from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile, Artist, Album, Track, Playlist, PlaylistTrack
 from .scanner import scan_media_library, scanner_manager, is_recycle_name, is_recycle_path, async_download_image, async_fetch_additional_details, SafeHTTPClient, httpx, find_local_trailer, extract_tmdb_trailer_key
 from .watcher import start_watcher, stop_watcher, scanner_debouncer
 from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time, sanitize_vtt_content, get_video_transcode_pipeline, parse_burn_sub_index
@@ -210,6 +210,25 @@ def on_startup():
             ("tvshow", "credits_start", "FLOAT"),
             ("tvshow", "credits_end", "FLOAT"),
             ("watchsession", "is_active", "BOOLEAN DEFAULT 1"),
+            ("user", "music_access", "BOOLEAN DEFAULT 0"),
+            ("invitecode", "music_access", "BOOLEAN DEFAULT 0"),
+            ("album", "genre", "VARCHAR"),
+            ("album", "theaudiodb_id", "INTEGER"),
+            ("album", "artist_name", "VARCHAR"),
+            ("album", "year", "VARCHAR"),
+            ("album", "cover_filename", "VARCHAR"),
+            ("artist", "bio", "TEXT"),
+            ("artist", "thumbnail_filename", "VARCHAR"),
+            ("artist", "banner_filename", "VARCHAR"),
+            ("artist", "theaudiodb_id", "INTEGER"),
+            ("track", "genre", "VARCHAR"),
+            ("track", "bitrate", "INTEGER"),
+            ("track", "codec", "VARCHAR"),
+            ("track", "disc_number", "INTEGER DEFAULT 1"),
+            ("track", "duration", "FLOAT DEFAULT 0.0"),
+            ("track", "track_number", "INTEGER DEFAULT 1"),
+            ("track", "year", "VARCHAR"),
+            ("track", "cover_filename", "VARCHAR"),
         ]
         for table, col, dtype in columns:
             try:
@@ -222,6 +241,7 @@ def on_startup():
             session.execute(text("UPDATE user SET photos_access = 1 WHERE photos_access IS NULL"))
             session.execute(text("UPDATE user SET downloads_access = 1 WHERE downloads_access IS NULL"))
             session.execute(text("UPDATE user SET watch_together_access = 1 WHERE watch_together_access IS NULL"))
+            session.execute(text("UPDATE user SET music_access = 1 WHERE is_admin = 1 AND (music_access IS NULL OR music_access = 0)"))
             session.commit()
         except Exception:
             session.rollback()
@@ -608,6 +628,7 @@ async def process_setup(request: Request, username: str = Form(...), password: s
         movies_access=True,
         tv_access=True,
         photos_access=True,
+        music_access=True,
         downloads_access=True,
         watch_together_access=True,
         can_manage_profiles=True
@@ -661,6 +682,7 @@ async def process_register(request: Request, username: str = Form(...), password
         movies_access=bool(invite.movies_access),
         tv_access=bool(invite.tv_access),
         photos_access=bool(invite.photos_access),
+        music_access=bool(invite.music_access),
         downloads_access=bool(invite.downloads_access),
         watch_together_access=bool(invite.watch_together_access),
         kids_mode=bool(invite.kids_mode),
@@ -1170,10 +1192,12 @@ def get_available_volumes(session: Session) -> dict[str, bool]:
     has_movie_vol = any(v.media_type == "movie" and os.path.exists(v.path.strip()) for v in volumes)
     has_tv_vol = any(v.media_type == "tv" and os.path.exists(v.path.strip()) for v in volumes)
     has_photo_vol = any(v.media_type == "photo" and os.path.exists(v.path.strip()) for v in volumes)
+    has_music_vol = any(v.media_type == "music" and os.path.exists(v.path.strip()) for v in volumes)
     return {
         "movie": has_movie_vol or (session.exec(select(Movie.id)).first() is not None),
         "tv": has_tv_vol or (session.exec(select(TVShow.id)).first() is not None),
         "photo": has_photo_vol or (session.exec(select(Photo.id)).first() is not None),
+        "music": has_music_vol or (session.exec(select(Track.id)).first() is not None),
     }
 
 @app.get("/", response_class=HTMLResponse)
@@ -1199,6 +1223,12 @@ async def root(
     photos = [p for p in (session.exec(select(Photo).order_by(Photo.id.desc())).all() if current_user.photos_access else []) if not (p.file_path and is_recycle_path(p.file_path))]
     recent_movies = process_movie_versions(movies)[:15]
     recent_photos = photos[:15]
+    recent_albums = []
+    if current_user.music_access:
+        try:
+            recent_albums = session.exec(select(Album).order_by(Album.id.desc())).all()[:15]
+        except Exception:
+            recent_albums = []
     
     # Format raw episodes for the dashboard and group adjacent ones
     import os
@@ -1353,11 +1383,11 @@ async def root(
     avail_vols = get_available_volumes(session)
     return templates.TemplateResponse(request=request, name="dashboard.html", context={
         "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
-        "recent_movies": recent_movies, "recent_tv": recent_tv, "recent_photos": recent_photos, "watchlist": watchlist, "history": history,
+        "recent_movies": recent_movies, "recent_tv": recent_tv, "recent_photos": recent_photos, "recent_albums": recent_albums, "watchlist": watchlist, "history": history,
         "recommended": recommended,
         "user_watchlist_movies": user_watchlist_movies, "user_watchlist_tv": user_watchlist_tv,
         "watched_movie_ids": watched_movie_ids, "watched_tv_episode_ids": watched_tv_episode_ids, "watched_tv_titles": watched_tv_titles,
-        "has_movies": avail_vols["movie"], "has_tv": avail_vols["tv"], "has_photos": avail_vols["photo"]
+        "has_movies": avail_vols["movie"], "has_tv": avail_vols["tv"], "has_photos": avail_vols["photo"], "has_music": avail_vols["music"]
     })
 
 @app.get("/api/library/{media_type}")
@@ -1422,6 +1452,107 @@ async def api_library(
         elif sort == "date_asc": query = query.order_by(Photo.date_added.asc())
         
         items = session.exec(query.offset((page - 1) * limit).limit(limit)).all()
+    elif media_type == "music":
+        if not current_user.music_access: raise HTTPException(status_code=403, detail="Forbidden")
+        view_type = request.query_params.get("view", "albums")
+        music_result = []
+        try:
+            if view_type == "artists":
+                q_art = select(Artist)
+                if search:
+                    q_art = q_art.where(Artist.name.ilike(f"%{search}%"))
+                if sort == "title_desc":
+                    q_art = q_art.order_by(Artist.name.desc())
+                else:
+                    q_art = q_art.order_by(Artist.name.asc())
+                artists = session.exec(q_art.offset((page - 1) * limit).limit(limit)).all()
+                for art in artists:
+                    album_count = len(session.exec(select(Album.id).where(Album.artist_id == art.id)).all())
+                    music_result.append({
+                        "id": art.id,
+                        "title": art.name,
+                        "artist_name": art.name,
+                        "year": f"{album_count} Albums" if album_count != 1 else "1 Album",
+                        "poster_filename": art.thumbnail_filename,
+                        "url": f"/artist/{art.id}",
+                        "type": "artist"
+                    })
+                return {"items": music_result}
+
+            elif view_type == "tracks":
+                q_trk = select(Track)
+                if search:
+                    q_trk = q_trk.where((Track.title.ilike(f"%{search}%")) | (Track.artist_name.ilike(f"%{search}%")) | (Track.album_title.ilike(f"%{search}%")))
+                if sort == "title_desc":
+                    q_trk = q_trk.order_by(Track.title.desc())
+                else:
+                    q_trk = q_trk.order_by(Track.title.asc())
+                tracks = session.exec(q_trk.offset((page - 1) * limit).limit(limit)).all()
+                for trk in tracks:
+                    mins = int((trk.duration or 0) // 60)
+                    secs = int((trk.duration or 0) % 60)
+                    music_result.append({
+                        "id": trk.id,
+                        "title": trk.title,
+                        "artist_name": trk.artist_name,
+                        "album_title": trk.album_title,
+                        "year": f"{mins}:{secs:02d}",
+                        "poster_filename": trk.cover_filename,
+                        "url": f"/album/{trk.album_id}" if trk.album_id else "#",
+                        "type": "track",
+                        "duration": trk.duration or 0
+                    })
+                return {"items": music_result}
+
+            elif view_type == "playlists":
+                q_pl = select(Playlist).where(Playlist.user_id == current_user.id).order_by(Playlist.name.asc())
+                if search:
+                    q_pl = q_pl.where(Playlist.name.ilike(f"%{search}%"))
+                playlists = session.exec(q_pl.offset((page - 1) * limit).limit(limit)).all()
+                for pl in playlists:
+                    track_count = len(session.exec(select(PlaylistTrack.id).where(PlaylistTrack.playlist_id == pl.id)).all())
+                    first_trk_id = session.exec(select(PlaylistTrack.track_id).where(PlaylistTrack.playlist_id == pl.id).order_by(PlaylistTrack.track_order.asc())).first()
+                    first_cov = None
+                    if first_trk_id:
+                        ft = session.get(Track, first_trk_id)
+                        if ft: first_cov = ft.cover_filename
+                    music_result.append({
+                        "id": pl.id,
+                        "title": pl.name,
+                        "artist_name": "Playlist",
+                        "year": f"{track_count} Tracks",
+                        "poster_filename": first_cov,
+                        "url": f"/playlist/{pl.id}",
+                        "type": "playlist"
+                    })
+                return {"items": music_result}
+
+            else: # Albums (default)
+                q_alb = select(Album)
+                if search:
+                    q_alb = q_alb.where((Album.title.ilike(f"%{search}%")) | (Album.artist_name.ilike(f"%{search}%")))
+                if sort == "title_desc":
+                    q_alb = q_alb.order_by(Album.title.desc())
+                elif sort == "year_desc":
+                    q_alb = q_alb.order_by(Album.year.desc())
+                elif sort == "year_asc":
+                    q_alb = q_alb.order_by(Album.year.asc())
+                else:
+                    q_alb = q_alb.order_by(Album.title.asc())
+                albums = session.exec(q_alb.offset((page - 1) * limit).limit(limit)).all()
+                for alb in albums:
+                    music_result.append({
+                        "id": alb.id,
+                        "title": alb.title,
+                        "artist_name": alb.artist_name,
+                        "year": alb.year or (alb.artist_name if alb.artist_name else ""),
+                        "poster_filename": alb.cover_filename,
+                        "url": f"/album/{alb.id}",
+                        "type": "album"
+                    })
+                return {"items": music_result}
+        except Exception:
+            return {"items": []}
     else:
         raise HTTPException(status_code=404, detail="Not Found")
         
@@ -1896,6 +2027,35 @@ async def api_search(
                 "id": p.id, "title": p.title, "type": "photo", "url": f"/photo/{p.id}",
                 "poster": p.poster_filename, "year": disp_date.strftime("%Y") if disp_date else ""
             })
+
+    if current_user.music_access:
+        try:
+            albums = session.exec(select(Album).where((Album.title.ilike(f"%{q}%")) | (Album.artist_name.ilike(f"%{q}%"))).limit(5)).all()
+            for a in albums:
+                results.append({
+                    "id": a.id, "title": a.title, "type": "music", "url": f"/album/{a.id}",
+                    "poster": a.cover_filename, "year": f"Album • {a.artist_name}"
+                })
+        except Exception:
+            pass
+        try:
+            artists = session.exec(select(Artist).where(Artist.name.ilike(f"%{q}%")).limit(5)).all()
+            for art in artists:
+                results.append({
+                    "id": art.id, "title": art.name, "type": "music", "url": f"/artist/{art.id}",
+                    "poster": art.thumbnail_filename, "year": "Artist"
+                })
+        except Exception:
+            pass
+        try:
+            tracks = session.exec(select(Track).where((Track.title.ilike(f"%{q}%")) | (Track.artist_name.ilike(f"%{q}%"))).limit(8)).all()
+            for trk in tracks:
+                results.append({
+                    "id": trk.id, "title": trk.title, "type": "music", "url": f"/album/{trk.album_id}" if trk.album_id else "#",
+                    "poster": trk.cover_filename, "year": f"Track • {trk.artist_name}"
+                })
+        except Exception:
+            pass
             
     # Sort results by title roughly
     results.sort(key=lambda x: x["title"].lower())
@@ -2021,6 +2181,17 @@ async def library_view(
                 total_count = session.exec(select(func.count(Photo.id))).one()
         else:
             total_count = session.exec(select(func.count(Photo.id))).one()
+    elif media_type == "music":
+        if not current_user.music_access: raise HTTPException(status_code=403, detail="Forbidden")
+        view_type = request.query_params.get("view", "albums")
+        if view_type == "artists":
+            total_count = session.exec(select(func.count(Artist.id))).one()
+        elif view_type == "tracks":
+            total_count = session.exec(select(func.count(Track.id))).one()
+        elif view_type == "playlists":
+            total_count = session.exec(select(func.count(Playlist.id)).where(Playlist.user_id == current_user.id)).one()
+        else:
+            total_count = session.exec(select(func.count(Album.id))).one()
     else:
         raise HTTPException(status_code=404, detail="Not Found")
         
@@ -2029,7 +2200,8 @@ async def library_view(
     return templates.TemplateResponse(request=request, name="library.html", context={
         "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
         "media_type": media_type, "total_count": total_count, "album": clean_album, "album_breadcrumbs": album_breadcrumbs,
-        "has_movies": avail_vols["movie"], "has_tv": avail_vols["tv"], "has_photos": avail_vols["photo"]
+        "has_movies": avail_vols["movie"], "has_tv": avail_vols["tv"], "has_photos": avail_vols["photo"], "has_music": avail_vols["music"],
+        "music_view": request.query_params.get("view", "albums")
     })
 @app.get("/movie/{movie_id}", response_class=HTMLResponse)
 async def movie_view(
@@ -2430,6 +2602,608 @@ async def series_view(
         "has_progress": has_progress, "in_watchlist": in_watchlist, "resume_link": resume_link, "selected_ep_id": selected_episode.id,
         "selected_ep_dict": selected_ep_dict, "is_series_watched": is_series_watched
     })
+
+def format_seconds_to_duration(seconds: float) -> str:
+    if not seconds:
+        return "0 min"
+    total_seconds = int(seconds)
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    if hours > 0:
+        return f"{hours} hr {minutes} min"
+    return f"{minutes} min"
+
+# ----------------- MUSIC ROUTES & DETAIL VIEWS -----------------
+
+@app.get("/stream/music/{track_id}")
+async def stream_music(
+    track_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not current_user.music_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    track = session.get(Track, track_id)
+    if not track or not track.file_path or not os.path.exists(track.file_path):
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    ext = os.path.splitext(track.file_path)[1].lower()
+    media_type = "audio/mpeg"
+    if ext == ".flac":
+        media_type = "audio/flac"
+    elif ext in [".m4a", ".alac"]:
+        media_type = "audio/mp4"
+    elif ext == ".aac":
+        media_type = "audio/aac"
+    elif ext in [".ogg", ".opus"]:
+        media_type = "audio/ogg"
+    elif ext == ".wav":
+        media_type = "audio/wav"
+    elif ext == ".aiff":
+        media_type = "audio/aiff"
+    elif ext == ".wma":
+        media_type = "audio/x-ms-wma"
+
+    return FileResponse(track.file_path, media_type=media_type)
+
+
+@app.get("/album/{album_id}", response_class=HTMLResponse)
+async def album_view(
+    request: Request,
+    album_id: int,
+    from_url: Optional[str] = Query(None, alias="from"),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        return RedirectResponse(url="/login", status_code=303)
+    if not current_user.music_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    album = session.get(Album, album_id)
+    if not album:
+        raise HTTPException(status_code=404, detail="Album not found")
+
+    artist = session.get(Artist, album.artist_id) if album.artist_id else None
+    if not artist and album.artist_name:
+        artist = session.exec(select(Artist).where(func.lower(Artist.name) == album.artist_name.strip().lower())).first()
+
+    tracks_db = session.exec(
+        select(Track).where(Track.album_id == album.id).order_by(Track.disc_number.asc(), Track.track_number.asc(), Track.title.asc())
+    ).all()
+
+    total_duration = 0.0
+    tracks = []
+    discs = {}
+    for t in tracks_db:
+        dur = t.duration or 0.0
+        total_duration += dur
+        mins = int(dur // 60)
+        secs = int(dur % 60)
+        t_data = {
+            "id": t.id,
+            "title": t.title,
+            "artist_name": t.artist_name or album.artist_name,
+            "album_title": album.title,
+            "album_id": album.id,
+            "track_number": t.track_number or 1,
+            "disc_number": t.disc_number or 1,
+            "duration": dur,
+            "duration_str": f"{mins}:{secs:02d}",
+            "bitrate": f"{int(t.bitrate)} kbps" if t.bitrate else None,
+            "codec": (t.codec or "").upper(),
+            "cover_url": f"/metadata/{t.cover_filename or album.cover_filename}" if (t.cover_filename or album.cover_filename) else None,
+            "stream_url": f"/stream/music/{t.id}"
+        }
+        tracks.append(t_data)
+        d_num = t.disc_number or 1
+        if d_num not in discs:
+            discs[d_num] = []
+        discs[d_num].append(t_data)
+
+    total_dur_str = format_seconds_to_duration(total_duration)
+    playlists = session.exec(select(Playlist).where(Playlist.user_id == current_user.id).order_by(Playlist.name.asc())).all()
+    user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
+    avail_vols = get_available_volumes(session)
+
+    close_url = None
+    if from_url:
+        parsed_from = urllib.parse.urlparse(from_url)
+        if not parsed_from.netloc or parsed_from.netloc == request.url.netloc:
+            close_url = parsed_from.path + ("?" + parsed_from.query if parsed_from.query else "")
+
+    if not close_url:
+        referer = request.headers.get("referer")
+        if referer:
+            parsed = urllib.parse.urlparse(referer)
+            if (not parsed.netloc or parsed.netloc == request.url.netloc) and not parsed.path.startswith(f"/album/{album_id}"):
+                close_url = parsed.path + ("?" + parsed.query if parsed.query else "")
+
+    if not close_url:
+        close_url = "/library/music?view=albums"
+
+    return templates.TemplateResponse(request=request, name="album.html", context={
+        "user": current_user,
+        "current_profile": current_profile,
+        "user_profiles": user_profiles,
+        "album": album,
+        "artist": artist,
+        "tracks": tracks,
+        "discs": discs,
+        "multiple_discs": len(discs) > 1,
+        "total_duration_str": total_dur_str,
+        "total_tracks": len(tracks),
+        "playlists": playlists,
+        "close_url": close_url,
+        "has_movies": avail_vols["movie"],
+        "has_tv": avail_vols["tv"],
+        "has_photos": avail_vols["photo"],
+        "has_music": avail_vols["music"]
+    })
+
+
+@app.get("/artist/{artist_id}", response_class=HTMLResponse)
+async def artist_view(
+    request: Request,
+    artist_id: int,
+    from_url: Optional[str] = Query(None, alias="from"),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        return RedirectResponse(url="/login", status_code=303)
+    if not current_user.music_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    artist = session.get(Artist, artist_id)
+    if not artist:
+        raise HTTPException(status_code=404, detail="Artist not found")
+
+    albums = session.exec(
+        select(Album).where((Album.artist_id == artist.id) | (func.lower(Album.artist_name) == artist.name.strip().lower())).order_by(Album.year.desc(), Album.title.asc())
+    ).all()
+
+    tracks_db = session.exec(
+        select(Track).where((Track.artist_id == artist.id) | (func.lower(Track.artist_name) == artist.name.strip().lower())).limit(20)
+    ).all()
+
+    tracks = []
+    for t in tracks_db:
+        dur = t.duration or 0.0
+        mins = int(dur // 60)
+        secs = int(dur % 60)
+        tracks.append({
+            "id": t.id,
+            "title": t.title,
+            "artist_name": artist.name,
+            "album_title": t.album_title,
+            "album_id": t.album_id,
+            "track_number": t.track_number or 1,
+            "duration": dur,
+            "duration_str": f"{mins}:{secs:02d}",
+            "cover_url": f"/metadata/{t.cover_filename}" if t.cover_filename else None,
+            "stream_url": f"/stream/music/{t.id}"
+        })
+
+    playlists = session.exec(select(Playlist).where(Playlist.user_id == current_user.id).order_by(Playlist.name.asc())).all()
+    user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
+    avail_vols = get_available_volumes(session)
+
+    close_url = None
+    if from_url:
+        parsed_from = urllib.parse.urlparse(from_url)
+        if not parsed_from.netloc or parsed_from.netloc == request.url.netloc:
+            close_url = parsed_from.path + ("?" + parsed_from.query if parsed_from.query else "")
+
+    if not close_url:
+        referer = request.headers.get("referer")
+        if referer:
+            parsed = urllib.parse.urlparse(referer)
+            if (not parsed.netloc or parsed.netloc == request.url.netloc) and not parsed.path.startswith(f"/artist/{artist_id}"):
+                close_url = parsed.path + ("?" + parsed.query if parsed.query else "")
+
+    if not close_url:
+        close_url = "/library/music?view=artists"
+
+    return templates.TemplateResponse(request=request, name="artist.html", context={
+        "user": current_user,
+        "current_profile": current_profile,
+        "user_profiles": user_profiles,
+        "artist": artist,
+        "albums": albums,
+        "tracks": tracks,
+        "playlists": playlists,
+        "close_url": close_url,
+        "has_movies": avail_vols["movie"],
+        "has_tv": avail_vols["tv"],
+        "has_photos": avail_vols["photo"],
+        "has_music": avail_vols["music"]
+    })
+
+
+@app.get("/playlist/{playlist_id}", response_class=HTMLResponse)
+async def playlist_view(
+    request: Request,
+    playlist_id: int,
+    from_url: Optional[str] = Query(None, alias="from"),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        return RedirectResponse(url="/login", status_code=303)
+    if not current_user.music_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    playlist = session.get(Playlist, playlist_id)
+    if not playlist:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    if playlist.user_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    pl_tracks = session.exec(
+        select(PlaylistTrack).where(PlaylistTrack.playlist_id == playlist.id).order_by(PlaylistTrack.track_order.asc())
+    ).all()
+
+    total_duration = 0.0
+    tracks = []
+    cover_url = None
+    for item in pl_tracks:
+        t = session.get(Track, item.track_id)
+        if not t:
+            continue
+        dur = t.duration or 0.0
+        total_duration += dur
+        mins = int(dur // 60)
+        secs = int(dur % 60)
+        t_cover = f"/metadata/{t.cover_filename}" if t.cover_filename else None
+        if not cover_url and t_cover:
+            cover_url = t_cover
+        tracks.append({
+            "id": t.id,
+            "playlist_track_id": item.id,
+            "title": t.title,
+            "artist_name": t.artist_name,
+            "album_title": t.album_title,
+            "album_id": t.album_id,
+            "track_order": item.track_order,
+            "duration": dur,
+            "duration_str": f"{mins}:{secs:02d}",
+            "cover_url": t_cover,
+            "stream_url": f"/stream/music/{t.id}"
+        })
+
+    total_dur_str = format_seconds_to_duration(total_duration)
+    playlists = session.exec(select(Playlist).where(Playlist.user_id == current_user.id).order_by(Playlist.name.asc())).all()
+    user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
+    avail_vols = get_available_volumes(session)
+
+    close_url = None
+    if from_url:
+        parsed_from = urllib.parse.urlparse(from_url)
+        if not parsed_from.netloc or parsed_from.netloc == request.url.netloc:
+            close_url = parsed_from.path + ("?" + parsed_from.query if parsed_from.query else "")
+
+    if not close_url:
+        referer = request.headers.get("referer")
+        if referer:
+            parsed = urllib.parse.urlparse(referer)
+            if (not parsed.netloc or parsed.netloc == request.url.netloc) and not parsed.path.startswith(f"/playlist/{playlist_id}"):
+                close_url = parsed.path + ("?" + parsed.query if parsed.query else "")
+
+    if not close_url:
+        close_url = "/library/music?view=playlists"
+
+    return templates.TemplateResponse(request=request, name="playlist.html", context={
+        "user": current_user,
+        "current_profile": current_profile,
+        "user_profiles": user_profiles,
+        "playlist": playlist,
+        "cover_url": cover_url,
+        "tracks": tracks,
+        "total_duration_str": total_dur_str,
+        "total_tracks": len(tracks),
+        "playlists": playlists,
+        "close_url": close_url,
+        "has_movies": avail_vols["movie"],
+        "has_tv": avail_vols["tv"],
+        "has_photos": avail_vols["photo"],
+        "has_music": avail_vols["music"]
+    })
+
+
+# ----------------- MUSIC API ROUTES -----------------
+
+@app.get("/api/music/track/{track_id}")
+async def api_track_info(
+    track_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user or not current_user.music_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    track = session.get(Track, track_id)
+    if not track:
+        raise HTTPException(status_code=404, detail="Track not found")
+    mins = int((track.duration or 0) // 60)
+    secs = int((track.duration or 0) % 60)
+    return {
+        "id": track.id,
+        "title": track.title,
+        "artist_name": track.artist_name,
+        "artist_id": track.artist_id,
+        "album_title": track.album_title,
+        "album_id": track.album_id,
+        "track_number": track.track_number,
+        "disc_number": track.disc_number,
+        "duration": track.duration or 0,
+        "duration_str": f"{mins}:{secs:02d}",
+        "bitrate": track.bitrate,
+        "codec": track.codec,
+        "year": track.year,
+        "genre": track.genre,
+        "cover_url": f"/metadata/{track.cover_filename}" if track.cover_filename else None,
+        "stream_url": f"/stream/music/{track.id}"
+    }
+
+
+@app.get("/api/music/album/{album_id}/tracks")
+async def api_album_tracks(
+    album_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user or not current_user.music_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    album = session.get(Album, album_id)
+    if not album:
+        raise HTTPException(status_code=404, detail="Album not found")
+    tracks = session.exec(
+        select(Track).where(Track.album_id == album_id).order_by(Track.disc_number.asc(), Track.track_number.asc(), Track.title.asc())
+    ).all()
+    track_list = []
+    for t in tracks:
+        mins = int((t.duration or 0) // 60)
+        secs = int((t.duration or 0) % 60)
+        track_list.append({
+            "id": t.id,
+            "title": t.title,
+            "artist_name": t.artist_name or album.artist_name,
+            "album_title": album.title,
+            "album_id": album.id,
+            "track_number": t.track_number,
+            "disc_number": t.disc_number,
+            "duration": t.duration or 0,
+            "duration_str": f"{mins}:{secs:02d}",
+            "bitrate": t.bitrate,
+            "codec": t.codec,
+            "cover_url": f"/metadata/{t.cover_filename or album.cover_filename}" if (t.cover_filename or album.cover_filename) else None,
+            "stream_url": f"/stream/music/{t.id}"
+        })
+    return {
+        "album": {
+            "id": album.id,
+            "title": album.title,
+            "artist_name": album.artist_name,
+            "artist_id": album.artist_id,
+            "year": album.year,
+            "genre": album.genre,
+            "cover_url": f"/metadata/{album.cover_filename}" if album.cover_filename else None
+        },
+        "tracks": track_list
+    }
+
+
+@app.get("/api/music/artist/{artist_id}/tracks")
+async def api_artist_tracks(
+    artist_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user or not current_user.music_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    artist = session.get(Artist, artist_id)
+    if not artist:
+        raise HTTPException(status_code=404, detail="Artist not found")
+    tracks = session.exec(
+        select(Track).where((Track.artist_id == artist_id) | (func.lower(Track.artist_name) == artist.name.strip().lower())).limit(50)
+    ).all()
+    track_list = []
+    for t in tracks:
+        mins = int((t.duration or 0) // 60)
+        secs = int((t.duration or 0) % 60)
+        track_list.append({
+            "id": t.id,
+            "title": t.title,
+            "artist_name": artist.name,
+            "album_title": t.album_title,
+            "album_id": t.album_id,
+            "track_number": t.track_number,
+            "duration": t.duration or 0,
+            "duration_str": f"{mins}:{secs:02d}",
+            "cover_url": f"/metadata/{t.cover_filename}" if t.cover_filename else None,
+            "stream_url": f"/stream/music/{t.id}"
+        })
+    return track_list
+
+
+@app.get("/api/playlists")
+async def api_get_playlists(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user or not current_user.music_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    playlists = session.exec(
+        select(Playlist).where(Playlist.user_id == current_user.id).order_by(Playlist.name.asc())
+    ).all()
+    res = []
+    for pl in playlists:
+        count = len(session.exec(select(PlaylistTrack.id).where(PlaylistTrack.playlist_id == pl.id)).all())
+        res.append({
+            "id": pl.id,
+            "name": pl.name,
+            "track_count": count,
+            "created_at": pl.created_at.isoformat() if pl.created_at else None
+        })
+    return res
+
+
+@app.post("/api/playlists")
+async def api_create_playlist(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user or not current_user.music_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        body = await request.json()
+        name = (body.get("name") or "").strip()
+    except Exception:
+        name = ""
+    if not name:
+        form = await request.form()
+        name = (form.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Playlist name is required")
+    playlist = Playlist(name=name, user_id=current_user.id)
+    session.add(playlist)
+    session.commit()
+    session.refresh(playlist)
+    return {"success": True, "playlist": {"id": playlist.id, "name": playlist.name}}
+
+
+@app.get("/api/playlists/{playlist_id}")
+async def api_get_playlist(
+    playlist_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user or not current_user.music_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    playlist = session.get(Playlist, playlist_id)
+    if not playlist or (playlist.user_id != current_user.id and not current_user.is_admin):
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    pl_tracks = session.exec(
+        select(PlaylistTrack).where(PlaylistTrack.playlist_id == playlist.id).order_by(PlaylistTrack.track_order.asc())
+    ).all()
+    track_list = []
+    for item in pl_tracks:
+        t = session.get(Track, item.track_id)
+        if not t:
+            continue
+        mins = int((t.duration or 0) // 60)
+        secs = int((t.duration or 0) % 60)
+        track_list.append({
+            "id": t.id,
+            "playlist_track_id": item.id,
+            "title": t.title,
+            "artist_name": t.artist_name,
+            "album_title": t.album_title,
+            "album_id": t.album_id,
+            "track_order": item.track_order,
+            "duration": t.duration or 0,
+            "duration_str": f"{mins}:{secs:02d}",
+            "cover_url": f"/metadata/{t.cover_filename}" if t.cover_filename else None,
+            "stream_url": f"/stream/music/{t.id}"
+        })
+    return {
+        "id": playlist.id,
+        "name": playlist.name,
+        "tracks": track_list
+    }
+
+
+@app.delete("/api/playlists/{playlist_id}")
+async def api_delete_playlist(
+    playlist_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user or not current_user.music_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    playlist = session.get(Playlist, playlist_id)
+    if not playlist or (playlist.user_id != current_user.id and not current_user.is_admin):
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    for pt in session.exec(select(PlaylistTrack).where(PlaylistTrack.playlist_id == playlist.id)).all():
+        session.delete(pt)
+    session.delete(playlist)
+    session.commit()
+    return {"success": True}
+
+
+@app.post("/api/playlists/{playlist_id}/tracks")
+async def api_add_track_to_playlist(
+    playlist_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user or not current_user.music_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    playlist = session.get(Playlist, playlist_id)
+    if not playlist or (playlist.user_id != current_user.id and not current_user.is_admin):
+        raise HTTPException(status_code=404, detail="Playlist not found")
+
+    track_id = None
+    try:
+        body = await request.json()
+        track_id = int(body.get("track_id"))
+    except Exception:
+        form = await request.form()
+        raw_tid = form.get("track_id")
+        if raw_tid:
+            track_id = int(raw_tid)
+
+    if not track_id:
+        raise HTTPException(status_code=400, detail="track_id is required")
+
+    track = session.get(Track, track_id)
+    if not track:
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    max_order = session.exec(
+        select(func.max(PlaylistTrack.track_order)).where(PlaylistTrack.playlist_id == playlist.id)
+    ).first()
+    next_order = (max_order + 1) if (max_order is not None) else 0
+
+    item = PlaylistTrack(playlist_id=playlist.id, track_id=track.id, track_order=next_order)
+    session.add(item)
+    session.commit()
+    session.refresh(item)
+    return {"success": True, "playlist_track_id": item.id}
+
+
+@app.delete("/api/playlists/{playlist_id}/tracks/{track_id}")
+async def api_remove_track_from_playlist(
+    playlist_id: int,
+    track_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user or not current_user.music_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    playlist = session.get(Playlist, playlist_id)
+    if not playlist or (playlist.user_id != current_user.id and not current_user.is_admin):
+        raise HTTPException(status_code=404, detail="Playlist not found")
+
+    item = session.exec(
+        select(PlaylistTrack).where(PlaylistTrack.playlist_id == playlist.id, PlaylistTrack.track_id == track_id)
+    ).first()
+    if not item:
+        item = session.get(PlaylistTrack, track_id)
+        if not item or item.playlist_id != playlist.id:
+            raise HTTPException(status_code=404, detail="Track not found in playlist")
+
+    session.delete(item)
+    session.commit()
+    return {"success": True}
 
 @app.get("/play/{media_type}/{item_id}", response_class=HTMLResponse)
 async def play_video(
@@ -3903,30 +4677,90 @@ async def download_tv_show(
     return StreamingResponse(iter_zip_archive(zip_files), media_type="application/zip", headers=headers)
 
 
+@app.get("/download/album/{album_id}")
+async def download_album(
+    album_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    if not current_user.downloads_access: raise HTTPException(status_code=403, detail="Forbidden")
+    if not current_user.music_access: raise HTTPException(status_code=403, detail="Forbidden")
+
+    album = session.get(Album, album_id)
+    if not album:
+        raise HTTPException(status_code=404, detail="Album not found")
+
+    tracks = session.exec(select(Track).where(Track.album_id == album.id).order_by(Track.disc_number.asc(), Track.track_number.asc())).all()
+    valid_files = [t for t in tracks if t.file_path and os.path.exists(t.file_path)]
+    if not valid_files:
+        raise HTTPException(status_code=404, detail="No audio files found for this album")
+
+    if len(valid_files) == 1:
+        fpath = valid_files[0].file_path
+        return FileResponse(fpath, media_type="application/octet-stream", filename=os.path.basename(fpath))
+
+    used_names = set()
+    zip_files = []
+    distinct_discs = set(t.disc_number or 1 for t in valid_files)
+    use_disc_folders = len(distinct_discs) > 1
+
+    for t in valid_files:
+        base_name = os.path.basename(t.file_path)
+        if use_disc_folders:
+            d = t.disc_number or 1
+            folder = f"Disc {d}"
+            arcname = f"{folder}/{base_name}"
+        else:
+            arcname = base_name
+
+        name = arcname
+        counter = 1
+        while name in used_names:
+            p, ext = os.path.splitext(arcname)
+            name = f"{p}_{counter}{ext}"
+            counter += 1
+        used_names.add(name)
+        zip_files.append((t.file_path, name))
+
+    artist_str = album.artist_name or "Unknown Artist"
+    title_str = album.title or "Unknown Album"
+    zip_filename = f"{artist_str} - {title_str}.zip"
+    clean_filename = re.sub(r'[/\\?%*:|"<>]', '_', zip_filename)
+    headers = {"Content-Disposition": f'attachment; filename="{clean_filename}"'}
+    return StreamingResponse(iter_zip_archive(zip_files), media_type="application/zip", headers=headers)
+
+
 @app.get("/download/{media_type}/{item_id}")
 async def download_media(
     media_type: str,
     item_id: int,
     current_user: User = Depends(get_current_user),
-    current_profile: Optional[Profile] = Depends(get_current_profile)
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
 ):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
     if not current_user.downloads_access: raise HTTPException(status_code=403, detail="Forbidden")
     if media_type == "movie" and not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
     if media_type == "tv" and not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
     if media_type == "photo" and not current_user.photos_access: raise HTTPException(status_code=403, detail="Forbidden")
+    if media_type in ("track", "music") and not current_user.music_access: raise HTTPException(status_code=403, detail="Forbidden")
+    if media_type == "album":
+        return await download_album(item_id, current_user, current_profile, session)
     
-    with Session(engine) as session:
-        if media_type == "photo":
-            item = session.get(Photo, item_id)
-        elif media_type == "movie":
-            item = session.get(Movie, item_id)
-        else:
-            item = session.get(TVShow, item_id)
-        if not item or not os.path.exists(item.file_path): raise HTTPException(status_code=404, detail="File missing")
-        if media_type != "photo" and is_profile_kids(current_user, current_profile) and not is_kids_safe(getattr(item, 'content_rating', '')):
-            raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
-        file_path = item.file_path
+    if media_type == "photo":
+        item = session.get(Photo, item_id)
+    elif media_type == "movie":
+        item = session.get(Movie, item_id)
+    elif media_type in ("track", "music"):
+        item = session.get(Track, item_id)
+    else:
+        item = session.get(TVShow, item_id)
+    if not item or not os.path.exists(item.file_path): raise HTTPException(status_code=404, detail="File missing")
+    if media_type not in ("photo", "track", "music") and is_profile_kids(current_user, current_profile) and not is_kids_safe(getattr(item, 'content_rating', '')):
+        raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+    file_path = item.file_path
     
     filename = os.path.basename(file_path)
     return FileResponse(file_path, media_type="application/octet-stream", filename=filename)
@@ -3972,7 +4806,7 @@ def get_server_metrics(session: Session) -> dict:
                     checked_paths.add(norm_p)
                     du = shutil.disk_usage(vol.path)
                     pct = round((du.used / du.total) * 100, 1) if du.total > 0 else 0.0
-                    display_type = {"movie": "Movies", "tv": "TV Shows", "photo": "Photos"}.get(vol.media_type, vol.media_type.capitalize())
+                    display_type = {"movie": "Movies", "tv": "TV Shows", "photo": "Photos", "music": "Music"}.get(vol.media_type, vol.media_type.capitalize())
                     tot_gb = round(du.total / (1024**3), 1)
                     used_gb = round(du.used / (1024**3), 1)
                     free_gb = round(du.free / (1024**3), 1)
@@ -4244,7 +5078,7 @@ async def view_settings(
         users = session.exec(select(User).order_by(User.id)).all()
         v_paths = session.exec(select(VolumePath).order_by(VolumePath.id)).all()
         for v in v_paths:
-            display_type = {"movie": "Movies", "tv": "TV Shows", "photo": "Photos"}.get(v.media_type, v.media_type)
+            display_type = {"movie": "Movies", "tv": "TV Shows", "photo": "Photos", "music": "Music"}.get(v.media_type, v.media_type)
             volume_paths.append({
                 "id": v.id,
                 "path": v.path,
@@ -4257,6 +5091,7 @@ async def view_settings(
             "movie": any(v.media_type == "movie" and os.path.exists(v.path) for v in v_paths),
             "tv": any(v.media_type == "tv" and os.path.exists(v.path) for v in v_paths),
             "photo": any(v.media_type == "photo" and os.path.exists(v.path) for v in v_paths),
+            "music": any(v.media_type == "music" and os.path.exists(v.path) for v in v_paths),
         }
         remote_url_config = session.exec(select(SystemConfig).where(SystemConfig.key == "remote_access_url")).first()
         remote_url = remote_url_config.value if remote_url_config else ""
@@ -4265,11 +5100,15 @@ async def view_settings(
         
         tmdb_key_config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
         tmdb_key = tmdb_key_config.value if tmdb_key_config else os.getenv("TMDB_API_KEY", "")
+
+        adb_key_config = session.exec(select(SystemConfig).where(SystemConfig.key == "theaudiodb_api_key")).first()
+        theaudiodb_key = adb_key_config.value if adb_key_config else os.getenv("THEAUDIODB_API_KEY", "")
         
         hw_accel_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
         hw_accel_profile = hw_accel_config.value if hw_accel_config else "auto"
     else:
-        mounted_volumes = {"movie": False, "tv": False, "photo": False}
+        mounted_volumes = {"movie": False, "tv": False, "photo": False, "music": False}
+        theaudiodb_key = ""
     
     rewind_seconds = current_profile.rewind_seconds if (current_profile and current_profile.rewind_seconds is not None) else (current_user.rewind_seconds or 0)
     
@@ -4277,8 +5116,8 @@ async def view_settings(
         "user": current_user, "current_profile": current_profile,
         "is_admin": is_admin, "can_change_password": can_change_password,
         "invites": invites, "users": users, "volume_paths": volume_paths, "mounted_volumes": mounted_volumes,
-        "host_url": host_url, "remote_url": remote_url, "tmdb_key": tmdb_key, "hw_accel_profile": hw_accel_profile,
-        "rewind_seconds": rewind_seconds
+        "host_url": host_url, "remote_url": remote_url, "tmdb_key": tmdb_key, "theaudiodb_key": theaudiodb_key,
+        "hw_accel_profile": hw_accel_profile, "rewind_seconds": rewind_seconds
     })
 
 @app.post("/settings/transcoding")
@@ -4353,7 +5192,25 @@ async def save_tmdb_key(
         config.value = tmdb_key.strip()
         session.add(config)
     session.commit()
-    # Trigger a rescan to fetch metadata for existing items
+    scanner_debouncer.trigger_scan(delay=0.5)
+    return RedirectResponse(url="/settings", status_code=303)
+
+@app.post("/settings/theaudiodb")
+async def save_theaudiodb_key(
+    theaudiodb_key: str = Form(""),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
+    config = session.exec(select(SystemConfig).where(SystemConfig.key == "theaudiodb_api_key")).first()
+    if not config:
+        config = SystemConfig(key="theaudiodb_api_key", value=theaudiodb_key.strip())
+        session.add(config)
+    else:
+        config.value = theaudiodb_key.strip()
+        session.add(config)
+    session.commit()
     scanner_debouncer.trigger_scan(delay=0.5)
     return RedirectResponse(url="/settings", status_code=303)
 
@@ -4573,11 +5430,20 @@ async def add_volume(
 ):
     if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
     clean_path = path.strip()
-    if clean_path and media_type in ("movie", "tv", "photo"):
+    if len(clean_path) > 1 and clean_path.endswith(('/', '\\')):
+        clean_path = clean_path.rstrip('/\\')
+    if clean_path and media_type in ("movie", "tv", "photo", "music"):
         existing = session.exec(select(VolumePath).where(VolumePath.path == clean_path)).first()
         if not existing:
             session.add(VolumePath(path=clean_path, media_type=media_type))
             session.commit()
+            start_watcher()
+            scanner_debouncer.trigger_scan(delay=0.5)
+        else:
+            if existing.media_type != media_type:
+                existing.media_type = media_type
+                session.add(existing)
+                session.commit()
             start_watcher()
             scanner_debouncer.trigger_scan(delay=0.5)
     return RedirectResponse(url="/settings", status_code=303)
@@ -4622,13 +5488,14 @@ async def suggest_volume_path(
     if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
 
     clean_type = media_type.strip().lower()
-    if clean_type not in ("movie", "tv", "photo"):
+    if clean_type not in ("movie", "tv", "photo", "music"):
         return {"suggested_path": None}
 
     TYPE_ALIASES = {
         "tv": {"tv", "tv shows", "tvshows", "shows", "series", "television"},
         "movie": {"movies", "movie", "films", "film"},
-        "photo": {"photos", "photo", "pictures", "pics", "images"}
+        "photo": {"photos", "photo", "pictures", "pics", "images"},
+        "music": {"music", "songs", "tracks", "audio", "tunes"}
     }
     targets = TYPE_ALIASES.get(clean_type, set())
 
@@ -4814,6 +5681,7 @@ async def update_invite(
     movies_access: str = Form(None),
     tv_access: str = Form(None),
     photos_access: str = Form(None),
+    music_access: str = Form(None),
     downloads_access: str = Form(None),
     watch_together_access: str = Form(None),
     kids_mode: str = Form(None),
@@ -4829,6 +5697,7 @@ async def update_invite(
         has_movies = any(v.media_type == "movie" and os.path.exists(v.path) for v in v_paths)
         has_tv = any(v.media_type == "tv" and os.path.exists(v.path) for v in v_paths)
         has_photos = any(v.media_type == "photo" and os.path.exists(v.path) for v in v_paths)
+        has_music = any(v.media_type == "music" and os.path.exists(v.path) for v in v_paths)
 
         if has_movies:
             invite.movies_access = movies_access == "on"
@@ -4836,6 +5705,8 @@ async def update_invite(
             invite.tv_access = tv_access == "on"
         if has_photos:
             invite.photos_access = photos_access == "on"
+        if has_music:
+            invite.music_access = music_access == "on"
 
         invite.downloads_access = downloads_access == "on"
         invite.watch_together_access = watch_together_access == "on"
@@ -4851,6 +5722,7 @@ async def update_user(
     movies_access: str = Form(None),
     tv_access: str = Form(None),
     photos_access: str = Form(None),
+    music_access: str = Form(None),
     downloads_access: str = Form(None),
     watch_together_access: str = Form(None),
     kids_mode: str = Form(None),
@@ -4866,6 +5738,7 @@ async def update_user(
         has_movies = any(v.media_type == "movie" and os.path.exists(v.path) for v in v_paths)
         has_tv = any(v.media_type == "tv" and os.path.exists(v.path) for v in v_paths)
         has_photos = any(v.media_type == "photo" and os.path.exists(v.path) for v in v_paths)
+        has_music = any(v.media_type == "music" and os.path.exists(v.path) for v in v_paths)
 
         if has_movies:
             user.movies_access = movies_access == "on"
@@ -4873,6 +5746,8 @@ async def update_user(
             user.tv_access = tv_access == "on"
         if has_photos:
             user.photos_access = photos_access == "on"
+        if has_music:
+            user.music_access = music_access == "on"
 
         user.downloads_access = downloads_access == "on"
         user.watch_together_access = watch_together_access == "on"

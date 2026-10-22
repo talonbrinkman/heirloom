@@ -6,7 +6,7 @@ from watchdog.events import FileSystemEventHandler
 from sqlmodel import Session, select
 from .database import engine
 from .models import VolumePath
-from .scanner import scan_media_library, VIDEO_EXTENSIONS, PHOTO_EXTENSIONS, is_recycle_path
+from .scanner import scan_media_library, VIDEO_EXTENSIONS, PHOTO_EXTENSIONS, AUDIO_EXTENSIONS, is_recycle_path
 
 class ScannerDebouncer:
     def __init__(self, delay=3.0):
@@ -69,14 +69,14 @@ class MediaEventHandler(FileSystemEventHandler):
                 scanner_debouncer.trigger_scan(delay=5.0)
             return
         
-        # Trigger scan on specific video or photo file events
+        # Trigger scan on specific video, photo, or audio file events
         if getattr(event, 'event_type', None) in ('created', 'deleted', 'moved', 'modified'):
             src_lower = event.src_path.lower()
-            if src_lower.endswith(VIDEO_EXTENSIONS) or src_lower.endswith(PHOTO_EXTENSIONS):
+            if src_lower.endswith(VIDEO_EXTENSIONS) or src_lower.endswith(PHOTO_EXTENSIONS) or src_lower.endswith(AUDIO_EXTENSIONS):
                 scanner_debouncer.trigger_scan(delay=5.0)
             elif hasattr(event, 'dest_path') and event.dest_path:
                 dest_lower = event.dest_path.lower()
-                if dest_lower.endswith(VIDEO_EXTENSIONS) or dest_lower.endswith(PHOTO_EXTENSIONS):
+                if dest_lower.endswith(VIDEO_EXTENSIONS) or dest_lower.endswith(PHOTO_EXTENSIONS) or dest_lower.endswith(AUDIO_EXTENSIONS):
                     scanner_debouncer.trigger_scan(delay=5.0)
 
 observer = Observer()

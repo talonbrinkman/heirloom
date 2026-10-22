@@ -97,6 +97,33 @@
                 <span>Dashboard</span>
             </a>
 
+            {% if has_movies and user.movies_access %}
+            <a href="/library/movie" class="mobile-menu-link">
+                <i data-lucide="film"></i>
+                <span>Movies</span>
+            </a>
+            {% endif %}
+            {% if has_tv and user.tv_access %}
+            <a href="/library/tv" class="mobile-menu-link">
+                <i data-lucide="tv"></i>
+                <span>TV Shows</span>
+            </a>
+            {% endif %}
+            {% if has_photos and user.photos_access %}
+            <a href="/library/photo" class="mobile-menu-link">
+                <i data-lucide="image"></i>
+                <span>Photos</span>
+            </a>
+            {% endif %}
+            {% if has_music and user.music_access %}
+            <a href="/library/music" class="mobile-menu-link">
+                <i data-lucide="music"></i>
+                <span>Music</span>
+            </a>
+            {% endif %}
+
+            <div class="mobile-menu-divider"></div>
+
             {% if user.is_admin and (current_profile is none or current_profile.is_primary) %}
             <a href="/server-dashboard" class="mobile-menu-link">
                 <i data-lucide="gauge"></i>
@@ -166,22 +193,28 @@
                 Photos
             </a>
             {% endif %}
+            {% if has_music and user.music_access %}
+            <a href="/library/music" class="sidebar-link">
+                <i data-lucide="music"></i>
+                Music
+            </a>
+            {% endif %}
         </div>
 
         <div class="main-content">
-            {% if not has_movies and not has_tv and not has_photos %}
+            {% if not has_movies and not has_tv and not has_photos and not has_music %}
             <div class="card">
                 <div class="no-volumes-card">
                     <i data-lucide="hard-drive"></i>
                     <h2>No Media Found</h2>
                     {% if user.is_admin and (current_profile is none or current_profile.is_primary) %}
-                    <p>No media volumes were detected. Add your movie, TV show, or photo folders in <a href="/settings" class="inline-link">settings</a> to begin populating your library.</p>
+                    <p>No media volumes were detected. Add your movie, TV show, photo, or music folders in <a href="/settings" class="inline-link">settings</a> to begin populating your library.</p>
                     {% else %}
                     <p>The administrator hasn't added any content yet. Please check back later.</p>
                     {% endif %}
                 </div>
             </div>
-            {% elif not (has_movies and user.movies_access) and not (has_tv and user.tv_access) and not (has_photos and user.photos_access) %}
+            {% elif not (has_movies and user.movies_access) and not (has_tv and user.tv_access) and not (has_photos and user.photos_access) and not (has_music and user.music_access) %}
             <div class="card">
                 <div class="no-volumes-card">
                     <i data-lucide="hard-drive"></i>
@@ -589,6 +622,51 @@
                 </div>
             </div>
             {% endif %}
+
+            {% if recent_albums and user.music_access %}
+            <div class="card">
+                <h2>Recent Music</h2>
+                <div class="carousel-container">
+                    <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
+                            data-lucide="chevron-left"></i></button>
+                    <div class="carousel-row">
+                        {% for album in recent_albums %}
+                        <div class="media-card music-card">
+                            <div class="poster-container music-poster-container">
+                                <a href="/album/{{ album.id }}?from=/">
+                                    {% if album.cover_filename %}
+                                    <img src="/metadata/{{ album.cover_filename }}" class="poster" alt="{{ album.title }}">
+                                    {% else %}
+                                    <div class="poster-placeholder">
+                                        <i data-lucide="disc"></i>
+                                    </div>
+                                    {% endif %}
+                                </a>
+                                <button type="button" class="icon-btn hover-play" onclick="event.preventDefault(); event.stopPropagation(); HeirloomPlayer.playAlbum({{ album.id }})" title="Play">
+                                    <i data-lucide="play" fill="currentColor"></i>
+                                </button>
+                                <button class="icon-btn three-dots-btn"
+                                    onclick="toggleMenu(event, 'menu-music-{{ loop.index }}')">
+                                    <i data-lucide="more-vertical" fill="white"></i>
+                                </button>
+                                <div class="dropdown-menu" id="menu-music-{{ loop.index }}">
+                                    {% if user.downloads_access %}
+                                    <form action="/download/album/{{ album.id }}" method="get">
+                                        <button type="submit">Download</button>
+                                    </form>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <div class="media-title">{{ album.title }}</div>
+                            <div class="media-year">{{ album.artist_name }}{% if album.year %} &bull; {{ album.year }}{% endif %}</div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i
+                            data-lucide="chevron-right"></i></button>
+                </div>
+            </div>
+            {% endif %}
         </div>
     </div>
 
@@ -683,15 +761,23 @@
                     if (data.items.length === 0) {
                         resultsContainer.innerHTML = '<div class="empty-state">No results found</div>';
                     } else {
-                        resultsContainer.innerHTML = data.items.map(item => `
+                        resultsContainer.innerHTML = data.items.map(item => {
+                            let iconName = 'film';
+                            let typeLabel = 'Movie';
+                            if (item.type === 'photo') { iconName = 'image'; typeLabel = 'Photo'; }
+                            else if (item.type === 'tv') { iconName = 'tv'; typeLabel = 'TV Show'; }
+                            else if (item.type === 'music') { iconName = 'music'; typeLabel = 'Music'; }
+
+                            return `
                             <a href="${item.url}" class="search-result">
-                                ${item.poster ? `<img src="/metadata/${item.poster}" class="search-result-thumb">` : `<div class="search-result-thumb"><i data-lucide="${item.type === 'photo' ? 'image' : (item.type === 'tv' ? 'tv' : 'film')}"></i></div>`}
+                                ${item.poster ? `<img src="/metadata/${item.poster}" class="search-result-thumb">` : `<div class="search-result-thumb"><i data-lucide="${iconName}"></i></div>`}
                                 <div>
                                     <strong>${item.title}</strong>
-                                    <small>${item.year ? item.year + ' • ' : ''}${item.type === 'movie' ? 'Movie' : (item.type === 'tv' ? 'TV Show' : 'Photo')}</small>
+                                    <small>${item.year ? item.year + ' • ' : ''}${typeLabel}</small>
                                 </div>
                             </a>
-                        `).join('');
+                            `;
+                        }).join('');
                         lucide.createIcons();
                     }
                     resultsContainer.style.display = 'flex';
@@ -797,6 +883,7 @@
         });
     </script>
     <script src="/static/lucide.min.js"></script>
+    <script src="/static/audio-player.js"></script>
     <script>lucide.createIcons();</script>
 
     <script>

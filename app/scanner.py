@@ -16,7 +16,7 @@ except ImportError:
 
 from sqlmodel import Session, select
 from .database import engine
-from .models import Movie, TVShow, Photo, VolumePath, SystemConfig
+from .models import Movie, TVShow, Photo, VolumePath, SystemConfig, Artist, Album, Track, Playlist, PlaylistTrack
 
 class SafeHTTPClient:
     """Async-compatible HTTP client that uses httpx when installed, falling back to threaded requests."""
@@ -33,6 +33,10 @@ class SafeHTTPClient:
 
 VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".m4v")
 PHOTO_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".heic", ".webp", ".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm")
+AUDIO_EXTENSIONS = (
+    ".flac", ".mp3", ".m4a", ".alac", ".aac", ".ogg", ".oga", ".opus",
+    ".wav", ".wave", ".wma", ".aiff", ".aif", ".ape", ".wv", ".m4b", ".dsf", ".dff", ".mpc"
+)
 METADATA_DIR = "/config/metadata"
 
 RECYCLE_NAMES = {
@@ -556,6 +560,331 @@ def _generate_photo_thumbnail(full_path: str, thumb_path: str, is_video: bool) -
         return False
 
 # -----------------------------------------------------------------------------
+# Audio & Music Extraction Helpers (File-First with TheAudioDB Enrichment)
+# -----------------------------------------------------------------------------
+
+def extract_audio_metadata(full_path: str) -> Dict[str, Any]:
+    """
+    Extracts tags (title, artist, album, track number, disc number, year, genre, duration, bitrate, codec)
+    and embedded cover artwork directly from an audio file.
+    Falls back gracefully to ffprobe and intelligent folder/filename heuristics when mutagen or tags are missing.
+    """
+    mutagen = None
+    APIC = None
+    try:
+        import mutagen
+        from mutagen.id3 import APIC
+    except ImportError:
+        pass
+
+    raw_filename = os.path.basename(full_path)
+    base_name, ext = os.path.splitext(raw_filename)
+    ext_lower = ext.lower()
+
+    # Default fallback values derived from filename and folder structure
+    parts = os.path.normpath(full_path).replace("\\", "/").split("/")
+    folder_album = parts[-2] if len(parts) >= 2 else "Unknown Album"
+    folder_artist = parts[-3] if len(parts) >= 3 else "Unknown Artist"
+
+    clean_title = re.sub(r'^\d+[\s\.\-_]+', '', base_name).strip() or base_name
+    track_num_match = re.match(r'^(\d+)', base_name)
+    fallback_track = int(track_num_match.group(1)) if track_num_match else 1
+
+    meta = {
+        "title": clean_title,
+        "artist": folder_artist if folder_artist != "media" and not folder_artist.lower().startswith("music") else "Unknown Artist",
+        "album_artist": None,
+        "album": folder_album if folder_album != "media" and not folder_album.lower().startswith("music") else "Unknown Album",
+        "track_number": fallback_track,
+        "disc_number": 1,
+        "year": None,
+        "genre": None,
+        "duration": 0.0,
+        "bitrate": None,
+        "codec": ext_lower.lstrip("."),
+        "cover_filename": None
+    }
+
+    embedded_image_bytes = None
+    embedded_image_ext = ".jpg"
+
+    if mutagen is not None:
+        try:
+            audio = mutagen.File(full_path)
+            if audio is not None:
+                # Duration & Bitrate
+                if hasattr(audio, 'info') and audio.info:
+                    if hasattr(audio.info, 'length') and audio.info.length:
+                        meta["duration"] = round(float(audio.info.length), 2)
+                    if hasattr(audio.info, 'bitrate') and audio.info.bitrate:
+                        meta["bitrate"] = int(audio.info.bitrate)
+
+                # 1. MP3 / ID3 tags
+                if hasattr(audio, 'tags') and audio.tags:
+                    tags = audio.tags
+
+                    # ID3 style tags (TIT2, TPE1, TALB, etc.)
+                    if hasattr(tags, 'getall') or 'TIT2' in tags:
+                        if 'TIT2' in tags:
+                            meta["title"] = str(tags['TIT2']).strip() or meta["title"]
+                        if 'TPE1' in tags:
+                            meta["artist"] = str(tags['TPE1']).strip() or meta["artist"]
+                        if 'TPE2' in tags:
+                            meta["album_artist"] = str(tags['TPE2']).strip()
+                        if 'TALB' in tags:
+                            meta["album"] = str(tags['TALB']).strip() or meta["album"]
+                        if 'TCON' in tags:
+                            meta["genre"] = str(tags['TCON']).strip()
+                        if 'TDRC' in tags:
+                            meta["year"] = str(tags['TDRC'])[:4]
+                        elif 'TYER' in tags:
+                            meta["year"] = str(tags['TYER'])[:4]
+                        if 'TRCK' in tags:
+                            tr_val = str(tags['TRCK']).split('/')[0].strip()
+                            if tr_val.isdigit(): meta["track_number"] = int(tr_val)
+                        if 'TPOS' in tags:
+                            disc_val = str(tags['TPOS']).split('/')[0].strip()
+                            if disc_val.isdigit(): meta["disc_number"] = int(disc_val)
+
+                        # Extract APIC picture
+                        for tag in tags.values():
+                            if (APIC and isinstance(tag, APIC)) or (hasattr(tag, 'data') and hasattr(tag, 'mime') and 'image' in getattr(tag, 'mime', '')):
+                                embedded_image_bytes = tag.data
+                                if 'png' in getattr(tag, 'mime', '').lower():
+                                    embedded_image_ext = ".png"
+                                break
+
+                    # Vorbis / FLAC / OGG tags
+                    elif hasattr(audio, 'pictures') or hasattr(tags, 'items'):
+                        def get_vorbis(keys):
+                            for k in keys:
+                                for tag_k, tag_v in tags.items():
+                                    if tag_k.lower() == k.lower():
+                                        val = tag_v[0] if isinstance(tag_v, (list, tuple)) else tag_v
+                                        if val: return str(val).strip()
+                            return None
+
+                        t_val = get_vorbis(['title'])
+                        if t_val: meta["title"] = t_val
+                        a_val = get_vorbis(['artist'])
+                        if a_val: meta["artist"] = a_val
+                        aa_val = get_vorbis(['albumartist', 'album_artist'])
+                        if aa_val: meta["album_artist"] = aa_val
+                        alb_val = get_vorbis(['album'])
+                        if alb_val: meta["album"] = alb_val
+                        gen_val = get_vorbis(['genre'])
+                        if gen_val: meta["genre"] = gen_val
+                        date_val = get_vorbis(['date', 'year'])
+                        if date_val: meta["year"] = str(date_val)[:4]
+                        track_val = get_vorbis(['tracknumber', 'track'])
+                        if track_val:
+                            t_clean = str(track_val).split('/')[0].strip()
+                            if t_clean.isdigit(): meta["track_number"] = int(t_clean)
+                        disc_val = get_vorbis(['discnumber', 'disc'])
+                        if disc_val:
+                            d_clean = str(disc_val).split('/')[0].strip()
+                            if d_clean.isdigit(): meta["disc_number"] = int(d_clean)
+
+                        # FLAC pictures
+                        if hasattr(audio, 'pictures') and audio.pictures:
+                            pic = audio.pictures[0]
+                            embedded_image_bytes = pic.data
+                            if 'png' in getattr(pic, 'mime', '').lower():
+                                embedded_image_ext = ".png"
+
+                    # MP4 / M4A / ALAC tags
+                    if '\xa9nam' in tags or 'covr' in tags or 'aART' in tags:
+                        if '\xa9nam' in tags and tags['\xa9nam']:
+                            meta["title"] = str(tags['\xa9nam'][0]).strip()
+                        if '\xa9ART' in tags and tags['\xa9ART']:
+                            meta["artist"] = str(tags['\xa9ART'][0]).strip()
+                        if 'aART' in tags and tags['aART']:
+                            meta["album_artist"] = str(tags['aART'][0]).strip()
+                        if '\xa9alb' in tags and tags['\xa9alb']:
+                            meta["album"] = str(tags['\xa9alb'][0]).strip()
+                        if '\xa9gen' in tags and tags['\xa9gen']:
+                            meta["genre"] = str(tags['\xa9gen'][0]).strip()
+                        if '\xa9day' in tags and tags['\xa9day']:
+                            meta["year"] = str(tags['\xa9day'][0])[:4]
+                        if 'trkn' in tags and tags['trkn'] and tags['trkn'][0]:
+                            try:
+                                meta["track_number"] = int(tags['trkn'][0][0])
+                            except (ValueError, TypeError):
+                                pass
+                        if 'disk' in tags and tags['disk'] and tags['disk'][0]:
+                            try:
+                                meta["disc_number"] = int(tags['disk'][0][0])
+                            except (ValueError, TypeError):
+                                pass
+                        if 'covr' in tags and tags['covr']:
+                            c_data = tags['covr'][0]
+                            embedded_image_bytes = bytes(c_data)
+
+        except Exception as e:
+            print(f"[Scanner] Warning reading tags for {full_path} via mutagen: {e}")
+
+    # Fallback to ffprobe if mutagen was missing or duration/tags were incomplete
+    if mutagen is None or meta["duration"] <= 0.0 or meta["artist"] == "Unknown Artist":
+        try:
+            from .ffmpeg_setup import get_ffprobe_path
+            probe_cmd = [
+                get_ffprobe_path(), "-v", "quiet", "-print_format", "json",
+                "-show_format", full_path
+            ]
+            probe_out = subprocess.check_output(probe_cmd, stderr=subprocess.DEVNULL, timeout=5).decode('utf-8', errors='ignore')
+            probe_json = json.loads(probe_out)
+            probe_fmt = probe_json.get("format", {})
+            probe_tags = probe_fmt.get("tags", {})
+            for k, v in probe_tags.items():
+                k_l = k.lower()
+                if k_l == "title" and v and (meta["title"] == clean_title or not meta["title"]):
+                    meta["title"] = str(v).strip()
+                elif k_l in ("artist", "performer") and v and meta["artist"] == "Unknown Artist":
+                    meta["artist"] = str(v).strip()
+                elif k_l in ("album_artist", "albumartist") and v and not meta["album_artist"]:
+                    meta["album_artist"] = str(v).strip()
+                elif k_l == "album" and v and meta["album"] == "Unknown Album":
+                    meta["album"] = str(v).strip()
+                elif k_l in ("date", "year") and v and not meta["year"]:
+                    meta["year"] = str(v)[:4]
+                elif k_l == "genre" and v and not meta["genre"]:
+                    meta["genre"] = str(v).strip()
+                elif k_l in ("track", "tracknumber") and v:
+                    tr = str(v).split('/')[0].strip()
+                    if tr.isdigit(): meta["track_number"] = int(tr)
+            if meta["duration"] <= 0.0 and "duration" in probe_fmt:
+                meta["duration"] = round(float(probe_fmt["duration"]), 2)
+            if not meta["bitrate"] and "bit_rate" in probe_fmt:
+                try: meta["bitrate"] = int(probe_fmt["bit_rate"])
+                except Exception: pass
+        except Exception:
+            pass
+
+    # Save extracted embedded artwork or look for local folder artwork
+    os.makedirs(METADATA_DIR, exist_ok=True)
+    if embedded_image_bytes:
+        h = hashlib.md5(embedded_image_bytes).hexdigest()[:16]
+        cover_fn = f"cover_{h}{embedded_image_ext}"
+        cover_dst = os.path.join(METADATA_DIR, cover_fn)
+        if not os.path.exists(cover_dst):
+            try:
+                with open(cover_dst, "wb") as f:
+                    f.write(embedded_image_bytes)
+            except Exception as e:
+                print(f"[Scanner] Error saving embedded cover: {e}")
+        meta["cover_filename"] = cover_fn
+    else:
+        # Check local folder for cover art
+        parent_dir = os.path.dirname(full_path)
+        common_art_names = (
+            "cover.jpg", "cover.jpeg", "cover.png",
+            "folder.jpg", "folder.jpeg", "folder.png",
+            "album.jpg", "album.jpeg", "album.png",
+            "front.jpg", "front.jpeg", "front.png"
+        )
+        for art_name in common_art_names:
+            candidate = os.path.join(parent_dir, art_name)
+            if os.path.isfile(candidate):
+                try:
+                    with open(candidate, "rb") as f:
+                        c_bytes = f.read()
+                    if c_bytes:
+                        c_ext = os.path.splitext(art_name)[1].lower() or ".jpg"
+                        h = hashlib.md5(c_bytes).hexdigest()[:16]
+                        cover_fn = f"cover_{h}{c_ext}"
+                        cover_dst = os.path.join(METADATA_DIR, cover_fn)
+                        if not os.path.exists(cover_dst):
+                            with open(cover_dst, "wb") as df:
+                                df.write(c_bytes)
+                        meta["cover_filename"] = cover_fn
+                        break
+                except Exception:
+                    pass
+
+    return meta
+
+async def async_download_custom_image(client: SafeHTTPClient, url: str, filename: str) -> Optional[str]:
+    """Helper to download image from direct URL to METADATA_DIR."""
+    if not url: return None
+    os.makedirs(METADATA_DIR, exist_ok=True)
+    filepath = os.path.join(METADATA_DIR, filename)
+    if not os.path.exists(filepath):
+        try:
+            res = await client.get(url, timeout=10.0)
+            if res.status_code == 200:
+                def _write():
+                    with open(filepath, 'wb') as f:
+                        f.write(res.content)
+                await asyncio.to_thread(_write)
+        except Exception:
+            return None
+    return filename
+
+async def async_fetch_theaudiodb_artist(client: SafeHTTPClient, artist_name: str, api_key: str) -> Optional[Dict[str, Any]]:
+    """Fetches artist bio and artwork from TheAudioDB v1 JSON API."""
+    if not artist_name or artist_name in ("Unknown Artist", "Various Artists") or not api_key:
+        return None
+    url = f"https://www.theaudiodb.com/api/v1/json/{api_key}/search.php"
+    try:
+        res = await client.get(url, params={"s": artist_name}, timeout=10.0)
+        if res.status_code == 200:
+            data = res.json()
+            artists = data.get("artists")
+            if artists and len(artists) > 0:
+                art = artists[0]
+                t_id = art.get("idArtist")
+                bio = art.get("strBiographyEN") or ""
+                thumb_url = art.get("strArtistThumb")
+                banner_url = art.get("strArtistBanner") or art.get("strArtistFanart")
+                
+                thumb_fn = None
+                banner_fn = None
+                if thumb_url and t_id:
+                    thumb_fn = await async_download_custom_image(client, thumb_url, f"artist_{t_id}_thumb.jpg")
+                if banner_url and t_id:
+                    banner_fn = await async_download_custom_image(client, banner_url, f"artist_{t_id}_banner.jpg")
+
+                return {
+                    "theaudiodb_id": int(t_id) if t_id and str(t_id).isdigit() else None,
+                    "bio": bio,
+                    "thumbnail_filename": thumb_fn,
+                    "banner_filename": banner_fn
+                }
+    except Exception as e:
+        print(f"[Scanner] TheAudioDB artist lookup failed for {artist_name}: {e}")
+    return None
+
+async def async_fetch_theaudiodb_album(client: SafeHTTPClient, artist_name: str, album_title: str, api_key: str) -> Optional[Dict[str, Any]]:
+    """Fetches album details & artwork fallback from TheAudioDB."""
+    if not artist_name or not album_title or not api_key:
+        return None
+    url = f"https://www.theaudiodb.com/api/v1/json/{api_key}/searchalbum.php"
+    try:
+        res = await client.get(url, params={"s": artist_name, "a": album_title}, timeout=10.0)
+        if res.status_code == 200:
+            data = res.json()
+            albums = data.get("album")
+            if albums and len(albums) > 0:
+                alb = albums[0]
+                alb_id = alb.get("idAlbum")
+                thumb_url = alb.get("strAlbumThumb")
+                genre = alb.get("strGenre")
+                year = alb.get("intYearReleased")
+                
+                cover_fn = None
+                if thumb_url and alb_id:
+                    cover_fn = await async_download_custom_image(client, thumb_url, f"album_{alb_id}_cover.jpg")
+                return {
+                    "theaudiodb_id": int(alb_id) if alb_id and str(alb_id).isdigit() else None,
+                    "cover_filename": cover_fn,
+                    "genre": genre,
+                    "year": str(year) if year else None
+                }
+    except Exception as e:
+        print(f"[Scanner] TheAudioDB album lookup failed for {album_title}: {e}")
+    return None
+
+# -----------------------------------------------------------------------------
 # Scanner Manager (Stateful, Asynchronous, Non-Blocking)
 # -----------------------------------------------------------------------------
 
@@ -623,8 +952,8 @@ class ScannerManager:
                     return False
 
                 # 3. Check if current phase media type has been removed
-                if self.phase in ("movies", "tv", "photos"):
-                    type_map = {"movies": "movie", "tv": "tv", "photos": "photo"}
+                if self.phase in ("movies", "tv", "photos", "music"):
+                    type_map = {"movies": "movie", "tv": "tv", "photos": "photo", "music": "music"}
                     curr_type = type_map.get(self.phase)
                     if curr_type and curr_type not in active_types:
                         print(f"[Scanner] No active volumes for phase '{self.phase}'. Aborting obsolete scan.")
@@ -655,10 +984,12 @@ class ScannerManager:
             movie_volume_paths = [v.path for v in volume_paths if v.media_type == "movie"]
             tv_volume_paths = [v.path for v in volume_paths if v.media_type == "tv"]
             photo_volume_paths = [v.path for v in volume_paths if v.media_type == "photo"]
+            music_volume_paths = [v.path for v in volume_paths if v.media_type == "music"]
 
             raw_movies = session.exec(select(Movie.id, Movie.file_path)).all()
             raw_shows = session.exec(select(TVShow.id, TVShow.file_path)).all()
             raw_photos = session.exec(select(Photo.id, Photo.file_path)).all()
+            raw_tracks = session.exec(select(Track.id, Track.file_path)).all()
 
         def belongs_to_any_volume(filepath, volumes):
             if not filepath:
@@ -679,13 +1010,15 @@ class ScannerManager:
         del_m_ids = [m_id for m_id, fpath in raw_movies if fpath and not fpath.startswith("remote_") and not belongs_to_any_volume(fpath, movie_volume_paths)]
         del_t_ids = [t_id for t_id, fpath in raw_shows if fpath and not fpath.startswith("remote_") and not belongs_to_any_volume(fpath, tv_volume_paths)]
         del_p_ids = [p_id for p_id, fpath in raw_photos if not fpath or not belongs_to_any_volume(fpath, photo_volume_paths)]
+        del_tr_ids = [tr_id for tr_id, fpath in raw_tracks if not fpath or not belongs_to_any_volume(fpath, music_volume_paths)]
 
-        total_to_delete = len(del_m_ids) + len(del_t_ids) + len(del_p_ids)
+        total_to_delete = len(del_m_ids) + len(del_t_ids) + len(del_p_ids) + len(del_tr_ids)
         if total_to_delete > 0:
             all_deletions = (
                 [("movie", m_id) for m_id in del_m_ids] +
                 [("tv", t_id) for t_id in del_t_ids] +
-                [("photo", p_id) for p_id in del_p_ids]
+                [("photo", p_id) for p_id in del_p_ids] +
+                [("track", tr_id) for tr_id in del_tr_ids]
             )
             # Batch delete in chunks of 50 to avoid holding SQLite locks
             for i in range(0, len(all_deletions), 50):
@@ -696,8 +1029,10 @@ class ScannerManager:
                             item = session.get(Movie, item_id)
                         elif m_type == "tv":
                             item = session.get(TVShow, item_id)
-                        else:
+                        elif m_type == "photo":
                             item = session.get(Photo, item_id)
+                        else:
+                            item = session.get(Track, item_id)
                         if item:
                             session.delete(item)
                     try:
@@ -706,6 +1041,21 @@ class ScannerManager:
                         session.rollback()
                         print(f"[Scanner] Error during orphan batch deletion: {e}")
                 time.sleep(0.02)
+
+            # Reconcile empty albums and artists
+            with Session(engine) as session:
+                for alb in session.exec(select(Album)).all():
+                    if len(session.exec(select(Track.id).where(Track.album_id == alb.id)).all()) == 0:
+                        session.delete(alb)
+                for art in session.exec(select(Artist)).all():
+                    if len(session.exec(select(Track.id).where(Track.artist_id == art.id)).all()) == 0:
+                        session.delete(art)
+                try:
+                    session.commit()
+                except Exception as e:
+                    session.rollback()
+                    print(f"[Scanner] Error cleaning empty albums/artists: {e}")
+
             print(f"[Scanner] Cleaned up {total_to_delete} orphaned media item(s).")
 
     def get_status(self) -> Dict[str, Any]:
@@ -804,16 +1154,21 @@ class ScannerManager:
             movie_volume_paths = [v.path for v in volume_paths if v.media_type == "movie"]
             tv_volume_paths = [v.path for v in volume_paths if v.media_type == "tv"]
             photo_volume_paths = [v.path for v in volume_paths if v.media_type == "photo"]
+            music_volume_paths = [v.path for v in volume_paths if v.media_type == "music"]
 
             config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
             tmdb_api_key = config.value if config else os.getenv("TMDB_API_KEY")
 
+            adb_config = session.exec(select(SystemConfig).where(SystemConfig.key == "theaudiodb_api_key")).first()
+            theaudiodb_api_key = (adb_config.value.strip() if adb_config and adb_config.value and adb_config.value.strip() else "") or os.getenv("THEAUDIODB_API_KEY", "123")
+
             existing_movie_paths = set(session.exec(select(Movie.file_path)).all())
             existing_tv_paths = set(session.exec(select(TVShow.file_path)).all())
             existing_photos = {p.file_path: p.poster_filename for p in session.exec(select(Photo)).all()}
+            existing_tracks = set(session.exec(select(Track.file_path)).all())
 
         with self._lock:
-            self.scanned_volumes = set(movie_volume_paths + tv_volume_paths + photo_volume_paths)
+            self.scanned_volumes = set(movie_volume_paths + tv_volume_paths + photo_volume_paths + music_volume_paths)
             self.scanned_types = {v.media_type for v in volume_paths if v.media_type}
             self._abort_event.clear()
 
@@ -850,9 +1205,11 @@ class ScannerManager:
             movie_records = session.exec(select(Movie.id, Movie.file_path)).all()
             tv_records = session.exec(select(TVShow.id, TVShow.file_path)).all()
             photo_records = session.exec(select(Photo.id, Photo.file_path, Photo.album, Photo.date_taken)).all()
+            track_records = session.exec(select(Track.id, Track.file_path)).all()
 
         del_movies = [m_id for m_id, fpath in movie_records if fpath and not fpath.startswith("remote_") and not is_valid_path(fpath, movie_volume_paths)]
         del_tv = [t_id for t_id, fpath in tv_records if fpath and not fpath.startswith("remote_") and not is_valid_path(fpath, tv_volume_paths)]
+        del_tracks = [tr_id for tr_id, fpath in track_records if fpath and not is_valid_path(fpath, music_volume_paths)]
         def _reconcile_photos():
             del_p = []
             updates = []
@@ -885,7 +1242,7 @@ class ScannerManager:
 
         del_photos, photo_updates = await asyncio.to_thread(_reconcile_photos)
 
-        if del_movies or del_tv or del_photos:
+        if del_movies or del_tv or del_photos or del_tracks:
             with Session(engine) as session:
                 for m_id in del_movies:
                     m = session.get(Movie, m_id)
@@ -896,6 +1253,21 @@ class ScannerManager:
                 for p_id in del_photos:
                     p = session.get(Photo, p_id)
                     if p: session.delete(p)
+                for tr_id in del_tracks:
+                    tr = session.get(Track, tr_id)
+                    if tr: session.delete(tr)
+                
+                # Cleanup empty albums & artists
+                all_albs = session.exec(select(Album)).all()
+                for alb in all_albs:
+                    if len(session.exec(select(Track.id).where(Track.album_id == alb.id)).all()) == 0:
+                        session.delete(alb)
+
+                all_arts = session.exec(select(Artist)).all()
+                for art in all_arts:
+                    if len(session.exec(select(Track.id).where(Track.artist_id == art.id)).all()) == 0:
+                        session.delete(art)
+
                 try:
                     session.commit()
                 except Exception as e:
@@ -929,11 +1301,11 @@ class ScannerManager:
 
         def _discover_candidates():
             if self._abort_event.is_set():
-                return [], [], []
+                return [], [], [], []
             new_movies = []
             for movies_dir in movie_volume_paths:
                 if self._abort_event.is_set():
-                    return [], [], []
+                    return [], [], [], []
                 if os.path.exists(movies_dir):
                     for root, dirs, files in os.walk(movies_dir):
                         dirs[:] = [d for d in dirs if not is_recycle_name(d)]
@@ -952,7 +1324,7 @@ class ScannerManager:
             new_shows = []
             for tv_dir in tv_volume_paths:
                 if self._abort_event.is_set():
-                    return [], [], []
+                    return [], [], [], []
                 if os.path.exists(tv_dir):
                     for root, dirs, files in os.walk(tv_dir):
                         dirs[:] = [d for d in dirs if not is_recycle_name(d)]
@@ -971,7 +1343,7 @@ class ScannerManager:
             new_photos = []
             for photo_dir in photo_volume_paths:
                 if self._abort_event.is_set():
-                    return [], [], []
+                    return [], [], [], []
                 if os.path.exists(photo_dir):
                     for root, dirs, files in os.walk(photo_dir):
                         dirs[:] = [d for d in dirs if not is_recycle_name(d)]
@@ -987,12 +1359,36 @@ class ScannerManager:
                                 if full_path not in existing_photos or not existing_photos.get(full_path):
                                     new_photos.append((full_path, file, root, photo_dir))
 
-            return new_movies, new_shows, new_photos
+            new_tracks = []
+            for music_dir in music_volume_paths:
+                if self._abort_event.is_set():
+                    return [], [], [], []
+                if not os.path.exists(music_dir):
+                    print(f"[Scanner] Warning: Configured music volume path does not exist on disk: {music_dir}")
+                    continue
+                dir_tracks_count = 0
+                for root, dirs, files in os.walk(music_dir):
+                    dirs[:] = [d for d in dirs if not is_recycle_name(d)]
+                    if is_recycle_path(root):
+                        continue
+                    for file in files:
+                        if is_recycle_name(file):
+                            continue
+                        if file.lower().endswith(AUDIO_EXTENSIONS):
+                            full_path = os.path.join(root, file)
+                            if is_recycle_path(full_path):
+                                continue
+                            if full_path not in existing_tracks:
+                                new_tracks.append((full_path, file, root, music_dir))
+                                dir_tracks_count += 1
+                print(f"[Scanner] Music directory {music_dir}: discovered {dir_tracks_count} new candidate track(s).")
 
-        new_movies, new_shows, new_photos = await asyncio.to_thread(_discover_candidates)
+            return new_movies, new_shows, new_photos, new_tracks
+
+        new_movies, new_shows, new_photos, new_tracks = await asyncio.to_thread(_discover_candidates)
         if self._abort_event.is_set() or not self.check_scan_necessary():
             return
-        total_items = len(new_movies) + len(new_shows) + len(new_photos)
+        total_items = len(new_movies) + len(new_shows) + len(new_photos) + len(new_tracks)
 
         with self._lock:
             self.total_items = total_items
@@ -1327,9 +1723,198 @@ class ScannerManager:
                 batch_photos.clear()
                 await asyncio.sleep(0.05)
 
+            # 4D. Scan Music Library (File-First with TheAudioDB enrichment)
+            batch_tracks = []
+            artists_to_enrich = set()
+            albums_to_enrich = set()
+
+            for full_path, file, root, music_dir in new_tracks:
+                if self._abort_event.is_set() or not self.check_scan_necessary():
+                    print("[Scanner] Aborting music processing loop.")
+                    break
+
+                with self._lock:
+                    self.phase = "music"
+                    self.action = f"Scanning Music ({self.items_scanned + 1}/{self.total_items})"
+                    self.current_item = file
+
+                if is_recycle_path(full_path):
+                    continue
+
+                try:
+                    track_meta = await asyncio.to_thread(extract_audio_metadata, full_path)
+                    batch_tracks.append({
+                        "full_path": full_path,
+                        "meta": track_meta
+                    })
+                except Exception as e:
+                    print(f"[Scanner] Error extracting audio metadata for {full_path}: {e}")
+                    continue
+
+                with self._lock:
+                    self.items_scanned += 1
+
+                if len(batch_tracks) >= 25:
+                    await self._commit_music_batch(batch_tracks, artists_to_enrich, albums_to_enrich)
+                    batch_tracks.clear()
+                    await asyncio.sleep(0.05)
+
+            if batch_tracks:
+                await self._commit_music_batch(batch_tracks, artists_to_enrich, albums_to_enrich)
+                batch_tracks.clear()
+                await asyncio.sleep(0.05)
+
+            # Optional Online Enrichment via TheAudioDB (Throttled for 30 req/min free-tier limit)
+            if theaudiodb_api_key and theaudiodb_api_key != "disabled":
+                for artist_id, artist_name in artists_to_enrich:
+                    if self._abort_event.is_set(): break
+                    try:
+                        art_info = await async_fetch_theaudiodb_artist(client, artist_name, theaudiodb_api_key)
+                        if art_info:
+                            with Session(engine) as session:
+                                art_rec = session.get(Artist, artist_id)
+                                if art_rec:
+                                    if art_info.get("bio") and not art_rec.bio:
+                                        art_rec.bio = art_info["bio"]
+                                    if art_info.get("thumbnail_filename") and not art_rec.thumbnail_filename:
+                                        art_rec.thumbnail_filename = art_info["thumbnail_filename"]
+                                    if art_info.get("banner_filename") and not art_rec.banner_filename:
+                                        art_rec.banner_filename = art_info["banner_filename"]
+                                    if art_info.get("theaudiodb_id"):
+                                        art_rec.theaudiodb_id = art_info["theaudiodb_id"]
+                                    session.add(art_rec)
+                                    session.commit()
+                        await asyncio.sleep(0.5)
+                    except Exception as e:
+                        print(f"[Scanner] Error enriching artist {artist_name}: {e}")
+
+                for album_id, artist_name, album_title in albums_to_enrich:
+                    if self._abort_event.is_set(): break
+                    try:
+                        alb_info = await async_fetch_theaudiodb_album(client, artist_name, album_title, theaudiodb_api_key)
+                        if alb_info:
+                            with Session(engine) as session:
+                                alb_rec = session.get(Album, album_id)
+                                if alb_rec:
+                                    if alb_info.get("cover_filename") and not alb_rec.cover_filename:
+                                        alb_rec.cover_filename = alb_info["cover_filename"]
+                                    if alb_info.get("genre") and not alb_rec.genre:
+                                        alb_rec.genre = alb_info["genre"]
+                                    if alb_info.get("year") and not alb_rec.year:
+                                        alb_rec.year = alb_info["year"]
+                                    if alb_info.get("theaudiodb_id"):
+                                        alb_rec.theaudiodb_id = alb_info["theaudiodb_id"]
+                                    session.add(alb_rec)
+                                    session.commit()
+                        await asyncio.sleep(0.5)
+                    except Exception as e:
+                        print(f"[Scanner] Error enriching album {album_title}: {e}")
+
         with self._lock:
             self.action = "Scan complete"
             self.last_summary = f"Scanned {self.items_scanned} media item(s) successfully."
+
+    async def _commit_music_batch(self, batch_tracks, artists_to_enrich, albums_to_enrich):
+        def _commit():
+            with Session(engine) as session:
+                for item in batch_tracks:
+                    meta = item["meta"]
+                    fpath = item["full_path"]
+
+                    try:
+                        # 1. Match or Create Artist
+                        artist_name = meta["artist"] or "Unknown Artist"
+                        artist = session.exec(select(Artist).where(Artist.name == artist_name)).first()
+                        if not artist:
+                            artist = Artist(name=artist_name)
+                            session.add(artist)
+                            session.commit()
+                            session.refresh(artist)
+                            artists_to_enrich.add((artist.id, artist.name))
+                        elif not artist.bio or not artist.thumbnail_filename:
+                            artists_to_enrich.add((artist.id, artist.name))
+
+                        # 2. Match or Create Album
+                        album_title = meta["album"] or "Unknown Album"
+                        album = session.exec(
+                            select(Album).where(Album.title == album_title, Album.artist_id == artist.id)
+                        ).first()
+                        if not album:
+                            album = Album(
+                                title=album_title,
+                                artist_id=artist.id,
+                                artist_name=artist.name,
+                                year=meta.get("year"),
+                                genre=meta.get("genre"),
+                                cover_filename=meta.get("cover_filename")
+                            )
+                            session.add(album)
+                            session.commit()
+                            session.refresh(album)
+                            if not album.cover_filename:
+                                albums_to_enrich.add((album.id, artist.name, album.title))
+                        else:
+                            dirty_alb = False
+                            if not album.cover_filename and meta.get("cover_filename"):
+                                album.cover_filename = meta["cover_filename"]
+                                dirty_alb = True
+                            if not album.year and meta.get("year"):
+                                album.year = meta["year"]
+                                dirty_alb = True
+                            if not album.genre and meta.get("genre"):
+                                album.genre = meta["genre"]
+                                dirty_alb = True
+                            if dirty_alb:
+                                session.add(album)
+                                session.commit()
+                            elif not album.cover_filename:
+                                albums_to_enrich.add((album.id, artist.name, album.title))
+
+                        # 3. Add or Update Track
+                        existing_trk = session.exec(select(Track).where(Track.file_path == fpath)).first()
+                        cover_art = meta.get("cover_filename") or album.cover_filename
+                        trk_format = meta.get("codec") or "mp3"
+                        if not existing_trk:
+                            track = Track(
+                                title=meta["title"],
+                                file_path=fpath,
+                                artist_id=artist.id,
+                                artist_name=artist.name,
+                                album_id=album.id,
+                                album_title=album.title,
+                                track_number=meta.get("track_number", 1),
+                                disc_number=meta.get("disc_number", 1),
+                                duration=meta.get("duration", 0.0),
+                                bitrate=meta.get("bitrate"),
+                                codec=meta.get("codec"),
+                                format=trk_format,
+                                year=meta.get("year") or album.year,
+                                genre=meta.get("genre") or album.genre,
+                                cover_filename=cover_art,
+                                date_added=datetime.now(timezone.utc)
+                            )
+                            session.add(track)
+                        else:
+                            existing_trk.title = meta["title"]
+                            existing_trk.artist_id = artist.id
+                            existing_trk.artist_name = artist.name
+                            existing_trk.album_id = album.id
+                            existing_trk.album_title = album.title
+                            existing_trk.track_number = meta.get("track_number", 1)
+                            existing_trk.disc_number = meta.get("disc_number", 1)
+                            existing_trk.duration = meta.get("duration", 0.0)
+                            if trk_format and not getattr(existing_trk, 'format', None):
+                                existing_trk.format = trk_format
+                            if cover_art and not existing_trk.cover_filename:
+                                existing_trk.cover_filename = cover_art
+                            session.add(existing_trk)
+
+                        session.commit()
+                    except Exception as e:
+                        session.rollback()
+                        print(f"[Scanner] Error committing track {fpath}: {e}")
+
+        await asyncio.to_thread(_commit)
 
 # -----------------------------------------------------------------------------
 # Global Singleton and Entry Points

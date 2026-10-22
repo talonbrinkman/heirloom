@@ -135,8 +135,17 @@
         async function openDirBrowser() {
             document.getElementById('dirModal').style.display = 'flex';
             let startPath = document.getElementById('pathInput').value;
+            const currentMediaType = document.getElementById('mediaTypeInput') ? document.getElementById('mediaTypeInput').value : 'movie';
             if (!startPath || startPath === "/") {
-                startPath = "/media";
+                if (currentMediaType === "music") {
+                    startPath = "/media/music";
+                } else if (currentMediaType === "photo") {
+                    startPath = "/media/photos";
+                } else if (currentMediaType === "tv") {
+                    startPath = "/media/tv";
+                } else {
+                    startPath = "/media/movies";
+                }
             }
             await loadDir(startPath);
         }
@@ -174,9 +183,56 @@
                 list.appendChild(item);
             });
         }
+
+        function autoDetectMediaTypeFromPath(dirPath) {
+            if (!dirPath) return;
+            const normPath = dirPath.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '');
+            const segments = normPath.split('/').filter(Boolean);
+            if (!segments.length) return;
+
+            const typeKeywords = [
+                { type: 'music', label: 'Music', keywords: ['music', 'songs', 'audio', 'tunes', 'soundtrack', 'soundtracks', 'flac', 'mp3', 'alac', 'albums', 'artists'] },
+                { type: 'movie', label: 'Movies', keywords: ['movies', 'movie', 'films', 'film', 'cinema'] },
+                { type: 'tv', label: 'TV Shows', keywords: ['tv', 'tv shows', 'tvshows', 'television', 'shows', 'series', 'episodes', 'season', 'seasons'] },
+                { type: 'photo', label: 'Photos', keywords: ['photos', 'photo', 'pictures', 'picture', 'images', 'pics', 'photographs'] }
+            ];
+
+            const leaf = segments[segments.length - 1];
+            // 1. Check exact match on leaf folder
+            for (const item of typeKeywords) {
+                if (item.keywords.includes(leaf)) {
+                    selectMediaType(item.type, item.label, null, false);
+                    return;
+                }
+            }
+
+            // 2. Check if leaf contains any keyword
+            for (const item of typeKeywords) {
+                for (const kw of item.keywords) {
+                    if (leaf.includes(kw)) {
+                        selectMediaType(item.type, item.label, null, false);
+                        return;
+                    }
+                }
+            }
+
+            // 3. Check any parent segment (from closest parent up to root)
+            for (let i = segments.length - 2; i >= 0; i--) {
+                const seg = segments[i];
+                for (const item of typeKeywords) {
+                    if (item.keywords.includes(seg) || seg.includes(item.type)) {
+                        selectMediaType(item.type, item.label, null, false);
+                        return;
+                    }
+                }
+            }
+        }
+
         function selectDir() {
-            document.getElementById('pathInput').value = currentDirPath;
+            const pathInput = document.getElementById('pathInput');
+            pathInput.value = currentDirPath;
             document.getElementById('dirModal').style.display = 'none';
+            autoDetectMediaTypeFromPath(currentDirPath);
         }
 
         function checkHttpsWarning(url) {
@@ -290,9 +346,18 @@
                 window.history.replaceState({}, document.title, window.location.pathname);
             }
 
-            // Auto-detect matching volume path for default selection only if not already added and pathInput is empty
+            // Auto-detect matching volume path for default selection: default to first unadded media type
             const pathInput = document.getElementById('pathInput');
-            if (pathInput && !pathInput.value.trim() && !isMediaTypeAdded('movie')) {
+            const mediaTypes = [
+                { type: 'movie', label: 'Movies' },
+                { type: 'tv', label: 'TV Shows' },
+                { type: 'photo', label: 'Photos' },
+                { type: 'music', label: 'Music' }
+            ];
+            const defaultType = mediaTypes.find(m => !isMediaTypeAdded(m.type)) || mediaTypes[0];
+            if (defaultType.type !== 'movie') {
+                selectMediaType(defaultType.type, defaultType.label, null, true);
+            } else if (pathInput && !pathInput.value.trim() && !isMediaTypeAdded('movie')) {
                 fetch('/api/suggest_volume_path?media_type=movie')
                     .then(r => r.json())
                     .then(data => {
@@ -300,6 +365,9 @@
                             pathInput.value = data.suggested_path;
                         }
                     }).catch(() => {});
+            if (pathInput) {
+                pathInput.addEventListener('input', () => autoDetectMediaTypeFromPath(pathInput.value));
+                pathInput.addEventListener('change', () => autoDetectMediaTypeFromPath(pathInput.value));
             }
 
             // Prevent spamming / double-submitting standard forms
@@ -336,13 +404,19 @@
             return Boolean(document.querySelector(`.volume-list-item[data-media-type="${type}"]`));
         }
 
-        async function selectMediaType(value, label) {
+        async function selectMediaType(value, label, ev, overwritePath = true) {
             document.getElementById('mediaTypeInput').value = value;
             document.getElementById('mediaTypeBtn').innerHTML = label + ' <i data-lucide="chevron-down"></i>';
             document.getElementById('mediaTypeMenu').classList.remove('show');
             document.querySelectorAll('#mediaTypeMenu .res-btn').forEach(btn => btn.classList.remove('active'));
-            if (event && event.target) event.target.classList.add('active');
+            
+            const targetBtn = (ev && ev.currentTarget) || (ev && ev.target) || Array.from(document.querySelectorAll('#mediaTypeMenu .res-btn')).find(b => b.textContent.trim().toLowerCase().startsWith(label.toLowerCase()));
+            if (targetBtn) targetBtn.classList.add('active');
             if (window.lucide) lucide.createIcons();
+
+            if (!overwritePath) {
+                return;
+            }
 
             // Do not query or auto-populate if a volume for this media type has already been added
             if (isMediaTypeAdded(value)) {
@@ -472,11 +546,13 @@
                     <div class="dropdown-menu settings-menu-expanded volume-select-menu" id="mediaTypeMenu"
                         style="flex-direction: column; top: 100%; bottom: auto; right: auto; left: 0; min-width: 120px; padding: 5px; margin-top: 5px;">
                         <button type="button" class="res-btn active"
-                            onclick="selectMediaType('movie', 'Movies')">Movies</button>
-                        <button type="button" class="res-btn" onclick="selectMediaType('tv', 'TV Shows')">TV
+                            onclick="selectMediaType('movie', 'Movies', event)">Movies</button>
+                        <button type="button" class="res-btn" onclick="selectMediaType('tv', 'TV Shows', event)">TV
                             Shows</button>
                         <button type="button" class="res-btn"
-                            onclick="selectMediaType('photo', 'Photos')">Photos</button>
+                            onclick="selectMediaType('photo', 'Photos', event)">Photos</button>
+                        <button type="button" class="res-btn"
+                            onclick="selectMediaType('music', 'Music', event)">Music</button>
                     </div>
                 </div>
                 <button type="submit" class="btn btn-primary volume-add-btn"><i data-lucide="folder-plus"></i> Add Path</button>
@@ -487,11 +563,15 @@
                 <li class="list-item volume-list-item" data-media-type="{{ vp.raw_media_type }}">
                     <div class="flex gap-10 align-center volume-info">
                         {% if vp.exists %}
-                        <span class="code-text badge-active" style="text-transform: uppercase;" title="Active">{{
-                            vp.media_type }}</span>
+                        <span class="code-text badge-active" style="text-transform: uppercase;" title="Active">
+                            <i data-lucide="check"></i>
+                            {{ vp.media_type }}
+                        </span>
                         {% else %}
-                        <span class="code-text badge-inactive" style="text-transform: uppercase;" title="Inactive">{{
-                            vp.media_type }}</span>
+                        <span class="code-text badge-inactive" style="text-transform: uppercase;" title="Inactive">
+                            <i data-lucide="x"></i>
+                            {{ vp.media_type }}
+                        </span>
                         {% endif %}
                         <strong>{{ vp.display_path }}</strong>
                     </div>
@@ -555,6 +635,12 @@
                                         u.photos_access %}checked{% endif %}>
                                     <span>Photos</span></label>
                                 {% endif %}
+                                {% if mounted_volumes.music %}
+                                <label class="toggle-pill"><input type="checkbox" name="music_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        u.music_access %}checked{% endif %}>
+                                    <span>Music</span></label>
+                                {% endif %}
                             </div>
                             <div class="user-permissions-group">
                                 <label class="toggle-pill"><input type="checkbox" name="downloads_access"
@@ -585,8 +671,7 @@
                     <div class="user-header-row align-center">
                         <div class="invite-info">
                             <strong>Pending User Invitation</strong>
-                            <div class="share-link">Expires {{ invite.expires_at.strftime('%m/%d/%y') }} (Code: <span
-                                    class="code-text">{{ invite.code }}</span>)</div>
+                            <div class="share-link">Expires {{ invite.expires_at.strftime('%m/%d/%y') }} (Code: {{ invite.code }})</div>
                         </div>
                         <div class="flex gap-10 align-center invite-actions">
                             <button type="button" class="btn btn-secondary btn-sm"
@@ -618,6 +703,12 @@
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         invite.photos_access %}checked{% endif %}>
                                     <span>Photos</span></label>
+                                {% endif %}
+                                {% if mounted_volumes.music %}
+                                <label class="toggle-pill"><input type="checkbox" name="music_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        invite.music_access %}checked{% endif %}>
+                                    <span>Music</span></label>
                                 {% endif %}
                             </div>
                             <div class="user-permissions-group">
@@ -663,6 +754,32 @@
                     <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
                         onclick="toggleVisibility('tmdbKeyInput', 'toggleTmdbBtn')">
                         <i data-lucide="eye" id="toggleTmdbBtn"></i>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2 class="mt-0">Metadata Integration (TheAudioDB)</h2>
+            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Enrich your music library with artist biographies, banners, thumbnails, and online album metadata. Heirloom automatically defaults to the free public test key <code>123</code> out of the box, so <strong>no configuration is required</strong>. If you have a personal or Patreon API key from <a href="https://www.theaudiodb.com/" class="inline-link" target="_blank">TheAudioDB</a> for higher rate limits, you can enter it below.</p>
+            {% if theaudiodb_key %}
+            <p style="color: var(--status-active); font-size: 0.9em; font-weight: bold;" class="mb-15"><i
+                    data-lucide="check-circle"
+                    style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i> Custom TheAudioDB API Key is configured and active.</p>
+            {% else %}
+            <p style="color: var(--status-active); font-size: 0.9em;" class="mb-15"><i
+                    data-lucide="check-circle"
+                    style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i> Active: Using default free tier key (<code>123</code>). No configuration needed.</p>
+            {% endif %}
+            <form action="/settings/theaudiodb" method="post" onsubmit="submitSaveForm(event)"
+                class="flex gap-10 align-center m-0">
+                <div class="flex-1" style="position: relative;">
+                    <input type="password" name="theaudiodb_key" id="theaudiodbKeyInput" placeholder="Default: 123 (Leave blank for default free key)"
+                        value="{{ theaudiodb_key }}" class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
+                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
+                        onclick="toggleVisibility('theaudiodbKeyInput', 'toggleTheaudiodbBtn')">
+                        <i data-lucide="eye" id="toggleTheaudiodbBtn"></i>
                     </div>
                 </div>
                 <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
@@ -736,7 +853,7 @@
             </form>
         </div>
         <div style="text-align: center; color: #888; font-size: 0.8em; margin-top: 10px;">
-            <strong>v1.3.0</strong>
+            <strong>v1.4.0</strong>
         </div>
     </div>
 

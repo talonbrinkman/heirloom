@@ -10,3 +10,4 @@ Pillow
 websockets
 psutil
 httpx
+mutagen

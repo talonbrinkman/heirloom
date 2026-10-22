@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Heirloom - {{ album.title }}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+</head>
+<body {% if album.cover_filename %}class="has-backdrop" style="--backdrop-url: url('/metadata/{{ album.cover_filename }}');"{% endif %}>
+    <div class="header">
+        <div class="flex gap-15 align-center">
+            <a href="{{ close_url or '/library/music?view=albums' }}" class="icon-link" title="Back">
+                <i data-lucide="arrow-left"></i>
+            </a>
+            <h1 class="m-0" style="font-size: 1.5rem;">Heirloom</h1>
+        </div>
+        <div class="flex gap-15 align-center">
+            <div class="inbox desktop-only">
+                <a href="#" class="icon-link" id="inboxBtn" onclick="toggleInbox(event)" title="Inbox">
+                    <i data-lucide="bell"></i>
+                    <span id="inboxBadge" class="inbox-badge" style="display: none;"></span>
+                </a>
+                <div id="inboxMenu" class="dropdown-menu inbox-menu" style="display: none;">
+                    <div id="inboxItems">Loading...</div>
+                </div>
+            </div>
+            <a href="/settings" class="icon-link desktop-only" title="Settings">
+                <i data-lucide="settings"></i>
+            </a>
+            <!-- Profile Switcher Dropdown -->
+            <div class="profile-header-container desktop-only">
+                <button type="button" class="profile-header-btn" onclick="toggleProfileDropdown(event)" title="Current Profile: {{ current_profile.name if current_profile else user.username }}">
+                    <div class="profile-header-avatar" style="background: {{ current_profile.avatar_color if current_profile and current_profile.avatar_color else '#e50914' }};">
+                        <i data-lucide="{{ current_profile.avatar_icon if current_profile and current_profile.avatar_icon else 'user' }}"></i>
+                    </div>
+                    <span class="profile-header-name">{{ current_profile.name if current_profile else user.username }}</span>
+                </button>
+                <div id="profileDropdownMenu" class="profile-dropdown-menu" style="display: none;">
+                    <a href="/profiles" class="profile-dropdown-item">
+                        <i data-lucide="users"></i>
+                        <span>Switch Profiles</span>
+                    </a>
+                    {% if (user.is_admin or user.can_manage_profiles) and (current_profile is none or current_profile.is_primary) %}
+                    <a href="/profiles?manage=1" class="profile-dropdown-item">
+                        <i data-lucide="sliders"></i>
+                        <span>Manage Profiles</span>
+                    </a>
+                    {% endif %}
+                    <a href="/logout" class="profile-dropdown-item text-danger">
+                        <i data-lucide="log-out"></i>
+                        <span>Sign Out</span>
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="layout-wrapper">
+        <div class="main-content">
+            <div class="info-layout">
+                {% if album.cover_filename %}
+                <img src="/metadata/{{ album.cover_filename }}" class="info-poster music-cover-art" alt="{{ album.title }}">
+                {% else %}
+                <div class="info-poster music-cover-art placeholder-cover">
+                    <i data-lucide="disc" style="width: 64px; height: 64px; color: var(--text-muted);"></i>
+                </div>
+                {% endif %}
+
+                <div class="info-details">
+                    <div class="flex align-center gap-10 mb-5">
+                        <span>Album</span>
+                        {% if album.genre %}
+                        <span style="font-size: 0.8rem; color: var(--text-muted);">&bull;</span>
+                        <span style="font-size: 0.8rem; color: var(--text-muted);">{{album.genre }}</span>
+                        {% endif %}
+                    </div>
+                    <h1 class="info-title m-0" style="margin-bottom: 8px;">{{ album.title }}</h1>
+                    
+                    <div style="font-size: 1.15rem; margin-bottom: 15px;">
+                        {% if artist %}
+                        <a href="/artist/{{ artist.id }}?from={{ ('/album/' ~ album.id ~ ('?from=' ~ close_url|urlencode if close_url else '')) | urlencode }}" class="artist-link">{{ album.artist_name }}</a>
+                        {% else %}
+                        <span style="color: var(--text); font-weight: 600;">{{ album.artist_name }}</span>
+                        {% endif %}
+                    </div>
+
+                    <div class="info-year" style="color: var(--text-muted); font-size: 0.95rem; margin-bottom: 20px;">
+                        {% if album.year %}{{ album.year }} &bull; {% endif %}{{ total_tracks }} tracks &bull; {{ total_duration_str }}
+                    </div>
+
+                    <div class="flex gap-15 mb-20">
+                        <button type="button" class="play-btn m-0" onclick="HeirloomPlayer.playAlbum({{ album.id }})" title="Play">
+                            <i data-lucide="play" fill="currentColor"></i>
+                            <span>Play</span>
+                        </button>
+                        <button type="button" class="btn btn-secondary music-action-btn" onclick="HeirloomPlayer.playAlbum({{ album.id }}, { shuffle: true })" title="Shuffle Album">
+                            <i data-lucide="shuffle"></i>
+                            <span>Shuffle</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tracks Section -->
+            <div class="card mt-20 music-section-card">               
+                {% for disc_num, disc_tracks in discs.items() %}
+                    {% if multiple_discs %}
+                    <div class="disc-header">
+                        <i data-lucide="disc"></i>
+                        <span>Disc {{ disc_num }}</span>
+                    </div>
+                    {% endif %}
+
+                    <table class="track-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 40px; text-align: center;">#</th>
+                                <th>Title</th>
+                                <th style="width: 70px; text-align: right;">Time</th>
+                                <th style="width: 90px; text-align: center;"></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for t in disc_tracks %}
+                            <tr class="track-row" onclick="HeirloomPlayer.playAlbum({{ album.id }}, { trackId: {{ t.id }} })">
+                                <td class="track-num-cell">
+                                    <span class="track-num-text">{{ t.track_number }}</span>
+                                    <span class="track-play-icon"><i data-lucide="play" fill="currentColor"></i></span>
+                                </td>
+                                <td>
+                                    <div style="font-weight: 500; color: var(--text);">{{ t.title }}</div>
+                                    <div style="font-size: 0.8rem; color: var(--text-muted);">{{ t.artist_name }}</div>
+                                </td>
+                                <td style="text-align: right; color: var(--text-muted); font-size: 0.85rem;">{{ t.duration_str }}</td>
+                                <td style="text-align: center;" onclick="event.stopPropagation();">
+                                    <div class="track-actions">
+                                        <button type="button" class="control-btn" onclick="openAddToPlaylistModal({{ t.id }}, '{{ t.title|replace('\'', '\\\'') }}')" title="Add to Playlist">
+                                            <i data-lucide="plus"></i>
+                                        </button>
+                                        <button type="button" class="control-btn" onclick="HeirloomPlayer.addToQueue({{ t.id }})" title="Add to Queue">
+                                            <i data-lucide="list-end"></i>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/lucide.min.js"></script>
+    <script src="/static/audio-player.js"></script>
+    <script>
+        lucide.createIcons();
+
+        function toggleProfileDropdown(e) {
+            e.stopPropagation();
+            const menu = document.getElementById('profileDropdownMenu');
+            if (menu) menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+        }
+
+        document.addEventListener('click', () => {
+            const menu = document.getElementById('profileDropdownMenu');
+            if (menu) menu.style.display = 'none';
+        });
+    </script>
+</body>
+</html>

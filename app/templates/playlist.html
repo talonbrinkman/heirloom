@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Heirloom - {{ playlist.name }}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+</head>
+<body {% if cover_url %}class="has-backdrop" style="--backdrop-url: url('{{ cover_url }}');"{% endif %}>
+    <div class="header">
+        <div class="flex gap-15 align-center">
+            <a href="{{ close_url or '/library/music?view=playlists' }}" class="icon-link" title="Back">
+                <i data-lucide="arrow-left"></i>
+            </a>
+            <h1 class="m-0" style="font-size: 1.5rem;">Heirloom</h1>
+        </div>
+        <div class="flex gap-15 align-center">
+            <div class="inbox desktop-only">
+                <a href="#" class="icon-link" id="inboxBtn" onclick="toggleInbox(event)" title="Inbox">
+                    <i data-lucide="bell"></i>
+                    <span id="inboxBadge" class="inbox-badge" style="display: none;"></span>
+                </a>
+                <div id="inboxMenu" class="dropdown-menu inbox-menu" style="display: none;">
+                    <div id="inboxItems">Loading...</div>
+                </div>
+            </div>
+            <a href="/settings" class="icon-link desktop-only" title="Settings">
+                <i data-lucide="settings"></i>
+            </a>
+            <!-- Profile Switcher Dropdown -->
+            <div class="profile-header-container desktop-only">
+                <button type="button" class="profile-header-btn" onclick="toggleProfileDropdown(event)" title="Current Profile: {{ current_profile.name if current_profile else user.username }}">
+                    <div class="profile-header-avatar" style="background: {{ current_profile.avatar_color if current_profile and current_profile.avatar_color else '#e50914' }};">
+                        <i data-lucide="{{ current_profile.avatar_icon if current_profile and current_profile.avatar_icon else 'user' }}"></i>
+                    </div>
+                    <span class="profile-header-name">{{ current_profile.name if current_profile else user.username }}</span>
+                </button>
+                <div id="profileDropdownMenu" class="profile-dropdown-menu" style="display: none;">
+                    <a href="/profiles" class="profile-dropdown-item">
+                        <i data-lucide="users"></i>
+                        <span>Switch Profiles</span>
+                    </a>
+                    {% if (user.is_admin or user.can_manage_profiles) and (current_profile is none or current_profile.is_primary) %}
+                    <a href="/profiles?manage=1" class="profile-dropdown-item">
+                        <i data-lucide="sliders"></i>
+                        <span>Manage Profiles</span>
+                    </a>
+                    {% endif %}
+                    <a href="/logout" class="profile-dropdown-item text-danger">
+                        <i data-lucide="log-out"></i>
+                        <span>Sign Out</span>
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="layout-wrapper">
+        <div class="main-content">
+            <div class="info-layout">
+                {% if cover_url %}
+                <img src="{{ cover_url }}" class="info-poster music-cover-art" alt="{{ playlist.name }}">
+                {% else %}
+                <div class="info-poster music-cover-art placeholder-cover">
+                    <i data-lucide="list-music" style="width: 64px; height: 64px; color: var(--text-muted);"></i>
+                </div>
+                {% endif %}
+
+                <div class="info-details">
+                    <div class="flex align-center gap-10 mb-5">
+                        <span style="font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; color: var(--accent); font-weight: 700;">Playlist</span>
+                    </div>
+                    <h1 class="info-title m-0" style="margin-bottom: 12px;">{{ playlist.name }}</h1>
+
+                    <div class="info-year" style="color: var(--text-muted); font-size: 0.95rem; margin-bottom: 20px;">
+                        {{ total_tracks }} tracks &bull; {{ total_duration_str }}
+                    </div>
+
+                    <div class="flex gap-15 mb-20">
+                        {% if tracks %}
+                        <button type="button" class="play-btn m-0" onclick="HeirloomPlayer.playPlaylist({{ playlist.id }})" title="Play Playlist">
+                            <i data-lucide="play" fill="currentColor"></i>
+                            <span>Play</span>
+                        </button>
+                        <button type="button" class="btn btn-secondary music-action-btn" onclick="HeirloomPlayer.playPlaylist({{ playlist.id }}, { shuffle: true })" title="Shuffle">
+                            <i data-lucide="shuffle"></i>
+                            <span>Shuffle</span>
+                        </button>
+                        {% endif %}
+                        <button type="button" class="btn btn-danger music-action-btn" onclick="deleteCurrentPlaylist({{ playlist.id }})" title="Delete Playlist">
+                            <i data-lucide="trash-2"></i>
+                            <span>Delete</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tracks Section -->
+            <div class="card mt-20 music-section-card">
+                <h3 class="m-0 mb-10" style="font-size: 1.2rem;">Tracks</h3>
+                
+                {% if not tracks %}
+                <div class="empty-state" style="padding: 40px; text-align: center; color: var(--text-muted);">
+                    <i data-lucide="music" style="width: 48px; height: 48px; margin-bottom: 12px; opacity: 0.5;"></i>
+                    <p>This playlist is empty. Browse your music and click the "+" icon to add songs!</p>
+                </div>
+                {% else %}
+                <table class="track-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 40px; text-align: center;">#</th>
+                            <th>Title</th>
+                            <th>Artist</th>
+                            <th>Album</th>
+                            <th style="width: 70px; text-align: right;">Time</th>
+                            <th style="width: 130px; text-align: center;"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for t in tracks %}
+                        <tr class="track-row" onclick="HeirloomPlayer.playPlaylist({{ playlist.id }}, { trackId: {{ t.id }} })">
+                            <td class="track-num-cell">
+                                <span class="track-num-text">{{ loop.index }}</span>
+                                <span class="track-play-icon"><i data-lucide="play" fill="currentColor"></i></span>
+                            </td>
+                            <td>
+                                <div style="font-weight: 500; color: var(--text);">{{ t.title }}</div>
+                            </td>
+                            <td>
+                                <span style="color: var(--text-muted);">{{ t.artist_name }}</span>
+                            </td>
+                            <td>
+                                {% if t.album_id %}
+                                <a href="/album/{{ t.album_id }}?from={{ ('/playlist/' ~ playlist.id ~ ('?from=' ~ close_url|urlencode if close_url else '')) | urlencode }}" class="album-link" onclick="event.stopPropagation();">{{ t.album_title or '' }}</a>
+                                {% else %}
+                                <span style="color: var(--text-muted);">{{ t.album_title or '' }}</span>
+                                {% endif %}
+                            </td>
+                            <td style="text-align: right; color: var(--text-muted); font-size: 0.85rem;">{{ t.duration_str }}</td>
+                            <td style="text-align: center;" onclick="event.stopPropagation();">
+                                <div class="track-actions">
+                                    <button type="button" class="control-btn" onclick="openAddToPlaylistModal({{ t.id }}, '{{ t.title|replace('\'', '\\\'') }}')" title="Add to Playlist">
+                                        <i data-lucide="plus"></i>
+                                    </button>
+                                    <button type="button" class="control-btn" onclick="HeirloomPlayer.addToQueue({{ t.id }})" title="Add to Queue">
+                                        <i data-lucide="list-end"></i>
+                                    </button>
+                                    <button type="button" class="control-btn" onclick="removeTrackFromCurrentPlaylist({{ playlist.id }}, {{ t.playlist_track_id }})" title="Remove from Playlist">
+                                        <i data-lucide="trash-2"></i>
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/lucide.min.js"></script>
+    <script src="/static/audio-player.js"></script>
+    <script>
+        lucide.createIcons();
+
+        function toggleProfileDropdown(e) {
+            e.stopPropagation();
+            const menu = document.getElementById('profileDropdownMenu');
+            if (menu) menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+        }
+
+        document.addEventListener('click', () => {
+            const menu = document.getElementById('profileDropdownMenu');
+            if (menu) menu.style.display = 'none';
+        });
+
+        async function removeTrackFromCurrentPlaylist(playlistId, playlistTrackId) {
+            try {
+                const res = await fetch(`/api/playlists/${playlistId}/tracks/${playlistTrackId}`, {
+                    method: 'DELETE'
+                });
+                const data = await res.json();
+                if (data.success) {
+                    window.location.reload();
+                } else {
+                    alert('Could not remove track.');
+                }
+            } catch (err) {
+                console.error(err);
+                alert('Error removing track.');
+            }
+        }
+
+        async function deleteCurrentPlaylist(playlistId) {
+            if (!confirm('Are you sure you want to delete this playlist?')) return;
+            try {
+                const res = await fetch(`/api/playlists/${playlistId}`, {
+                    method: 'DELETE'
+                });
+                const data = await res.json();
+                if (data.success) {
+                    window.location.href = '/library/music?view=playlists';
+                } else {
+                    alert('Could not delete playlist.');
+                }
+            } catch (err) {
+                console.error(err);
+                alert('Error deleting playlist.');
+            }
+        }
+    </script>
+</body>
+</html>

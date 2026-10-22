@@ -20,6 +20,7 @@ services:
       - ./media/tv:/media/tv:ro
       - ./media/movies:/media/movies:ro
       - ./media/photos:/media/photos:ro
+      - ./media/music:/media/music:ro
     # --- Hardware Acceleration (Optional) ---
     # For Synology NAS, Unraid, or Linux hosts with Intel QuickSync / AMD GPU (VA-API), uncomment:
     # devices:

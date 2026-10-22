@@ -11,6 +11,7 @@ class User(SQLModel, table=True):
     movies_access: bool = Field(default=False)
     tv_access: bool = Field(default=False)
     photos_access: bool = Field(default=False)
+    music_access: bool = Field(default=False)
     downloads_access: bool = Field(default=False)
     watch_together_access: bool = Field(default=False)
     kids_mode: bool = Field(default=False)
@@ -83,6 +84,56 @@ class Photo(SQLModel, table=True):
     album: Optional[str] = None
     poster_filename: Optional[str] = None
 
+class Artist(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    bio: Optional[str] = None
+    thumbnail_filename: Optional[str] = None
+    banner_filename: Optional[str] = None
+    theaudiodb_id: Optional[int] = None
+
+class Album(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str = Field(index=True)
+    artist_id: Optional[int] = Field(default=None, foreign_key="artist.id", index=True)
+    artist_name: str = Field(index=True)
+    year: Optional[str] = None
+    genre: Optional[str] = None
+    cover_filename: Optional[str] = None
+    theaudiodb_id: Optional[int] = None
+
+class Track(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str = Field(index=True)
+    file_path: str = Field(unique=True, index=True)
+    artist_id: Optional[int] = Field(default=None, foreign_key="artist.id", index=True)
+    artist_name: str = Field(index=True)
+    album_id: Optional[int] = Field(default=None, foreign_key="album.id", index=True)
+    album_title: Optional[str] = Field(default=None, index=True)
+    track_number: Optional[int] = Field(default=1)
+    disc_number: Optional[int] = Field(default=1)
+    duration: Optional[float] = Field(default=0.0)
+    bitrate: Optional[int] = None
+    codec: Optional[str] = None
+    format: str = Field(default="mp3")
+    year: Optional[str] = None
+    genre: Optional[str] = None
+    cover_filename: Optional[str] = None
+    date_added: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class Playlist(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    profile_id: Optional[int] = Field(default=None, foreign_key="profile.id", index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class PlaylistTrack(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    playlist_id: int = Field(foreign_key="playlist.id", index=True)
+    track_id: int = Field(foreign_key="track.id", index=True)
+    track_order: int = Field(default=0)
+
 import random
 import string
 
@@ -98,6 +149,7 @@ class InviteCode(SQLModel, table=True):
     movies_access: bool = Field(default=False)
     tv_access: bool = Field(default=False)
     photos_access: bool = Field(default=False)
+    music_access: bool = Field(default=False)
     downloads_access: bool = Field(default=False)
     watch_together_access: bool = Field(default=False)
     kids_mode: bool = Field(default=False)

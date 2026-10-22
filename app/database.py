@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, create_engine, Session, select, text
-from .models import User, VolumePath, Profile, WatchHistory, Watchlist
+from .models import User, VolumePath, Profile, WatchHistory, Watchlist, Artist, Album, Track, Playlist, PlaylistTrack
 
 # This is critical: We are saving the database inside the /config folder.
 # Because of your Docker volume mount, this will actually be saved to your desktop!
@@ -135,6 +135,88 @@ def create_db_and_tables():
             session.commit()
         except Exception:
             session.rollback()
+
+        # Migration for User and InviteCode music_access
+        try:
+            session.exec(text("ALTER TABLE user ADD COLUMN music_access BOOLEAN DEFAULT 0"))
+            session.exec(text("UPDATE user SET music_access = 0 WHERE music_access IS NULL"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
+            session.exec(text("ALTER TABLE invitecode ADD COLUMN music_access BOOLEAN DEFAULT 0"))
+            session.exec(text("UPDATE invitecode SET music_access = 0 WHERE music_access IS NULL"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
+            session.exec(text("UPDATE user SET music_access = 1 WHERE is_admin = 1 AND (music_access IS NULL OR music_access = 0)"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        # Migrations for Music Tables (ensures existing databases get all columns)
+        music_table_cols = [
+            ("album", [
+                ("title", "VARCHAR"),
+                ("artist_id", "INTEGER"),
+                ("artist_name", "VARCHAR"),
+                ("year", "VARCHAR"),
+                ("genre", "VARCHAR"),
+                ("cover_filename", "VARCHAR"),
+                ("theaudiodb_id", "INTEGER"),
+            ]),
+            ("artist", [
+                ("name", "VARCHAR"),
+                ("bio", "TEXT"),
+                ("thumbnail_filename", "VARCHAR"),
+                ("banner_filename", "VARCHAR"),
+                ("theaudiodb_id", "INTEGER"),
+            ]),
+            ("track", [
+                ("title", "VARCHAR"),
+                ("file_path", "VARCHAR"),
+                ("artist_id", "INTEGER"),
+                ("artist_name", "VARCHAR"),
+                ("album_id", "INTEGER"),
+                ("album_title", "VARCHAR"),
+                ("track_number", "INTEGER DEFAULT 1"),
+                ("disc_number", "INTEGER DEFAULT 1"),
+                ("duration", "FLOAT DEFAULT 0.0"),
+                ("bitrate", "INTEGER"),
+                ("codec", "VARCHAR"),
+                ("year", "VARCHAR"),
+                ("genre", "VARCHAR"),
+                ("cover_filename", "VARCHAR"),
+            ]),
+            ("playlist", [
+                ("name", "VARCHAR"),
+                ("user_id", "INTEGER"),
+                ("profile_id", "INTEGER"),
+                ("created_at", "DATETIME"),
+            ]),
+            ("playlisttrack", [
+                ("playlist_id", "INTEGER"),
+                ("track_id", "INTEGER"),
+                ("track_order", "INTEGER DEFAULT 0"),
+            ]),
+        ]
+        for tbl, cols in music_table_cols:
+            try:
+                res = session.exec(text(f"PRAGMA table_info({tbl})")).all()
+                existing_cols = {row[1] for row in res}
+                if existing_cols:
+                    for col_name, col_def in cols:
+                        if col_name not in existing_cols:
+                            try:
+                                session.exec(text(f"ALTER TABLE {tbl} ADD COLUMN {col_name} {col_def}"))
+                                session.commit()
+                            except Exception:
+                                session.rollback()
+            except Exception:
+                session.rollback()
 
         # Migration to fix malformed TV Show titles (e.g. 'Better Call Saul S03 01' or 'Invincible (2021)')
         try:
