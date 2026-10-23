@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import json
 import time
@@ -6,7 +7,7 @@ import threading
 import asyncio
 import subprocess
 import hashlib
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timezone
 import requests
 try:
@@ -15,8 +16,144 @@ except ImportError:
     httpx = None
 
 from sqlmodel import Session, select
+from sqlalchemy import func
 from .database import engine
 from .models import Movie, TVShow, Photo, VolumePath, SystemConfig, Artist, Album, Track, Playlist, PlaylistTrack
+
+def _get_subprocess_priority_kwargs() -> Dict[str, Any]:
+    """Returns platform-specific subprocess kwargs to lower process priority for background ffmpeg/ffprobe tasks."""
+    kwargs: Dict[str, Any] = {}
+    if sys.platform == "win32":
+        try:
+            kwargs["creationflags"] = subprocess.BELOW_NORMAL_PRIORITY_CLASS
+        except Exception:
+            pass
+    elif hasattr(os, "nice"):
+        kwargs["preexec_fn"] = lambda: os.nice(10)
+    return kwargs
+
+def normalize_artist_name(name: Optional[str]) -> str:
+    """
+    Normalizes artist names by stripping featured artist suffixes and normalizing
+    stylized typography (e.g. 'KoЯn' -> 'Korn', 'Korn feat. Skrillex' -> 'Korn').
+    """
+    if not name:
+        return "Unknown Artist"
+    s = str(name).strip()
+    
+    # Normalize KoЯn / Koяn -> Korn
+    s = re.sub(r'Ko[Яя]n', 'Korn', s, flags=re.IGNORECASE)
+    # Replace any other stylized Cyrillic letters commonly used in artist names
+    s = s.replace("Я", "R").replace("я", "r")
+    
+    # Remove parenthesized or bracketed features: (feat. ...), [ft. ...], (featuring ...)
+    s = re.sub(r'\s*[\(\[]\s*(?:feat\.?|ft\.?|featuring|with)\s+.*?[\]\)]', '', s, flags=re.IGNORECASE)
+    
+    # Remove unparenthesized featured artists: feat. ..., ft. ..., featuring ...
+    s = re.sub(r'\s+(?:feat\.?|ft\.?|featuring)\s+.*$', '', s, flags=re.IGNORECASE)
+    
+    s = s.strip().rstrip(",-&/ ")
+    return s if s else str(name).strip()
+
+def extract_feature_info(raw_artist: str, raw_title: str) -> Tuple[str, str]:
+    """
+    Extracts the primary artist and any featured artist. If the track title doesn't
+    already mention the featured artist, appends it nicely to the title so users still see
+    who was featured on the track without splitting artists or albums.
+    """
+    primary = normalize_artist_name(raw_artist)
+    clean_title = raw_title.strip() if raw_title else ""
+    
+    feature_match = re.search(r'(?:feat\.?|ft\.?|featuring)\s+([^\)\]]+)', raw_artist, flags=re.IGNORECASE)
+    if feature_match and clean_title:
+        featured_who = feature_match.group(1).strip().rstrip(")] ")
+        if not re.search(r'\b(?:feat\.?|ft\.?|featuring)\b', clean_title, flags=re.IGNORECASE):
+            clean_title = f"{clean_title} (feat. {featured_who})"
+            
+    return primary, clean_title
+
+def normalize_album_title(title: Optional[str]) -> Tuple[str, Optional[int]]:
+    """
+    Normalizes multi-disc album titles by stripping trailing CD/Disc notations
+    (e.g., 'Issues (1)' -> 'Issues', 'See You On The Other Side (CD1)' -> 'See You On The Other Side')
+    and extracting the disc number.
+    """
+    if not title:
+        return "Unknown Album", None
+    s = str(title).strip()
+    disc = None
+
+    # Pattern 1: (CD 1), [Disc 2], (Enhanced CD 01), [CD 2 - Bonus], etc.
+    m = re.search(r'\s*[\(\[]\s*(?:enhanced\s+|bonus\s+)?(?:cd|disc|disk)\s*0*([1-9]\d?)[^\)\]]*[\]\)]\s*$', s, re.IGNORECASE)
+    if m:
+        disc = int(m.group(1))
+        s = s[:m.start()].strip()
+        return s or str(title).strip(), disc
+
+    # Pattern 2: (Bonus Disc), [Bonus CD]
+    m = re.search(r'\s*[\(\[]\s*bonus\s+(?:cd|disc|disk)[^\)\]]*[\]\)]\s*$', s, re.IGNORECASE)
+    if m:
+        disc = 2
+        s = s[:m.start()].strip()
+        return s or str(title).strip(), disc
+
+    # Pattern 3: - CD 1, : Disc 2, , CD 1
+    m = re.search(r'\s*[-–—:,]\s*(?:enhanced\s+|bonus\s+)?(?:cd|disc|disk)\s*0*([1-9]\d?)(?:\s+.*)?$', s, re.IGNORECASE)
+    if m:
+        disc = int(m.group(1))
+        s = s[:m.start()].strip()
+        return s or str(title).strip(), disc
+
+    # Pattern 4: Trailing ' CD 1' or ' Disc 2'
+    m = re.search(r'\s+(?:enhanced\s+|bonus\s+)?(?:cd|disc|disk)\s*0*([1-9]\d?)(?:\s+.*)?$', s, re.IGNORECASE)
+    if m:
+        disc = int(m.group(1))
+        s = s[:m.start()].strip()
+        return s or str(title).strip(), disc
+
+    # Pattern 5: (1), (2), [1] at end of title (1-2 digits only, avoiding (1999) years)
+    m = re.search(r'\s*[\(\[]\s*0*([1-9]\d?)\s*[\]\)]\s*$', s)
+    if m and len(s[:m.start()].strip()) > 1:
+        disc = int(m.group(1))
+        s = s[:m.start()].strip()
+        return s or str(title).strip(), disc
+
+    return s, disc
+
+def is_silence_or_filler_track(title: Optional[str], file_path: Optional[str] = "", duration: Optional[float] = 0.0) -> bool:
+    """
+    Detects whether an audio track is an uncredited, dummy silence or padding track
+    (such as the 12 5-second silence tracks at the start of Korn's 'Follow the Leader',
+    or pre-gap filler tracks found on 90s CDs).
+    """
+    title_str = (title or "").strip()
+    title_lower = title_str.lower()
+    fname = os.path.basename(file_path or "").lower()
+    dur = float(duration) if duration is not None else 0.0
+
+    # 1. Exact or bracketed metadata tags indicating silence/filler: [silence], <silence>, (silence), [blank], [empty track]
+    silence_tags = (
+        "[silence]", "<silence>", "(silence)", "[blank]", "[empty track]",
+        "[silence track]", "[untitled silence]", "[hidden track]", "[untitled]"
+    )
+    if title_lower in silence_tags and dur <= 60.0:
+        return True
+
+    # 2. Track titled "silence" or "silent" (with or without brackets) and very short duration (<= 30s or 0)
+    # Prevents false positives for legitimate songs titled "Silence" which are 2+ minutes long.
+    if title_lower in ("silence", "silent", "[silence]", "blank", "filler") and (dur <= 30.0 or dur == 0.0):
+        return True
+
+    # 3. Filename indicates silence (e.g. "Korn - Follow the Leader - 01 - [silence].flac", "01 silence.mp3")
+    # AND duration is short (<= 30s) or unmeasured
+    if (re.search(r'[\[\(<_\-\s]silence[\]\)>_\-\s\.]', fname) or fname.startswith("silence.")) and (dur <= 30.0 or dur == 0.0):
+        return True
+
+    # 4. Short dummy filler with 'silence' in title: e.g. "Silence (5 seconds)" or "[Silence 01]"
+    if "silence" in title_lower and dur <= 15.0:
+        return True
+
+    return False
 
 class SafeHTTPClient:
     """Async-compatible HTTP client that uses httpx when installed, falling back to threaded requests."""
@@ -151,7 +288,7 @@ def extract_date_taken(filepath: str) -> Optional[datetime]:
                 "-show_entries", "format_tags=creation_time:stream_tags=creation_time",
                 filepath
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5, **_get_subprocess_priority_kwargs())
             if res.returncode == 0 and res.stdout:
                 data = json.loads(res.stdout)
                 c_time = None
@@ -281,7 +418,7 @@ def extract_chapter_markers(file_path: str):
             "-show_chapters",
             file_path
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5, **_get_subprocess_priority_kwargs())
         if res.returncode != 0:
             return None, None, None, None
         
@@ -487,9 +624,10 @@ async def async_fetch_additional_details(client: Any, tmdb_id: int, media_type: 
     return None, None, None, None, None
 
 async def async_extract_chapter_markers(file_path: str):
-    """Non-blocking chapter marker extraction using asyncio.create_subprocess_exec."""
+    """Non-blocking chapter marker extraction using asyncio.create_subprocess_exec with polite process priority."""
     from .ffmpeg_setup import get_ffprobe_path
     try:
+        preexec = (lambda: os.nice(10)) if hasattr(os, "nice") and sys.platform != "win32" else None
         proc = await asyncio.create_subprocess_exec(
             get_ffprobe_path(),
             "-v", "quiet",
@@ -497,7 +635,8 @@ async def async_extract_chapter_markers(file_path: str):
             "-show_chapters",
             file_path,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
+            preexec_fn=preexec
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
@@ -534,7 +673,7 @@ async def async_extract_chapter_markers(file_path: str):
         return None, None, None, None
 
 def _generate_photo_thumbnail(full_path: str, thumb_path: str, is_video: bool) -> bool:
-    """Thread-offloaded thumbnail generator for photos and home videos."""
+    """Thread-offloaded thumbnail generator for photos and home videos with low-overhead draft scaling."""
     try:
         os.makedirs(METADATA_DIR, exist_ok=True)
         if is_video:
@@ -546,14 +685,20 @@ def _generate_photo_thumbnail(full_path: str, thumb_path: str, is_video: bool) -
                 "-vframes", "1",
                 thumb_path
             ]
-            subprocess.run(ffmpeg_cmd, capture_output=True, check=True, timeout=10)
+            subprocess.run(ffmpeg_cmd, capture_output=True, check=True, timeout=10, **_get_subprocess_priority_kwargs())
         else:
             from PIL import Image
             with Image.open(full_path) as img:
+                # Fast DCT downsampling for JPEG/WEBP images before full bitmap decode
+                if hasattr(img, "draft"):
+                    try:
+                        img.draft("RGB", (400, 400))
+                    except Exception:
+                        pass
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
                 img.thumbnail((400, 400))
-                img.save(thumb_path, "JPEG", quality=85)
+                img.save(thumb_path, "JPEG", quality=80)
         return True
     except Exception as e:
         print(f"[Scanner] Error generating thumbnail for {full_path}: {e}")
@@ -583,8 +728,39 @@ def extract_audio_metadata(full_path: str) -> Dict[str, Any]:
 
     # Default fallback values derived from filename and folder structure
     parts = os.path.normpath(full_path).replace("\\", "/").split("/")
-    folder_album = parts[-2] if len(parts) >= 2 else "Unknown Album"
-    folder_artist = parts[-3] if len(parts) >= 3 else "Unknown Artist"
+    
+    # Check if immediate parent directory is a disc subfolder (e.g. "CD 01", "CD 2", "Enhanced CD 01", "Disc 1")
+    folder_disc_number = 1
+    folder_album = "Unknown Album"
+    folder_artist = "Unknown Artist"
+
+    if len(parts) >= 2:
+        parent_dir = parts[-2]
+        disc_match = re.search(r'^(?:enhanced\s+|bonus\s+)?(?:cd|disc|disk)\s*0*([1-9]\d?)(?:[^\w\d].*)?$', parent_dir.strip(), re.IGNORECASE)
+        if disc_match:
+            folder_disc_number = int(disc_match.group(1))
+            folder_album = parts[-3] if len(parts) >= 3 else "Unknown Album"
+            folder_artist = parts[-4] if len(parts) >= 4 else "Unknown Artist"
+        elif re.search(r'^bonus\s+(?:cd|disc|disk)$', parent_dir.strip(), re.IGNORECASE):
+            folder_disc_number = 2
+            folder_album = parts[-3] if len(parts) >= 3 else "Unknown Album"
+            folder_artist = parts[-4] if len(parts) >= 4 else "Unknown Artist"
+        else:
+            folder_album = parts[-2]
+            folder_artist = parts[-3] if len(parts) >= 3 else "Unknown Artist"
+
+    # Strip year suffix from folder_album if present, e.g. "Issues (1999)" -> "Issues"
+    folder_year = None
+    y_match = re.search(r'\s*\((19\d\d|20\d\d)\)$', folder_album)
+    if y_match:
+        folder_year = y_match.group(1)
+        folder_album = folder_album[:y_match.start()].strip()
+
+    # Clean multi-disc indicators from folder_album name if present
+    clean_f_alb, f_disc = normalize_album_title(folder_album)
+    folder_album = clean_f_alb
+    if f_disc and folder_disc_number == 1:
+        folder_disc_number = f_disc
 
     clean_title = re.sub(r'^\d+[\s\.\-_]+', '', base_name).strip() or base_name
     track_num_match = re.match(r'^(\d+)', base_name)
@@ -596,8 +772,8 @@ def extract_audio_metadata(full_path: str) -> Dict[str, Any]:
         "album_artist": None,
         "album": folder_album if folder_album != "media" and not folder_album.lower().startswith("music") else "Unknown Album",
         "track_number": fallback_track,
-        "disc_number": 1,
-        "year": None,
+        "disc_number": folder_disc_number,
+        "year": folder_year,
         "genre": None,
         "duration": 0.0,
         "bitrate": None,
@@ -801,6 +977,22 @@ def extract_audio_metadata(full_path: str) -> Dict[str, Any]:
                 except Exception:
                     pass
 
+    # Normalize artist names & ensure featured artists are captured in track title without creating split artists
+    raw_artist = meta.get("artist") or "Unknown Artist"
+    raw_title = meta.get("title") or clean_title
+    primary_artist, enriched_title = extract_feature_info(raw_artist, raw_title)
+    meta["artist"] = primary_artist
+    meta["title"] = enriched_title
+    if meta.get("album_artist"):
+        meta["album_artist"] = normalize_artist_name(meta["album_artist"])
+    if meta.get("album"):
+        clean_alb, disc_from_title = normalize_album_title(meta["album"])
+        meta["album"] = clean_alb
+        if disc_from_title and (not meta.get("disc_number") or meta.get("disc_number") == 1):
+            meta["disc_number"] = disc_from_title
+    if folder_disc_number > 1 and (not meta.get("disc_number") or meta.get("disc_number") == 1):
+        meta["disc_number"] = folder_disc_number
+
     return meta
 
 async def async_download_custom_image(client: SafeHTTPClient, url: str, filename: str) -> Optional[str]:
@@ -883,6 +1075,111 @@ async def async_fetch_theaudiodb_album(client: SafeHTTPClient, artist_name: str,
     except Exception as e:
         print(f"[Scanner] TheAudioDB album lookup failed for {album_title}: {e}")
     return None
+
+# -----------------------------------------------------------------------------
+# Database Reconciliation & Music Consolidation Helpers
+# -----------------------------------------------------------------------------
+
+def consolidate_music_artists_and_albums(session: Session):
+    """
+    Consolidates split featured artists and fragmented albums into their canonical primary artist.
+    Heals existing databases that have multiple artist records for featured artists (e.g. 'Korn feat. Skrillex', 'KoЯn').
+    """
+    try:
+        # 0. Automatically purge any uncredited silence / dummy filler tracks (e.g. 5-second [silence] tracks)
+        existing_tracks = session.exec(select(Track)).all()
+        for trk in existing_tracks:
+            if is_silence_or_filler_track(trk.title, trk.file_path, trk.duration or 0.0):
+                for pt in session.exec(select(PlaylistTrack).where(PlaylistTrack.track_id == trk.id)).all():
+                    session.delete(pt)
+                session.delete(trk)
+        session.commit()
+
+        # 1. Consolidate Artists
+        artist_tuples = [(a.id, a.name) for a in session.exec(select(Artist)).all()]
+        for art_id, art_name in artist_tuples:
+            target_name = normalize_artist_name(art_name)
+            if target_name != art_name:
+                art = session.get(Artist, art_id)
+                if not art:
+                    continue
+                canonical = session.exec(
+                    select(Artist).where(func.lower(Artist.name) == target_name.lower())
+                ).first()
+                if canonical and canonical.id != art.id:
+                    for tr in session.exec(select(Track).where(Track.artist_id == art.id)).all():
+                        tr.artist_id = canonical.id
+                        tr.artist_name = canonical.name
+                        session.add(tr)
+                    for alb in session.exec(select(Album).where(Album.artist_id == art.id)).all():
+                        alb.artist_id = canonical.id
+                        alb.artist_name = canonical.name
+                        session.add(alb)
+                    session.delete(art)
+                    session.commit()
+                else:
+                    art.name = target_name
+                    session.add(art)
+                    for tr in session.exec(select(Track).where(Track.artist_id == art.id)).all():
+                        tr.artist_name = target_name
+                        session.add(tr)
+                    for alb in session.exec(select(Album).where(Album.artist_id == art.id)).all():
+                        alb.artist_name = target_name
+                        session.add(alb)
+                    session.commit()
+
+        # 2. Normalize multi-disc album titles & consolidate tracks
+        albums = session.exec(select(Album)).all()
+        for alb in albums:
+            clean_title, disc_num = normalize_album_title(alb.title)
+            if clean_title != alb.title:
+                alb.title = clean_title
+                session.add(alb)
+                tracks = session.exec(select(Track).where(Track.album_id == alb.id)).all()
+                for tr in tracks:
+                    tr.album_title = clean_title
+                    if disc_num and (tr.disc_number is None or tr.disc_number <= 1):
+                        tr.disc_number = disc_num
+                    session.add(tr)
+        session.commit()
+
+        # 3. Merge Fragmented Albums for the same artist & title
+        albums = session.exec(select(Album)).all()
+        groups: Dict[tuple, list] = {}
+        for alb in albums:
+            key = (alb.artist_id, alb.title.strip().lower())
+            groups.setdefault(key, []).append(alb)
+
+        for key, albs in groups.items():
+            if len(albs) > 1:
+                master = next((a for a in albs if a.cover_filename), albs[0])
+                for a in albs:
+                    if a.id != master.id:
+                        for tr in session.exec(select(Track).where(Track.album_id == a.id)).all():
+                            tr.album_id = master.id
+                            tr.album_title = master.title
+                            session.add(tr)
+                        if not master.cover_filename and a.cover_filename:
+                            master.cover_filename = a.cover_filename
+                        if not master.year and a.year:
+                            master.year = a.year
+                        if not master.genre and a.genre:
+                            master.genre = a.genre
+                        session.delete(a)
+                session.add(master)
+                session.commit()
+
+        # 3. Clean up empty artists & albums
+        for alb in session.exec(select(Album)).all():
+            if not session.exec(select(Track.id).where(Track.album_id == alb.id)).first():
+                session.delete(alb)
+        for a in session.exec(select(Artist)).all():
+            if not session.exec(select(Track.id).where(Track.artist_id == a.id)).first():
+                session.delete(a)
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        print(f"[Scanner] Error during artist/album consolidation: {e}")
 
 # -----------------------------------------------------------------------------
 # Scanner Manager (Stateful, Asynchronous, Non-Blocking)
@@ -1042,19 +1339,9 @@ class ScannerManager:
                         print(f"[Scanner] Error during orphan batch deletion: {e}")
                 time.sleep(0.02)
 
-            # Reconcile empty albums and artists
+            # Reconcile empty albums and artists and consolidate music
             with Session(engine) as session:
-                for alb in session.exec(select(Album)).all():
-                    if len(session.exec(select(Track.id).where(Track.album_id == alb.id)).all()) == 0:
-                        session.delete(alb)
-                for art in session.exec(select(Artist)).all():
-                    if len(session.exec(select(Track.id).where(Track.artist_id == art.id)).all()) == 0:
-                        session.delete(art)
-                try:
-                    session.commit()
-                except Exception as e:
-                    session.rollback()
-                    print(f"[Scanner] Error cleaning empty albums/artists: {e}")
+                consolidate_music_artists_and_albums(session)
 
             print(f"[Scanner] Cleaned up {total_to_delete} orphaned media item(s).")
 
@@ -1356,7 +1643,7 @@ class ScannerManager:
                                 full_path = os.path.join(root, file)
                                 if is_recycle_path(full_path):
                                     continue
-                                if full_path not in existing_photos or not existing_photos.get(full_path):
+                                if full_path not in existing_photos:
                                     new_photos.append((full_path, file, root, photo_dir))
 
             new_tracks = []
@@ -1377,6 +1664,8 @@ class ScannerManager:
                         if file.lower().endswith(AUDIO_EXTENSIONS):
                             full_path = os.path.join(root, file)
                             if is_recycle_path(full_path):
+                                continue
+                            if is_silence_or_filler_track(title=None, file_path=full_path, duration=0.0):
                                 continue
                             if full_path not in existing_tracks:
                                 new_tracks.append((full_path, file, root, music_dir))
@@ -1472,6 +1761,9 @@ class ScannerManager:
                 with self._lock:
                     self.items_scanned += 1
 
+                # Polite yield between movies
+                await asyncio.sleep(0.02)
+
                 if len(batch_movies) >= 10:
                     with Session(engine) as session:
                         for m in batch_movies:
@@ -1483,7 +1775,7 @@ class ScannerManager:
                             session.rollback()
                             print(f"[Scanner] Error committing movie batch: {e}")
                     batch_movies.clear()
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.1)
 
             if batch_movies:
                 with Session(engine) as session:
@@ -1496,7 +1788,7 @@ class ScannerManager:
                         session.rollback()
                         print(f"[Scanner] Error committing final movie batch: {e}")
                 batch_movies.clear()
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.1)
 
             # 4B. Scan TV Shows
             batch_shows = []
@@ -1590,6 +1882,9 @@ class ScannerManager:
                 with self._lock:
                     self.items_scanned += 1
 
+                # Polite yield between TV episodes
+                await asyncio.sleep(0.02)
+
                 if len(batch_shows) >= 20:
                     with Session(engine) as session:
                         for s in batch_shows:
@@ -1601,7 +1896,7 @@ class ScannerManager:
                             session.rollback()
                             print(f"[Scanner] Error committing TV batch: {e}")
                     batch_shows.clear()
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.1)
 
             if batch_shows:
                 with Session(engine) as session:
@@ -1614,7 +1909,7 @@ class ScannerManager:
                         session.rollback()
                         print(f"[Scanner] Error committing final TV batch: {e}")
                 batch_shows.clear()
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.1)
 
             # 4C. Scan Photos & Home Videos
             batch_photos = []
@@ -1657,6 +1952,9 @@ class ScannerManager:
                 with self._lock:
                     self.items_scanned += 1
 
+                # Polite yield between photos / home videos
+                await asyncio.sleep(0.03)
+
                 if len(batch_photos) >= 30:
                     with Session(engine) as session:
                         for p_data in batch_photos:
@@ -1688,7 +1986,7 @@ class ScannerManager:
                             session.rollback()
                             print(f"[Scanner] Error committing photo batch: {e}")
                     batch_photos.clear()
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.1)
 
             if batch_photos:
                 with Session(engine) as session:
@@ -1721,7 +2019,7 @@ class ScannerManager:
                         session.rollback()
                         print(f"[Scanner] Error committing final photo batch: {e}")
                 batch_photos.clear()
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.1)
 
             # 4D. Scan Music Library (File-First with TheAudioDB enrichment)
             batch_tracks = []
@@ -1743,6 +2041,9 @@ class ScannerManager:
 
                 try:
                     track_meta = await asyncio.to_thread(extract_audio_metadata, full_path)
+                    if is_silence_or_filler_track(track_meta.get("title"), full_path, track_meta.get("duration", 0.0)):
+                        print(f"[Scanner] Automatically skipping silence/filler track: {full_path} ({track_meta.get('title')})")
+                        continue
                     batch_tracks.append({
                         "full_path": full_path,
                         "meta": track_meta
@@ -1754,15 +2055,18 @@ class ScannerManager:
                 with self._lock:
                     self.items_scanned += 1
 
+                # Polite yield between audio tracks
+                await asyncio.sleep(0.02)
+
                 if len(batch_tracks) >= 25:
                     await self._commit_music_batch(batch_tracks, artists_to_enrich, albums_to_enrich)
                     batch_tracks.clear()
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.1)
 
             if batch_tracks:
                 await self._commit_music_batch(batch_tracks, artists_to_enrich, albums_to_enrich)
                 batch_tracks.clear()
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.1)
 
             # Optional Online Enrichment via TheAudioDB (Throttled for 30 req/min free-tier limit)
             if theaudiodb_api_key and theaudiodb_api_key != "disabled":
@@ -1810,6 +2114,12 @@ class ScannerManager:
                     except Exception as e:
                         print(f"[Scanner] Error enriching album {album_title}: {e}")
 
+            # Reconcile & consolidate any split featured artists or fragmented albums
+            def _post_scan_consolidation():
+                with Session(engine) as session:
+                    consolidate_music_artists_and_albums(session)
+            await asyncio.to_thread(_post_scan_consolidation)
+
         with self._lock:
             self.action = "Scan complete"
             self.last_summary = f"Scanned {self.items_scanned} media item(s) successfully."
@@ -1822,11 +2132,19 @@ class ScannerManager:
                     fpath = item["full_path"]
 
                     try:
-                        # 1. Match or Create Artist
-                        artist_name = meta["artist"] or "Unknown Artist"
-                        artist = session.exec(select(Artist).where(Artist.name == artist_name)).first()
+                        if is_silence_or_filler_track(meta.get("title"), fpath, meta.get("duration", 0.0)):
+                            continue
+
+                        # 1. Match or Create Primary Artist (always normalized, case-insensitive match)
+                        raw_artist_name = meta.get("album_artist") or meta.get("artist") or "Unknown Artist"
+                        primary_artist_name = normalize_artist_name(raw_artist_name)
+
+                        # Match case-insensitively to prevent duplicates like 'Korn' vs 'KoRn'
+                        artist = session.exec(
+                            select(Artist).where(func.lower(Artist.name) == primary_artist_name.lower())
+                        ).first()
                         if not artist:
-                            artist = Artist(name=artist_name)
+                            artist = Artist(name=primary_artist_name)
                             session.add(artist)
                             session.commit()
                             session.refresh(artist)
@@ -1834,10 +2152,16 @@ class ScannerManager:
                         elif not artist.bio or not artist.thumbnail_filename:
                             artists_to_enrich.add((artist.id, artist.name))
 
-                        # 2. Match or Create Album
-                        album_title = meta["album"] or "Unknown Album"
+                        # 2. Match or Create Album (case-insensitive title under primary artist)
+                        raw_album_title = (meta.get("album") or "Unknown Album").strip()
+                        album_title, disc_from_title = normalize_album_title(raw_album_title)
+                        if disc_from_title and (not meta.get("disc_number") or meta.get("disc_number") == 1):
+                            meta["disc_number"] = disc_from_title
                         album = session.exec(
-                            select(Album).where(Album.title == album_title, Album.artist_id == artist.id)
+                            select(Album).where(
+                                func.lower(Album.title) == album_title.lower(),
+                                Album.artist_id == artist.id
+                            )
                         ).first()
                         if not album:
                             album = Album(
@@ -1874,9 +2198,10 @@ class ScannerManager:
                         existing_trk = session.exec(select(Track).where(Track.file_path == fpath)).first()
                         cover_art = meta.get("cover_filename") or album.cover_filename
                         trk_format = meta.get("codec") or "mp3"
+                        track_title = meta.get("title") or os.path.splitext(os.path.basename(fpath))[0]
                         if not existing_trk:
                             track = Track(
-                                title=meta["title"],
+                                title=track_title,
                                 file_path=fpath,
                                 artist_id=artist.id,
                                 artist_name=artist.name,
@@ -1895,7 +2220,7 @@ class ScannerManager:
                             )
                             session.add(track)
                         else:
-                            existing_trk.title = meta["title"]
+                            existing_trk.title = track_title
                             existing_trk.artist_id = artist.id
                             existing_trk.artist_name = artist.name
                             existing_trk.album_id = album.id

@@ -9,7 +9,7 @@ from .models import VolumePath
 from .scanner import scan_media_library, VIDEO_EXTENSIONS, PHOTO_EXTENSIONS, AUDIO_EXTENSIONS, is_recycle_path
 
 class ScannerDebouncer:
-    def __init__(self, delay=3.0):
+    def __init__(self, delay=8.0):
         self.delay = delay
         self._timer = None
 
@@ -27,7 +27,7 @@ class ScannerDebouncer:
         except Exception as e:
             print(f"Error during background scan: {e}")
 
-scanner_debouncer = ScannerDebouncer()
+scanner_debouncer = ScannerDebouncer(delay=8.0)
 
 class PeriodicScanWorker:
     """Heartbeat background timer to ensure library stays updated even if filesystem events fail."""
@@ -66,18 +66,18 @@ class MediaEventHandler(FileSystemEventHandler):
         # Ignore directory modification events (they fire constantly on access/reads)
         if event.is_directory:
             if getattr(event, 'event_type', None) in ('created', 'deleted', 'moved'):
-                scanner_debouncer.trigger_scan(delay=5.0)
+                scanner_debouncer.trigger_scan(delay=8.0)
             return
         
         # Trigger scan on specific video, photo, or audio file events
         if getattr(event, 'event_type', None) in ('created', 'deleted', 'moved', 'modified'):
             src_lower = event.src_path.lower()
             if src_lower.endswith(VIDEO_EXTENSIONS) or src_lower.endswith(PHOTO_EXTENSIONS) or src_lower.endswith(AUDIO_EXTENSIONS):
-                scanner_debouncer.trigger_scan(delay=5.0)
+                scanner_debouncer.trigger_scan(delay=8.0)
             elif hasattr(event, 'dest_path') and event.dest_path:
                 dest_lower = event.dest_path.lower()
                 if dest_lower.endswith(VIDEO_EXTENSIONS) or dest_lower.endswith(PHOTO_EXTENSIONS) or dest_lower.endswith(AUDIO_EXTENSIONS):
-                    scanner_debouncer.trigger_scan(delay=5.0)
+                    scanner_debouncer.trigger_scan(delay=8.0)
 
 observer = Observer()
 
@@ -142,25 +142,18 @@ def start_watcher():
             is_inotify_limit = True
 
         if is_inotify_limit:
-            print("[Watchdog] Inotify watch limit reached. Automatically switching to PollingObserver (no inotify watches required).")
+            print("[Watchdog] Inotify watch limit reached. Native filesystem watching disabled to prevent high CPU usage on large media volumes. Library updates will rely on periodic scans and manual rescans.")
         else:
-            print(f"[Watchdog] Native observer failed ({e}). Falling back to PollingObserver.")
+            print(f"[Watchdog] Native observer failed ({e}). Active directory polling disabled to prevent high CPU usage. Library updates will rely on periodic scans and manual rescans.")
 
         try:
             used_observer.stop()
         except Exception:
             pass
 
-        # 2. Seamlessly fall back to PollingObserver (uses stat polling, zero inotify descriptors needed)
-        used_observer = PollingObserver(timeout=15.0)
-        try:
-            scheduled = _schedule_all(used_observer, volume_paths, handler)
-            if scheduled:
-                used_observer.start()
-                print("[Watchdog] PollingObserver active across all library volumes.")
-        except Exception as pe:
-            print(f"[Watchdog] Failed to start fallback PollingObserver: {pe}")
-            used_observer = Observer()
+        # Do NOT start PollingObserver across large media volumes - it stats every file every few seconds and pegs the CPU.
+        # Instead, leave observer idle and rely on PeriodicScanWorker and manual rescans.
+        used_observer = Observer()
 
     observer = used_observer
     periodic_scanner.start()

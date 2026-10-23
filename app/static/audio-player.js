@@ -92,7 +92,6 @@
                     <div class="queue-header">
                         <div class="flex align-center gap-10">
                             <h3 class="m-0">Queue</h3>
-                            <span id="queueCountBadge" class="queue-count-badge">0</span>
                         </div>
                         <div class="flex align-center gap-10">
                             <button type="button" class="btn btn-secondary btn-sm" id="playerClearQueueBtn" title="Clear Queue">Clear</button>
@@ -474,8 +473,6 @@
 
         renderQueue() {
             const listEl = document.getElementById('playerQueueList');
-            const countBadge = document.getElementById('queueCountBadge');
-            if (countBadge) countBadge.textContent = this.queue.length.toString();
             if (!listEl) return;
 
             if (this.queue.length === 0) {
@@ -489,7 +486,6 @@
                 return `
                     <div class="queue-item ${isCurrent ? 'active' : ''}" data-index="${idx}">
                         <div class="queue-item-left">
-                            <span class="queue-num">${idx + 1}</span>
                             <div class="queue-thumb">
                                 ${t.cover_url ? `<img src="${t.cover_url}" alt="">` : `<i data-lucide="disc"></i>`}
                             </div>

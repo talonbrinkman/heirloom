@@ -86,7 +86,7 @@
                             {% endif %}
                         </div>
                         
-                        <div class="flex gap-15 mb-20">
+                        <div class="flex align-center gap-15 mb-20">
                             {% if movie_versions and movie_versions|length > 1 %}
                             <button type="button" class="play-btn m-0" id="moviePlayBtn" onclick="toggleMenu(event, 'movie-version-menu')" title="{% if has_progress %}Resume{% else %}Play{% endif %}">
                                 <i data-lucide="play" fill="currentColor"></i>
@@ -118,13 +118,13 @@
                             {% endif %}
                             
                             {% if is_watched %}
-                            <form action="/history/mark_unwatched/movie/{{ movie.id }}" method="post" title="Mark as Unwatched">
+                            <form action="/history/mark_unwatched/movie/{{ movie.id }}" method="post" title="Mark as Unwatched" class="m-0 flex">
                                 <button type="submit" class="play-btn m-0" style="background: var(--accent);">
                                     <i data-lucide="check" fill="none"></i>
                                 </button>
                             </form>
                             {% else %}
-                            <form action="/history/mark_watched/movie/{{ movie.id }}" method="post" title="Mark as Watched">
+                            <form action="/history/mark_watched/movie/{{ movie.id }}" method="post" title="Mark as Watched" class="m-0 flex">
                                 <button type="submit" class="play-btn m-0">
                                     <i data-lucide="check" fill="none"></i>
                                 </button>
@@ -132,13 +132,13 @@
                             {% endif %}
                             
                             {% if in_watchlist %}
-                            <form action="/watchlist/remove_by_item/movie/{{ movie.id }}" method="post">
+                            <form action="/watchlist/remove_by_item/movie/{{ movie.id }}" method="post" class="m-0 flex">
                                 <button type="submit" class="play-btn m-0">
                                     <i data-lucide="bookmark" fill="currentColor"></i>
                                 </button>
                             </form>
                             {% else %}
-                            <form action="/watchlist/add/movie/{{ movie.id }}" method="post">
+                            <form action="/watchlist/add/movie/{{ movie.id }}" method="post" class="m-0 flex">
                                 <button type="submit" class="play-btn m-0">
                                     <i data-lucide="bookmark" fill="none"></i>
                                 </button>

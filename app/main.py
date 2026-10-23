@@ -252,6 +252,14 @@ def on_startup():
             fed_key = SystemConfig(key="federation_api_key", value=str(uuid.uuid4()))
             session.add(fed_key)
             session.commit()
+
+        # Consolidate any split music featured artists and fragmented albums
+        try:
+            from .scanner import consolidate_music_artists_and_albums
+            consolidate_music_artists_and_albums(session)
+        except Exception as e:
+            session.rollback()
+            print(f"[Startup] Note during music artist/album consolidation: {e}")
             
     import threading
     def initial_scan():
@@ -2678,7 +2686,6 @@ async def album_view(
 
     total_duration = 0.0
     tracks = []
-    discs = {}
     for t in tracks_db:
         dur = t.duration or 0.0
         total_duration += dur
@@ -2700,10 +2707,6 @@ async def album_view(
             "stream_url": f"/stream/music/{t.id}"
         }
         tracks.append(t_data)
-        d_num = t.disc_number or 1
-        if d_num not in discs:
-            discs[d_num] = []
-        discs[d_num].append(t_data)
 
     total_dur_str = format_seconds_to_duration(total_duration)
     playlists = session.exec(select(Playlist).where(Playlist.user_id == current_user.id).order_by(Playlist.name.asc())).all()
@@ -2733,8 +2736,6 @@ async def album_view(
         "album": album,
         "artist": artist,
         "tracks": tracks,
-        "discs": discs,
-        "multiple_discs": len(discs) > 1,
         "total_duration_str": total_dur_str,
         "total_tracks": len(tracks),
         "playlists": playlists,

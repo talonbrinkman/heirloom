@@ -83,7 +83,7 @@
     {% endif %}
 
     <div id="loadingSpinner" class="loading-spinner"{% if sync_session_id %} style="opacity: 1;"{% elif is_trailer and trailer_source == 'youtube' %} style="display: none;"{% endif %}>
-        <i data-lucide="loader-circle"></i>
+        <i data-lucide="loader"></i>
         {% if sync_session_id %}
         <div id="syncLoadingInfo" class="sync-loading-info">
             <div id="syncLoadingText" class="sync-loading-text">Waiting for all users to load...</div>
