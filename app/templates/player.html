@@ -53,7 +53,7 @@
     </style>
 </head>
 
-<body class="player-body">
+<body class="player-body{% if is_mobile %} is-mobile{% endif %}">
     {% if is_trailer and trailer_source == "youtube" %}
     <iframe id="youtubeTrailerIframe" class="player-video"
         src="https://www.youtube-nocookie.com/embed/{{ trailer_youtube_key }}?autoplay=1&enablejsapi=1&rel=0&iv_load_policy=3"
@@ -62,9 +62,9 @@
         allowfullscreen
         style="position: absolute; inset: 0; width: 100%; height: 100%; border: 0; z-index: 5; background: #000;">
     </iframe>
-    <video id="mediaPlayer" class="player-video" style="display: none;" playsinline webkit-playsinline crossorigin="anonymous"></video>
+    <video id="mediaPlayer" class="player-video" style="display: none;" playsinline webkit-playsinline x-webkit-airplay="allow" airplay="allow" crossorigin="anonymous"></video>
     {% else %}
-    <video id="mediaPlayer" class="player-video" playsinline webkit-playsinline crossorigin="anonymous">
+    <video id="mediaPlayer" class="player-video" playsinline webkit-playsinline x-webkit-airplay="allow" airplay="allow" crossorigin="anonymous">
         Your browser does not support HTML video.
         {% if subtitle_tracks and subtitle_tracks|length > 0 %}
             {% for sub in subtitle_tracks %}
@@ -108,7 +108,7 @@
     <div id="playerOverlay" class="player-overlay pointer-events-none"{% if is_trailer and trailer_source == 'youtube' %} style="opacity: 1;"{% endif %}>
         <div class="pointer-events-auto player-header" style="z-index: 25;">
             <div style="flex: 1;">
-                <h1 class="player-title">{{ item.title }}</h1>
+                <h1 class="player-title">{{ item.title }}{% if is_hdr %} <span class="badge-hdr" title="{{ hdr_format or 'HDR' }}" style="display: inline-block; font-size: 0.6em; font-weight: 700; background: var(--accent-primary, #e50914); color: #fff; padding: 2px 6px; border-radius: 4px; vertical-align: middle; margin-left: 6px; letter-spacing: 0.5px;">{{ hdr_format or 'HDR' }}</span>{% endif %}</h1>
                 {% if is_trailer %}
                 <div class="player-subtitle">Trailer{% if trailer_source == 'local' %} • Local File{% else %} • YouTube{% endif %}</div>
                 {% elif season_episode %}
@@ -150,24 +150,38 @@
                 </div>
 
                 <div class="controls-center">
-                    {% if prev_episode_id %}
-                    <a href="/play/tv/{{ prev_episode_id }}" class="control-btn" title="Previous Episode">
-                        <i data-lucide="skip-back"></i>
-                    </a>
+                    {% if media_type == 'tv' %}
+                        {% if prev_episode_id %}
+                        <button type="button" class="control-btn" onclick="window.location.href='/play/tv/{{ prev_episode_id }}'" title="Previous Episode">
+                            <i data-lucide="skip-back"></i>
+                        </button>
+                        {% else %}
+                        <button type="button" class="control-btn placeholder" disabled style="visibility: hidden; pointer-events: none;" aria-hidden="true" tabindex="-1">
+                            <i data-lucide="skip-back"></i>
+                        </button>
+                        {% endif %}
                     {% endif %}
-                    <button class="control-btn" id="rewindBtn" onclick="seekOffset(-10)">
+                    <button class="control-btn" id="rewindBtn" onclick="seekOffset(-10)" title="Rewind 10 seconds">
                         <i data-lucide="rotate-ccw"></i>
+                        <span class="seek-label">10</span>
                     </button>
                     <button class="control-btn play-btn-large" id="playPauseBtn">
                         <i data-lucide="play" id="playIcon"></i>
                     </button>
-                    <button class="control-btn" id="forwardBtn" onclick="seekOffset(10)">
+                    <button class="control-btn" id="forwardBtn" onclick="seekOffset(10)" title="Fast Forward 10 seconds">
                         <i data-lucide="rotate-cw"></i>
+                        <span class="seek-label">10</span>
                     </button>
-                    {% if next_episode_id %}
-                    <a href="/play/tv/{{ next_episode_id }}" class="control-btn" title="Next Episode">
-                        <i data-lucide="skip-forward"></i>
-                    </a>
+                    {% if media_type == 'tv' %}
+                        {% if next_episode_id %}
+                        <button type="button" class="control-btn" onclick="window.location.href='/play/tv/{{ next_episode_id }}'" title="Next Episode">
+                            <i data-lucide="skip-forward"></i>
+                        </button>
+                        {% else %}
+                        <button type="button" class="control-btn placeholder" disabled style="visibility: hidden; pointer-events: none;" aria-hidden="true" tabindex="-1">
+                            <i data-lucide="skip-forward"></i>
+                        </button>
+                        {% endif %}
                     {% endif %}
                 </div>
 
@@ -180,19 +194,21 @@
                             value="1">
                     </div>
 
-                    <button class="control-btn" id="nativeCastBtn" onclick="requestCast()" title="Picture in Picture"
-                        style="display: none;">
-                        <i data-lucide="picture-in-picture-2"></i>
-                    </button>
-                    <button class="control-btn" id="googleCastBtn" title="Cast to TV"
-                        style="display: none;">
-                        <google-cast-launcher></google-cast-launcher>
-                    </button>
                     {% if (subtitle_tracks and subtitle_tracks|length > 0) or subtitle_url %}
                     <button class="control-btn" id="ccBtn" onclick="toggleSubtitles()" title="Toggle Subtitles">
                         <i data-lucide="captions"></i>
                     </button>
                     {% endif %}
+                    <button class="control-btn" id="castBtn" onclick="requestCast()" title="{% if is_apple %}AirPlay{% else %}Cast to TV{% endif %}" style="position: relative;">
+                        <google-cast-launcher id="googleCastLauncher" style="position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; display: none; z-index: 2;"></google-cast-launcher>
+                        <i id="castIcon" data-lucide="{% if is_apple %}airplay{% else %}cast{% endif %}"></i>
+                    </button>
+                    <button class="control-btn" id="aspectBtn" onclick="cycleAspectRatio()" title="Aspect Ratio">
+                        <i data-lucide="proportions"></i>
+                    </button>
+                    <button class="control-btn" id="pipBtn" onclick="togglePiP()" title="Picture in Picture">
+                        <i data-lucide="picture-in-picture-2"></i>
+                    </button>
                     <div class="settings-container">
                         <button class="control-btn" onclick="toggleSettings(event)">
                             <i data-lucide="settings"></i>
@@ -237,6 +253,16 @@
                                 <button class="res-btn" data-res="720" onclick="setResolution('720')">720p <span class="res-rate">(3.0 Mbps)</span></button>
                                 <button class="res-btn" data-res="480" onclick="setResolution('480')">480p <span class="res-rate">(1.5 Mbps)</span></button>
                             </div>
+
+                            <!-- HDR Tone Mapping -->
+                            {% if is_hdr %}
+                            <div class="settings-section" id="hdrSection">
+                                <div class="settings-header">HDR Tone Mapping</div>
+                                <button class="hdr-btn active" data-hdr="auto" onclick="setHdrToneMapping('auto')">Auto <span class="res-rate">({% if server_hdr_tonemapping %}On{% else %}Off{% endif %})</span></button>
+                                <button class="hdr-btn" data-hdr="on" onclick="setHdrToneMapping('on')">On (Tone Map to SDR)</button>
+                                <button class="hdr-btn" data-hdr="off" onclick="setHdrToneMapping('off')">Off (HDR Passthrough)</button>
+                            </div>
+                            {% endif %}
 
                             <!-- Speed -->
                             <div class="settings-section">
@@ -357,13 +383,22 @@
 
         video.volume = savedVolume;
         volumeSlider.value = savedVolume;
+        updateVolumeIcon();
         video.playbackRate = savedSpeed;
         video.style.objectFit = savedAspect;
 
         document.querySelectorAll('.audio-btn').forEach(b => b.classList.toggle('active', parseInt(b.dataset.audio, 10) === currentAudioTrack));
         document.querySelectorAll('.res-btn').forEach(b => b.classList.toggle('active', b.dataset.res === currentRes));
+        let currentHdrToneMap = localStorage.getItem('player_hdr_tonemap') || 'auto';
+        document.querySelectorAll('.hdr-btn').forEach(b => b.classList.toggle('active', b.dataset.hdr === currentHdrToneMap));
         document.querySelectorAll('.speed-btn').forEach(b => b.classList.toggle('active', parseFloat(b.dataset.speed) === savedSpeed));
         document.querySelectorAll('.aspect-btn').forEach(b => b.classList.toggle('active', b.dataset.aspect === savedAspect));
+        const initialAspectBtn = document.getElementById('aspectBtn');
+        if (initialAspectBtn) {
+            initialAspectBtn.classList.toggle('active', savedAspect !== 'contain');
+            const labels = { contain: 'Fit', cover: 'Fill', fill: 'Stretch' };
+            initialAspectBtn.title = `Aspect Ratio: ${labels[savedAspect] || savedAspect}`;
+        }
 
 
         {% if sync_session_id and not is_sync_host %}
@@ -554,7 +589,13 @@
             return;
             {% endif %}
             const startTime = performance.now();
-            let infoUrl = `/stream-info/{{ media_type }}/{{ item.id }}?res=${encodeURIComponent(currentRes)}&start=${offsetStart}&audio_track=${currentAudioTrack}&_t=${Date.now()}`;
+            let tonemapParam = '';
+            if (currentHdrToneMap === 'on') {
+                tonemapParam = '&tonemap=1';
+            } else if (currentHdrToneMap === 'off') {
+                tonemapParam = '&tonemap=0';
+            }
+            let infoUrl = `/stream-info/{{ media_type }}/{{ item.id }}?res=${encodeURIComponent(currentRes)}&start=${offsetStart}&audio_track=${currentAudioTrack}${tonemapParam}&_t=${Date.now()}`;
             if (activeBurnSub) {
                 infoUrl += `&burn_sub=${encodeURIComponent(activeBurnSub)}`;
             }
@@ -579,6 +620,9 @@
                     // Transcoding info
                     playerStats.isTranscoding = data.is_transcoding;
                     playerStats.transcodeMethod = data.transcode_method;
+                    playerStats.isHdr = data.is_hdr;
+                    playerStats.hdrFormat = data.hdr_format;
+                    playerStats.toneMappingActive = data.tone_mapping_active;
                     playerStats.hardwareAccelerated = data.hardware_accelerated;
                     playerStats.encoder = data.encoder;
                     playerStats.playType = data.play_type;
@@ -833,8 +877,14 @@
             video.play().catch(e => console.log('Autoplay prevented:', e));
             return;
             {% endif %}
-            let masterUrl = `/hls/{{ media_type }}/{{ item.id }}/master.m3u8?audio_track=${currentAudioTrack}`;
-            let legacyUrl = `/stream/{{ media_type }}/{{ item.id }}?res=${currentRes}&start=${offsetStart}&audio_track=${currentAudioTrack}`;
+            let tonemapParam = '';
+            if (currentHdrToneMap === 'on') {
+                tonemapParam = '&tonemap=1';
+            } else if (currentHdrToneMap === 'off') {
+                tonemapParam = '&tonemap=0';
+            }
+            let masterUrl = `/hls/{{ media_type }}/{{ item.id }}/master.m3u8?audio_track=${currentAudioTrack}${tonemapParam}`;
+            let legacyUrl = `/stream/{{ media_type }}/{{ item.id }}?res=${currentRes}&start=${offsetStart}&audio_track=${currentAudioTrack}${tonemapParam}`;
             if (activeBurnSub) {
                 masterUrl += `&burn_sub=${encodeURIComponent(activeBurnSub)}`;
                 legacyUrl += `&burn_sub=${encodeURIComponent(activeBurnSub)}`;
@@ -980,7 +1030,9 @@
             }
         }
         playBtn.addEventListener('click', togglePlay);
-        video.addEventListener('click', togglePlay);
+        video.addEventListener('click', () => {
+            showOverlay();
+        });
 
         document.addEventListener('keydown', (e) => {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
@@ -1042,12 +1094,16 @@
             }
 
             {% if next_episode_id %}
-            let removeUrl = '/history/remove/{{ media_type }}/{{ item.id }}';
+            let progUrl = '/progress/{{ media_type }}/{{ item.id }}';
             {% if token %}
-            removeUrl += '?token={{ token }}';
+            progUrl += '?token={{ token }}';
             {% endif %}
+            const formData = new FormData();
+            formData.append('progress', 100.0);
+            formData.append('current_time', effectiveDuration);
+            formData.append('duration', effectiveDuration);
             try {
-                await fetch(removeUrl, { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                await fetch(progUrl, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
             } catch (e) { }
 
             let nextUrl = "/play/tv/{{ next_episode_id }}";
@@ -1153,21 +1209,27 @@
         }
 
         async function finishAndExit() {
-            let removeUrl = '/history/remove/{{ media_type }}/{{ item.id }}';
+            const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
+            let progUrl = '/progress/{{ media_type }}/{{ item.id }}';
             {% if token %}
-            removeUrl += '?token={{ token }}';
+            progUrl += '?token={{ token }}';
             {% endif %}
+            const formData = new FormData();
+            formData.append('progress', 100.0);
+            formData.append('current_time', effectiveDuration);
+            formData.append('duration', effectiveDuration);
 
             try {
                 await Promise.race([
-                    fetch(removeUrl, {
+                    fetch(progUrl, {
                         method: 'POST',
+                        body: formData,
                         headers: { 'X-Requested-With': 'XMLHttpRequest' }
                     }),
                     new Promise(resolve => setTimeout(resolve, 600))
                 ]);
             } catch (err) {
-                console.error("Failed to remove from continue watching:", err);
+                console.error("Failed to update completed progress:", err);
             }
 
             exitPlayer();
@@ -1192,13 +1254,18 @@
         }
 
         async function skipCredits() {
+            const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
             if (nextEpisodeId) {
-                let removeUrl = '/history/remove/{{ media_type }}/{{ item.id }}';
+                let progUrl = '/progress/{{ media_type }}/{{ item.id }}';
                 {% if token %}
-                removeUrl += '?token={{ token }}';
+                progUrl += '?token={{ token }}';
                 {% endif %}
+                const formData = new FormData();
+                formData.append('progress', 100.0);
+                formData.append('current_time', effectiveDuration);
+                formData.append('duration', effectiveDuration);
                 try {
-                    await fetch(removeUrl, { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                    await fetch(progUrl, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
                 } catch (e) { }
 
                 let nextUrl = "/play/tv/" + nextEpisodeId;
@@ -1465,6 +1532,24 @@
             document.getElementById('settingsMenu').classList.remove('show');
         }
 
+        // HDR Tone Mapping Switch
+        function setHdrToneMapping(mode) {
+            document.querySelectorAll('.hdr-btn').forEach(b => b.classList.remove('active'));
+            const btn = document.querySelector(`.hdr-btn[data-hdr="${mode}"]`);
+            if (btn) btn.classList.add('active');
+
+            currentHdrToneMap = mode;
+            localStorage.setItem('player_hdr_tonemap', mode);
+
+            pendingInitialSeek = getActualTime();
+            offsetStart = pendingInitialSeek;
+            loadVideoSource();
+            const settingsMenu = document.getElementById('settingsMenu');
+            if (settingsMenu && settingsMenu.classList.contains('show')) {
+                settingsMenu.classList.remove('show');
+            }
+        }
+
         // Playback Speed
         function setPlaybackSpeed(speed) {
             document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
@@ -1477,13 +1562,34 @@
         // Aspect Ratio
         function setAspectRatio(aspect) {
             document.querySelectorAll('.aspect-btn').forEach(b => b.classList.remove('active'));
-            document.querySelector(`.aspect-btn[data-aspect="${aspect}"]`).classList.add('active');
+            const activeBtn = document.querySelector(`.aspect-btn[data-aspect="${aspect}"]`);
+            if (activeBtn) activeBtn.classList.add('active');
 
             video.style.objectFit = aspect;
             localStorage.setItem('player_aspect', aspect);
+
+            const aspectBtn = document.getElementById('aspectBtn');
+            if (aspectBtn) {
+                const labels = { contain: 'Fit', cover: 'Fill', fill: 'Stretch' };
+                aspectBtn.title = `Aspect Ratio: ${labels[aspect] || aspect}`;
+            }
+        }
+
+        function cycleAspectRatio() {
+            const aspects = ['contain', 'cover', 'fill'];
+            const current = video.style.objectFit || localStorage.getItem('player_aspect') || 'contain';
+            const nextIndex = (aspects.indexOf(current) + 1) % aspects.length;
+            setAspectRatio(aspects[nextIndex]);
         }
 
         // Volume
+        function updateVolumeSliderFill() {
+            if (!volumeSlider) return;
+            const vol = video.muted ? 0 : Number(volumeSlider.value);
+            const pct = Math.round(vol * 100);
+            volumeSlider.style.background = `linear-gradient(to right, var(--text) 0%, var(--text) ${pct}%, rgba(255, 255, 255, 0.25) ${pct}%, rgba(255, 255, 255, 0.25) 100%)`;
+        }
+
         volumeSlider.addEventListener('input', (e) => {
             video.volume = e.target.value;
             video.muted = video.volume === 0;
@@ -1510,6 +1616,7 @@
             else if (video.volume < 0.5) icon = 'volume-1';
             muteBtn.innerHTML = `<i data-lucide="${icon}"></i>`;
             refreshIcons();
+            updateVolumeSliderFill();
         }
 
         function toggleSettings(event) {
@@ -1522,42 +1629,204 @@
             }
         });
 
-        // Google Cast Initialization
+        // Cast / AirPlay Initialization & Device Detection
+        window['__onGCastApiAvailable'] = function(isAvailable) {
+            if (isAvailable && window.cast && window.cast.framework) {
+                try {
+                    cast.framework.CastContext.getInstance().setOptions({
+                        receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+                        autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED
+                    });
+                } catch (e) {
+                    console.debug("[Cast] Initialization error:", e);
+                }
+            }
+        };
+        if (window.cast && window.cast.framework) {
+            try {
+                cast.framework.CastContext.getInstance().setOptions({
+                    receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+                    autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED
+                });
+            } catch (e) {}
+        }
+
+        const isAppleDevice = {% if is_apple %}true{% else %}(function() {
+            return /Macintosh|MacIntel|iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) ||
+                   Boolean(window.WebKitPlaybackTargetAvailabilityEvent) ||
+                   ('WebKitPlaybackTargetAvailabilityEvent' in window);
+        })(){% endif %};
+
+        const castBtn = document.getElementById('castBtn');
+        const castIcon = document.getElementById('castIcon');
+        const googleCastLauncher = document.getElementById('googleCastLauncher');
+
+        if (isAppleDevice) {
+            if (castBtn) castBtn.title = 'AirPlay';
+            if (castIcon && castIcon.getAttribute('data-lucide') !== 'airplay') {
+                castIcon.setAttribute('data-lucide', 'airplay');
+                if (typeof refreshIcons === 'function') refreshIcons();
+            }
+        } else {
+            if (castBtn) castBtn.title = 'Cast to TV';
+        }
+
+        // AirPlay native event listeners
+        if (window.WebKitPlaybackTargetAvailabilityEvent) {
+            video.addEventListener('webkitplaybacktargetavailabilitychanged', (event) => {
+                if (castBtn) {
+                    if (event.availability === 'available') {
+                        castBtn.style.display = 'inline-flex';
+                    }
+                }
+            });
+        }
+        video.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', () => {
+            if (castBtn) {
+                castBtn.classList.toggle('active', Boolean(video.webkitCurrentPlaybackTargetIsWireless));
+            }
+        });
+
         let castPlayer = null;
         let castController = null;
 
-        // Fallback for Safari/Firefox or HTTP
-        setTimeout(() => {
-            if (typeof cast === 'undefined' || !cast.framework) {
-                document.getElementById('googleCastBtn').style.display = 'none';
-                document.getElementById('nativeCastBtn').style.display = 'inline-block';
-            }
-        }, 1500);
-
         async function requestCast() {
-            if (video.remote && video.remote.state !== 'disconnected') {
-                video.remote.prompt().catch(err => {
-                    console.log("Remote playback failed", err);
-                    fallbackPiP();
-                });
-            } else if (document.pictureInPictureEnabled) {
-                fallbackPiP();
-            } else {
-                alert("Casting is not supported on this browser/network. (Use Chrome on HTTPS/localhost for Chromecast)");
+            // 1. Try Apple AirPlay if on Apple device or WebKit target picker is supported
+            if (isAppleDevice && (window.WebKitPlaybackTargetAvailabilityEvent || video.webkitShowPlaybackTargetPicker)) {
+                try {
+                    video.webkitShowPlaybackTargetPicker();
+                    return;
+                } catch (err) {
+                    console.debug("[AirPlay] Picker call error:", err);
+                    if (err && (err.name === 'AbortError' || err.name === 'NotAllowedError')) return;
+                }
             }
+
+            // 2. Try Google Cast Web SDK
+            if (window.cast && window.cast.framework) {
+                try {
+                    const ctx = cast.framework.CastContext.getInstance();
+                    if (ctx) {
+                        await ctx.requestSession();
+                        return;
+                    }
+                } catch (err) {
+                    console.debug("[Google Cast] requestSession cancelled or error:", err);
+                    if (err && (err.name === 'cancel' || err.name === 'AbortError' || err.name === 'NotAllowedError' || err === 'cancel')) {
+                        return;
+                    }
+                }
+            }
+
+            // 3. Try standard W3C Remote Playback API
+            if (video.remote && typeof video.remote.prompt === 'function') {
+                try {
+                    await video.remote.prompt();
+                    return;
+                } catch (err) {
+                    console.debug("[Remote Playback] prompt error:", err);
+                    if (err && (err.name === 'AbortError' || err.name === 'NotAllowedError')) {
+                        return;
+                    }
+                }
+            }
+
+            // 4. Helpful fallback for Chrome desktop users
+            alert("To cast this video, right-click anywhere on the video and click 'Cast...', or click Chrome's top menu (⋮) > 'Cast, save, and share' > 'Cast...'.");
         }
 
-        async function fallbackPiP() {
+        // Picture-in-Picture Implementation
+        function updatePiPUI() {
+            const pipBtn = document.getElementById('pipBtn');
+            if (!pipBtn) return;
+            const inPiP = Boolean(
+                (document.pictureInPictureElement === video) ||
+                (video && video.webkitPresentationMode === 'picture-in-picture')
+            );
+            pipBtn.classList.toggle('active', inPiP);
+        }
+
+        async function togglePiP() {
             try {
                 if (document.pictureInPictureElement) {
+                    const wasPlaying = !video.paused;
                     await document.exitPictureInPicture();
-                } else {
+                    if (wasPlaying && video.paused) {
+                        setTimeout(() => { if (video.paused) video.play().catch(() => {}); }, 50);
+                    }
+                } else if (video.webkitPresentationMode && video.webkitSetPresentationMode) {
+                    const newMode = video.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture';
+                    video.webkitSetPresentationMode(newMode);
+                } else if (document.pictureInPictureEnabled && typeof video.requestPictureInPicture === 'function') {
                     await video.requestPictureInPicture();
+                } else {
+                    alert("Picture-in-Picture is not supported by your browser.");
                 }
             } catch (err) {
-                console.log("PiP failed", err);
+                console.warn("[Heirloom PiP] togglePiP error:", err);
             }
         }
+
+        let wasPlayingInPiP = false;
+        let lastPiPPlayingTime = 0;
+
+        video.addEventListener('enterpictureinpicture', () => {
+            wasPlayingInPiP = !video.paused;
+            updatePiPUI();
+        });
+
+        video.addEventListener('timeupdate', () => {
+            const inPiP = (document.pictureInPictureElement === video) ||
+                          (video && video.webkitPresentationMode === 'picture-in-picture');
+            if (inPiP) {
+                if (!video.paused) {
+                    wasPlayingInPiP = true;
+                    lastPiPPlayingTime = Date.now();
+                }
+            }
+        });
+
+        function ensurePlaybackAfterPiPExit() {
+            const shouldResume = wasPlayingInPiP && (Date.now() - lastPiPPlayingTime < 3000 || !video.paused);
+            if (shouldResume) {
+                const attemptResume = () => {
+                    if (video.paused) {
+                        video.play().catch(e => console.debug("Resume after PiP exit:", e));
+                    }
+                };
+                attemptResume();
+                setTimeout(attemptResume, 50);
+                setTimeout(attemptResume, 150);
+                setTimeout(attemptResume, 300);
+            }
+            wasPlayingInPiP = false;
+        }
+
+        video.addEventListener('leavepictureinpicture', () => {
+            updatePiPUI();
+            ensurePlaybackAfterPiPExit();
+        });
+
+        if (video.webkitSupportsPresentationMode) {
+            video.addEventListener('webkitpresentationmodechanged', () => {
+                updatePiPUI();
+            });
+        }
+
+        // Hide PiP button if completely unsupported
+        setTimeout(() => {
+            const pipBtn = document.getElementById('pipBtn');
+            if (pipBtn) {
+                const isSupported = Boolean(
+                    document.pictureInPictureEnabled ||
+                    (video && video.webkitSupportsPresentationMode && video.webkitSupportsPresentationMode('picture-in-picture'))
+                );
+                if (!isSupported) {
+                    pipBtn.style.display = 'none';
+                }
+            }
+        }, 300);
 
         window.__onGCastApiAvailable = function (isAvailable) {
             if (isAvailable && window.cast && window.cast.framework) {
@@ -1573,10 +1842,12 @@
                     cast.framework.CastContext.getInstance().addEventListener(
                         cast.framework.CastContextEventType.CAST_STATE_CHANGED,
                         function (event) {
-                            if (event.castState === cast.framework.CastState.NO_DEVICES_AVAILABLE) {
-                                document.getElementById('googleCastBtn').style.display = 'none';
-                            } else {
-                                document.getElementById('googleCastBtn').style.display = 'flex';
+                            if (googleCastLauncher) {
+                                if (event.castState === cast.framework.CastState.NO_DEVICES_AVAILABLE) {
+                                    googleCastLauncher.style.display = 'none';
+                                } else if (!isAppleDevice) {
+                                    googleCastLauncher.style.display = 'block';
+                                }
                             }
                         }
                     );
@@ -1584,6 +1855,9 @@
                     castController.addEventListener(
                         cast.framework.RemotePlayerEventType.IS_CONNECTED_CHANGED,
                         function () {
+                            if (castBtn) {
+                                castBtn.classList.toggle('active', Boolean(castPlayer.isConnected));
+                            }
                             if (castPlayer.isConnected) {
                                 loadCastMedia();
                             } else {
@@ -1621,9 +1895,28 @@
             const castSession = cast.framework.CastContext.getInstance().getCurrentSession();
             if (!castSession) return;
 
-            const mediaInfo = new chrome.cast.media.MediaInfo(
-                window.location.origin + video.src, 'video/mp4'
-            );
+            let castMediaUrl = new URL(video.currentSrc || video.src || ('/stream/{{ media_type }}/{{ item.id }}?res=' + encodeURIComponent(currentRes)), window.location.href).href;
+            {% if token %}
+            if (!castMediaUrl.includes('token=')) {
+                castMediaUrl += (castMediaUrl.includes('?') ? '&' : '?') + 'token={{ token }}';
+            }
+            {% endif %}
+
+            const mediaInfo = new chrome.cast.media.MediaInfo(castMediaUrl, 'video/mp4');
+            const metadata = new chrome.cast.media.GenericMediaMetadata();
+            metadata.title = {{ item.title | tojson }};
+            {% if season_episode %}
+            metadata.subtitle = {{ season_episode | tojson }};
+            {% endif %}
+            {% if item.poster_filename %}
+            metadata.images = [{ url: window.location.origin + '/metadata/{{ item.poster_filename }}' }];
+            {% endif %}
+            mediaInfo.metadata = metadata;
+
+            const request = new chrome.cast.media.LoadRequest(mediaInfo);
+            const currentTime = (typeof getActualTime === 'function' ? getActualTime() : video.currentTime) || 0;
+            request.currentTime = currentTime;
+            request.autoplay = true;
 
             {% if subtitle_tracks and subtitle_tracks|length > 0 %}
             const castTracks = [];
@@ -1653,7 +1946,7 @@
             }
             {% elif subtitle_url %}
             const subtitle = new chrome.cast.media.Track(1, chrome.cast.media.TrackType.TEXT);
-            subtitle.trackContentId = window.location.origin + '{{ subtitle_url }}';
+            subtitle.trackContentId = window.location.origin + '{{ subtitle_url }}{% if token %}&token={{ token }}{% endif %}';
             subtitle.trackContentType = 'text/vtt';
             subtitle.subtype = chrome.cast.media.TextTrackType.SUBTITLES;
             subtitle.name = 'English Subtitles';
@@ -1666,11 +1959,14 @@
             {% endif %}
 
             castSession.loadMedia(request).then(
-                function () { console.log('Cast load success'); },
-                function (error) { console.error('Cast load error', error); }
+                function () {
+                    console.log('[Heirloom Cast] Cast load success');
+                    video.pause();
+                },
+                function (error) {
+                    console.error('[Heirloom Cast] Cast load error', error);
+                }
             );
-
-            video.pause();
         }
 
         // Fullscreen (Cross-browser with iOS Safari & WebKit support)
@@ -1684,6 +1980,7 @@
             );
         }
 
+        let wasPlayingBeforeFs = false;
         function updateFullscreenUI() {
             const isFs = isFullscreen();
             const icon = isFs ? 'minimize' : 'maximize';
@@ -1691,9 +1988,18 @@
                 fullscreenBtn.innerHTML = `<i data-lucide="${icon}"></i>`;
                 refreshIcons();
             }
+            if (wasPlayingBeforeFs && video.paused) {
+                setTimeout(() => {
+                    if (video.paused) video.play().catch(() => {});
+                }, 50);
+            }
         }
 
         function toggleFullscreen() {
+            wasPlayingBeforeFs = !video.paused;
+            if (document.pictureInPictureElement) {
+                document.exitPictureInPicture().catch(() => {});
+            }
             if (isFullscreen()) {
                 try {
                     if (document.exitFullscreen) {
@@ -1767,7 +2073,12 @@
                     refreshIcons();
                 }
             });
-            video.addEventListener('webkitpresentationmodechanged', updateFullscreenUI);
+            video.addEventListener('webkitpresentationmodechanged', () => {
+                updateFullscreenUI();
+                if (video.webkitPresentationMode !== 'picture-in-picture') {
+                    ensurePlaybackAfterPiPExit();
+                }
+            });
         }
 
         // Overlay fade logic
@@ -1775,11 +2086,13 @@
         let hideTimeout;
         function showOverlay() {
             overlay.style.opacity = '1';
+            overlay.classList.remove('overlay-hidden');
             document.body.style.cursor = 'default';
             clearTimeout(hideTimeout);
             hideTimeout = setTimeout(() => {
                 if (!video.paused) {
                     overlay.style.opacity = '0';
+                    overlay.classList.add('overlay-hidden');
                     document.body.style.cursor = 'none';
                 }
             }, 3000);

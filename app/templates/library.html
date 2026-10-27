@@ -66,6 +66,11 @@
                         <i data-lucide="sliders"></i>
                         <span>Manage Profiles</span>
                     </a>
+                    {% elif current_profile and not current_profile.is_primary %}
+                    <a href="/profiles?manage=1" class="profile-dropdown-item">
+                        <i data-lucide="pencil"></i>
+                        <span>Manage Profile</span>
+                    </a>
                     {% endif %}
                     <a href="/logout" class="profile-dropdown-item text-danger">
                         <i data-lucide="log-out"></i>
@@ -152,6 +157,11 @@
                 <i data-lucide="sliders"></i>
                 <span>Manage Profiles</span>
             </a>
+            {% elif current_profile and not current_profile.is_primary %}
+            <a href="/profiles?manage=1" class="mobile-menu-link">
+                <i data-lucide="pencil"></i>
+                <span>Manage Profile</span>
+            </a>
             {% endif %}
 
             <div class="mobile-menu-divider"></div>
@@ -202,17 +212,17 @@
         <div class="main-content">
             <div class="card">
                 {% if media_type == 'music' %}
-                <div class="music-subnav">
-                    <a href="/library/music?view=albums" class="music-tab {% if music_view == 'albums' %}active{% endif %}">
+                <div class="subnav-bar">
+                    <a href="/library/music?view=albums" class="subnav-tab {% if music_view == 'albums' %}active{% endif %}">
                         <i data-lucide="disc"></i> Albums
                     </a>
-                    <a href="/library/music?view=artists" class="music-tab {% if music_view == 'artists' %}active{% endif %}">
+                    <a href="/library/music?view=artists" class="subnav-tab {% if music_view == 'artists' %}active{% endif %}">
                         <i data-lucide="mic-2"></i> Artists
                     </a>
-                    <a href="/library/music?view=tracks" class="music-tab {% if music_view == 'tracks' %}active{% endif %}">
+                    <a href="/library/music?view=tracks" class="subnav-tab {% if music_view == 'tracks' %}active{% endif %}">
                         <i data-lucide="music"></i> Tracks
                     </a>
-                    <a href="/library/music?view=playlists" class="music-tab {% if music_view == 'playlists' %}active{% endif %}">
+                    <a href="/library/music?view=playlists" class="subnav-tab {% if music_view == 'playlists' %}active{% endif %}">
                         <i data-lucide="list-music"></i> Playlists
                     </a>
                     {% if music_view == 'playlists' %}
@@ -221,33 +231,275 @@
                     </button>
                     {% endif %}
                 </div>
+                {% elif media_type in ['movie', 'tv'] %}
+                <div class="subnav-bar">
+                    <a href="/library/{{ media_type }}" class="subnav-tab {% if current_view == 'library' %}active{% endif %}">
+                        <i data-lucide="layout-grid"></i> Library
+                    </a>
+                    <a href="/library/{{ media_type }}?view=recommended" class="subnav-tab {% if current_view == 'recommended' %}active{% endif %}">
+                        <i data-lucide="sparkles"></i> Recommended
+                    </a>
+                    <a href="/library/{{ media_type }}?view=categories" class="subnav-tab {% if current_view == 'categories' %}active{% endif %}">
+                        <i data-lucide="tags"></i> Categories
+                    </a>
+                    <a href="/library/{{ media_type }}?view=collections" class="subnav-tab {% if current_view == 'collections' %}active{% endif %}">
+                        <i data-lucide="layers"></i> Collections
+                    </a>
+                </div>
                 {% endif %}
 
+                {% if current_view == 'categories' %}
                 <div class="flex justify-between align-center mb-15">
                     <h2 class="m-0">
-                        {% if media_type == 'movie' %}Movies ({{ total_count }})
-                        {% elif media_type == 'photo' %}
-                        <a href="/library/photo" style="text-decoration: none; color: inherit;">Photos</a>
-                        {% if album_breadcrumbs %}
-                            {% for b in album_breadcrumbs %}
-                            <span style="color: #666; margin: 0 6px;">/</span>
-                            {% if loop.last %}
-                            <span style="color: #fff; font-weight: 600;">{{ b.name }}</span>
-                            {% else %}
-                            <a href="/library/photo?album={{ b.path | urlencode }}" style="text-decoration: none; color: #aaa; transition: color 0.2s;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#aaa'">{{ b.name }}</a>
-                            {% endif %}
-                            {% endfor %}
-                            <span style="font-size: 0.85em; color: #888; font-weight: normal; margin-left: 6px;">({{ total_count }})</span>
-                        {% else %}
-                            <span style="font-size: 0.85em; color: #888; font-weight: normal; margin-left: 4px;">({{ total_count }})</span>
-                        {% endif %}
-                        {% elif media_type == 'music' %}
-                            {% if music_view == 'artists' %}Artists ({{ total_count }})
-                            {% elif music_view == 'tracks' %}Tracks ({{ total_count }})
-                            {% elif music_view == 'playlists' %}Playlists ({{ total_count }})
-                            {% else %}Albums ({{ total_count }}){% endif %}
-                        {% else %}TV Shows ({{ total_count }}){% endif %}
+                        Categories ({{ total_count }})
                     </h2>
+                </div>
+                {% if categories %}
+                <div class="categories-grid">
+                    {% for cat in categories %}
+                    <a href="/library/{{ media_type }}?genre={{ cat.name | urlencode }}" class="category-card">
+                        {% if cat.backdrop_filename %}
+                        <img src="/metadata/{{ cat.backdrop_filename }}" class="category-card-bg" alt="{{ cat.name }}">
+                        {% elif cat.poster_filename %}
+                        <img src="/metadata/{{ cat.poster_filename }}" class="category-card-bg" alt="{{ cat.name }}">
+                        {% endif %}
+                        <div class="category-card-content">
+                            <div class="category-card-title">{{ cat.name }}</div>
+                            <div class="category-card-count">{{ cat.count }} {{ 'Title' if cat.count == 1 else 'Titles' }}</div>
+                        </div>
+                    </a>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-muted" style="margin-top: 20px;">No categories available.</p>
+                {% endif %}
+
+                {% elif current_view == 'collections' %}
+                <div class="flex justify-between align-center mb-15">
+                    <h2 class="m-0">
+                        Collections & Franchises ({{ total_count }})
+                    </h2>
+                </div>
+                {% if collections %}
+                <div class="grid-row">
+                    {% for col in collections %}
+                    <div class="media-card">
+                        <div class="poster-container">
+                            <a href="/library/{{ media_type }}?collection={{ col.name | urlencode }}">
+                                {% if col.poster_filename %}
+                                <img src="/metadata/{{ col.poster_filename }}" class="poster" alt="{{ col.name }}">
+                                {% else %}
+                                <div class="poster-placeholder"><i data-lucide="layers"></i></div>
+                                {% endif %}
+                            </a>
+                        </div>
+                        <div class="media-title"><a href="/library/{{ media_type }}?collection={{ col.name | urlencode }}" title="{{ col.name }}">{{ col.name }}</a></div>
+                        <div class="media-year">{{ col.count }} {{ 'Title' if col.count == 1 else 'Titles' }}{% if col.year_range %} &bull; {{ col.year_range }}{% endif %}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-muted" style="margin-top: 20px;">No collections found for this library.</p>
+                {% endif %}
+
+                {% elif current_view == 'recommended' %}
+                <div class="flex justify-between align-center mb-15">
+                    <h2 class="m-0">
+                        Recommended
+                    </h2>
+                </div>
+                {% if recommended_items %}
+                <div style="margin-bottom: 30px;">
+                    <h3 style="margin: 0 0 15px 0; font-size: 1.15rem;">Recommended For You</h3>
+                    <div class="carousel-container">
+                        <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
+                        <div class="carousel-row">
+                            {% for m in recommended_items %}
+                            {% set item_url = ('/series/' ~ (m.title | urlencode)) if media_type == 'tv' else ('/movie/' ~ m.id) %}
+                            <div class="media-card">
+                                <div class="poster-container">
+                                    <a href="{{ item_url }}">
+                                        {% if m.poster_filename %}
+                                        <img src="/metadata/{{ m.poster_filename }}" class="poster">
+                                        {% else %}
+                                        <div class="poster-placeholder"><i data-lucide="film"></i></div>
+                                        {% endif %}
+                                    </a>
+                                    <a href="/play/{{ media_type }}/{{ m.id }}" class="icon-btn hover-play">
+                                        <i data-lucide="play" fill="currentColor"></i>
+                                    </a>
+                                </div>
+                                <div class="media-title"><a href="{{ item_url }}">{{ m.title }}</a></div>
+                                {% if m.year %}<div class="media-year">{{ m.year }}</div>{% endif %}
+                                {% if m.rating %}
+                                <div class="media-rating">
+                                    <i data-lucide="star"></i>
+                                    <span>{{ "%.1f"|format(m.rating) }}</span>
+                                </div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
+                    </div>
+                </div>
+                {% endif %}
+
+                {% if recently_added %}
+                <div style="margin-bottom: 30px;">
+                    <h3 style="margin: 0 0 15px 0; font-size: 1.15rem;">Recently Added</h3>
+                    <div class="carousel-container">
+                        <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
+                        <div class="carousel-row">
+                            {% for m in recently_added %}
+                            {% set item_url = ('/series/' ~ (m.title | urlencode)) if media_type == 'tv' else ('/movie/' ~ m.id) %}
+                            <div class="media-card">
+                                <div class="poster-container">
+                                    <a href="{{ item_url }}">
+                                        {% if m.poster_filename %}
+                                        <img src="/metadata/{{ m.poster_filename }}" class="poster">
+                                        {% else %}
+                                        <div class="poster-placeholder"><i data-lucide="film"></i></div>
+                                        {% endif %}
+                                    </a>
+                                    <a href="/play/{{ media_type }}/{{ m.id }}" class="icon-btn hover-play">
+                                        <i data-lucide="play" fill="currentColor"></i>
+                                    </a>
+                                </div>
+                                <div class="media-title"><a href="{{ item_url }}">{{ m.title }}</a></div>
+                                {% if m.year %}<div class="media-year">{{ m.year }}</div>{% endif %}
+                                {% if m.rating %}
+                                <div class="media-rating">
+                                    <i data-lucide="star"></i>
+                                    <span>{{ "%.1f"|format(m.rating) }}</span>
+                                </div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
+                    </div>
+                </div>
+                {% endif %}
+
+                {% if recently_released %}
+                <div style="margin-bottom: 30px;">
+                    <h3 style="margin: 0 0 15px 0; font-size: 1.15rem;">Recently Released</h3>
+                    <div class="carousel-container">
+                        <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
+                        <div class="carousel-row">
+                            {% for m in recently_released %}
+                            {% set item_url = ('/series/' ~ (m.title | urlencode)) if media_type == 'tv' else ('/movie/' ~ m.id) %}
+                            <div class="media-card">
+                                <div class="poster-container">
+                                    <a href="{{ item_url }}">
+                                        {% if m.poster_filename %}
+                                        <img src="/metadata/{{ m.poster_filename }}" class="poster">
+                                        {% else %}
+                                        <div class="poster-placeholder"><i data-lucide="film"></i></div>
+                                        {% endif %}
+                                    </a>
+                                    <a href="/play/{{ media_type }}/{{ m.id }}" class="icon-btn hover-play">
+                                        <i data-lucide="play" fill="currentColor"></i>
+                                    </a>
+                                </div>
+                                <div class="media-title"><a href="{{ item_url }}">{{ m.title }}</a></div>
+                                {% if m.year %}<div class="media-year">{{ m.year }}</div>{% endif %}
+                                {% if m.rating %}
+                                <div class="media-rating">
+                                    <i data-lucide="star"></i>
+                                    <span>{{ "%.1f"|format(m.rating) }}</span>
+                                </div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
+                    </div>
+                </div>
+                {% endif %}
+
+                {% if top_rated_items %}
+                <div>
+                    <h3 style="margin: 0 0 15px 0; font-size: 1.15rem;">Top Rated</h3>
+                    <div class="carousel-container">
+                        <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
+                        <div class="carousel-row">
+                            {% for m in top_rated_items %}
+                            {% set item_url = ('/series/' ~ (m.title | urlencode)) if media_type == 'tv' else ('/movie/' ~ m.id) %}
+                            <div class="media-card">
+                                <div class="poster-container">
+                                    <a href="{{ item_url }}">
+                                        {% if m.poster_filename %}
+                                        <img src="/metadata/{{ m.poster_filename }}" class="poster">
+                                        {% else %}
+                                        <div class="poster-placeholder"><i data-lucide="film"></i></div>
+                                        {% endif %}
+                                    </a>
+                                    <a href="/play/{{ media_type }}/{{ m.id }}" class="icon-btn hover-play">
+                                        <i data-lucide="play" fill="currentColor"></i>
+                                    </a>
+                                </div>
+                                <div class="media-title"><a href="{{ item_url }}">{{ m.title }}</a></div>
+                                {% if m.year %}<div class="media-year">{{ m.year }}</div>{% endif %}
+                                {% if m.rating %}
+                                <div class="media-rating">
+                                    <i data-lucide="star"></i>
+                                    <span>{{ "%.1f"|format(m.rating) }}</span>
+                                </div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
+                    </div>
+                </div>
+                {% endif %}
+
+                {% if not recommended_items and not recently_added and not recently_released and not top_rated_items %}
+                <p class="text-muted" style="margin-top: 20px;">No recommendations available yet. Start watching media to receive personalized recommendations!</p>
+                {% endif %}
+
+                {% else %}
+                <!-- Library View (default) -->
+                <div class="flex justify-between align-center mb-15">
+                    <div class="flex align-center" style="gap: 12px; flex-wrap: wrap;">
+                        <h2 class="m-0">
+                            {% if media_type == 'movie' %}Movies ({{ total_count }})
+                            {% elif media_type == 'photo' %}
+                            <a href="/library/photo" style="text-decoration: none; color: inherit;">Photos</a>
+                            {% if album_breadcrumbs %}
+                                {% for b in album_breadcrumbs %}
+                                <span style="color: #666; margin: 0 6px;">/</span>
+                                {% if loop.last %}
+                                <span style="color: #fff; font-weight: 600;">{{ b.name }}</span>
+                                {% else %}
+                                <a href="/library/photo?album={{ b.path | urlencode }}" style="text-decoration: none; color: #aaa; transition: color 0.2s;" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#aaa'">{{ b.name }}</a>
+                                {% endif %}
+                                {% endfor %}
+                                <span style="font-size: 0.85em; color: #888; font-weight: normal; margin-left: 6px;">({{ total_count }})</span>
+                            {% else %}
+                                <span style="font-size: 0.85em; color: #888; font-weight: normal; margin-left: 4px;">({{ total_count }})</span>
+                            {% endif %}
+                            {% elif media_type == 'music' %}
+                                {% if music_view == 'artists' %}Artists ({{ total_count }})
+                                {% elif music_view == 'tracks' %}Tracks ({{ total_count }})
+                                {% elif music_view == 'playlists' %}Playlists ({{ total_count }})
+                                {% else %}Albums ({{ total_count }}){% endif %}
+                            {% else %}TV Shows ({{ total_count }}){% endif %}
+                        </h2>
+                        {% if active_genre %}
+                        <div class="active-filter-badge">
+                            <span>Category: <strong>{{ active_genre }}</strong></span>
+                            <a href="/library/{{ media_type }}" title="Clear category filter"><i data-lucide="x"></i></a>
+                        </div>
+                        {% elif active_collection %}
+                        <div class="active-filter-badge">
+                            <span>Collection: <strong>{{ active_collection }}</strong></span>
+                            <a href="/library/{{ media_type }}" title="Clear collection filter"><i data-lucide="x"></i></a>
+                        </div>
+                        {% endif %}
+                    </div>
                     <div style="position: relative;">
                         <button class="btn btn-secondary" onclick="toggleMenu(event, 'sortMenu')">
                             <i data-lucide="arrow-down-up" style="width: 16px; height: 16px;"></i>
@@ -267,6 +519,7 @@
                     <!-- JavaScript will populate media cards here -->
                 </div>
                 <div id="sentinel" style="height: 20px;"></div>
+                {% endif %}
             </div>
         </div>
     </div>
@@ -472,12 +725,16 @@
             const albumParam = album ? `&album=${encodeURIComponent(album)}` : '';
             const musicView = urlParams.get('view') || 'albums';
             const viewParam = mediaType === 'music' ? `&view=${encodeURIComponent(musicView)}` : '';
+            const genre = urlParams.get('genre');
+            const genreParam = genre ? `&genre=${encodeURIComponent(genre)}` : '';
+            const collection = urlParams.get('collection');
+            const collectionParam = collection ? `&collection=${encodeURIComponent(collection)}` : '';
             const downloadsAccess = "{{ 'true' if user.downloads_access else 'false' }}" === 'true';
             const watchTogetherAccess = "{{ 'true' if user.watch_together_access else 'false' }}" === 'true';
             const isAdmin = "{{ 'true' if user.is_admin else 'false' }}" === 'true';
 
             try {
-                const res = await fetch(`/api/library/${mediaType}?page=${page}&limit=50&sort=${currentSort}${albumParam}${viewParam}`);
+                const res = await fetch(`/api/library/${mediaType}?page=${page}&limit=50&sort=${currentSort}${albumParam}${viewParam}${genreParam}${collectionParam}`);
                 const data = await res.json();
 
                 const grid = document.getElementById('mediaGrid');
@@ -525,6 +782,9 @@
                         : `<div class="poster-placeholder"><i data-lucide="${placeholderIcon}"></i></div>`;
 
                     const yearHtml = m.year && !(mediaType === 'photo' && isAlbum) ? `<div class="media-year">${m.year}</div>` : '';
+                    const ratingHtml = (mediaType !== 'photo' && mediaType !== 'music' && !isAlbum && m.rating)
+                        ? `<div class="media-rating"><i data-lucide="star"></i><span>${m.rating.toFixed(1)}</span></div>`
+                        : '';
                     const posterClass = mediaType === 'photo' ? 'poster-container photo-poster-container' : (mediaType === 'music' ? 'poster-container music-poster-container' : 'poster-container');
 
                     let hoverContent = '';
@@ -598,8 +858,9 @@
                                 </a>
                                 ${hoverContent}
                             </div>
-                            ${!(mediaType === 'photo' && isAlbum) ? `<div class="media-title">${m.title}</div>` : ''}
+                            ${!(mediaType === 'photo' && isAlbum) ? `<div class="media-title"><a href="${targetUrl}">${m.title}</a></div>` : ''}
                             ${yearHtml}
+                            ${ratingHtml}
                         `;
                     grid.appendChild(card);
                 });
@@ -613,8 +874,22 @@
             }
         }
 
+        function scrollCarousel(btn, direction) {
+            const container = btn.closest('.carousel-container');
+            const row = container ? container.querySelector('.carousel-row') : null;
+            if (!row) return;
+            const scrollAmount = row.clientWidth * 0.8;
+            row.scrollBy({ left: direction * scrollAmount, behavior: 'smooth' });
+        }
+
         // IntersectionObserver for Infinite Scroll
         document.addEventListener('DOMContentLoaded', () => {
+            const currentView = "{{ current_view }}";
+            if (currentView && currentView !== 'library') {
+                if (typeof lucide !== 'undefined' && lucide) lucide.createIcons();
+                return;
+            }
+
             const sortLabels = {
                 'title_asc': 'Title (A-Z)',
                 'title_desc': 'Title (Z-A)',

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Heirloom • {% if manage_mode %}Manage Profiles{% else %}Who's Watching?{% endif %}</title>
+    <title>Heirloom • {% if manage_mode %}{% if can_manage %}Manage Profiles{% else %}Manage Profile{% endif %}{% else %}Who's Watching?{% endif %}</title>
     <link rel="stylesheet" href="/static/style.css">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <script src="/static/lucide.min.js"></script>
@@ -11,7 +11,7 @@
 <body style="margin: 0; padding: 0;">
 
 <div class="profiles-page-wrapper">
-    <h1 class="profiles-header-title">{% if manage_mode %}Manage Profiles{% else %}Who's Watching?{% endif %}</h1>
+    <h1 class="profiles-header-title">{% if manage_mode %}{% if can_manage %}Manage Profiles{% else %}Manage Profile{% endif %}{% else %}Who's Watching?{% endif %}</h1>
 
     <div class="profiles-grid" id="profilesGrid">
         {% for p in profiles %}
@@ -20,7 +20,8 @@
              data-name="{{ p.name }}"
              data-color="{{ p.avatar_color }}"
              data-icon="{{ p.avatar_icon or 'user' }}"
-             data-kids="{{ '1' if p.is_kids else '0' }}"
+             data-kids="{{ '1' if (p.rating_level == 2 or p.is_kids) else '0' }}"
+             data-rating-level="{{ p.rating_level if p.rating_level is not none else (2 if p.is_kids else 0) }}"
              data-has-pin="{{ '1' if (p.has_pin or p.pin_hash) else '0' }}"
              data-pin="{{ p.pin or '' }}"
              data-is-primary="{{ '1' if p.is_primary else '0' }}"
@@ -32,7 +33,7 @@
                     <i data-lucide="lock"></i>
                 </div>
                 {% endif %}
-                {% if manage_mode %}
+                {% if manage_mode and (can_manage or (can_manage_self and current_profile and current_profile.id == p.id)) %}
                 <div class="profile-badge-edit" title="Edit Profile">
                     <i data-lucide="pencil"></i>
                 </div>
@@ -41,8 +42,10 @@
             <div class="profile-card-name">{{ p.name }}</div>
             {% if p.is_primary %}
             <span class="profile-card-owner-tag">Owner</span>
-            {% elif p.is_kids %}
-            <span class="profile-card-kids-tag">Kids</span>
+            {% elif (p.rating_level == 2) or (p.rating_level is none and p.is_kids) %}
+            <span class="profile-card-kids-tag">Child</span>
+            {% elif p.rating_level == 1 %}
+            <span class="profile-card-kids-tag">Teen</span>
             {% endif %}
         </div>
         {% endfor %}
@@ -63,7 +66,12 @@
             <a href="/profiles" class="btn btn-primary" style="padding: 10px 28px; text-decoration: none;"><i data-lucide="check"></i> Done</a>
             {% else %}
             <a href="/profiles?manage=1" class="btn btn-secondary" style="padding: 10px 24px; text-decoration: none;"><i data-lucide="pencil"></i> Manage Profiles</a>
-            
+            {% endif %}
+        {% elif can_manage_self %}
+            {% if manage_mode %}
+            <a href="/profiles" class="btn btn-primary" style="padding: 10px 28px; text-decoration: none;"><i data-lucide="check"></i> Done</a>
+            {% else %}
+            <a href="/profiles?manage=1" class="btn btn-secondary" style="padding: 10px 24px; text-decoration: none;" onclick="openSelfEditModal(event)"><i data-lucide="pencil"></i> Manage Profile</a>
             {% endif %}
         {% endif %}
         {% if not manage_mode and current_profile %}
@@ -192,12 +200,26 @@
                 <button type="button" class="icon-swatch-btn" data-icon="gamepad-2" onclick="selectIcon(this)"><i data-lucide="gamepad-2"></i></button>
             </div>
 
-            <!-- Kids Mode & Rewind Buffer -->
-            <div class="flex gap-15 align-center mb-15">
-                <label class="toggle-pill m-0">
-                    <input type="checkbox" id="profileKidsInput" class="hidden-checkbox">
-                    <span>Kids Profile (G & PG Content Only)</span>
-                </label>
+            <!-- Content Rating Restrictions Slider -->
+            <div id="contentRatingSection" style="background: var(--bg); border-radius: var(--radius); padding: 14px; margin-bottom: 15px;">
+                <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px;">
+                    <label style="font-size: 0.9rem; font-weight: 600; display: flex; align-items: center; gap: 6px; margin: 0;">
+                        <i data-lucide="shield" style="width: 16px; height: 16px; color: var(--accent);"></i> Content Rating
+                    </label>
+                    <span id="ratingLevelName" style="font-size: 0.95rem; font-weight: 700; color: var(--text);">Adult</span>
+                </div>
+                <p id="ratingLevelSubtext" style="font-size: 0.8rem; color: var(--text-muted); margin: 0 0 10px 0;">
+                    All ratings allowed (Unrestricted)
+                </p>
+                <div style="position: relative; margin: 0; padding: 0;">
+                    <input type="range" id="profileRatingSlider" min="0" max="2" step="1" value="0" 
+                           oninput="updateRatingSliderUI(this.value)">
+                </div>
+                <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; padding: 0;">
+                    <span style="cursor: pointer; user-select: none;" onclick="setRatingSliderValue(0)">Adult</span>
+                    <span style="cursor: pointer; user-select: none;" onclick="setRatingSliderValue(1)">Teen</span>
+                    <span style="cursor: pointer; user-select: none;" onclick="setRatingSliderValue(2)">Child</span>
+                </div>
             </div>
 
             <!-- Profile Lock (PIN) Section -->
@@ -236,6 +258,9 @@
 
 <script>
     const isManageMode = {{ 'true' if manage_mode else 'false' }};
+    const canManage = {{ 'true' if can_manage else 'false' }};
+    const canManageSelf = {{ 'true' if can_manage_self else 'false' }};
+    const currentProfileId = {{ current_profile.id if current_profile else 'null' }};
     let pendingProfileId = null;
 
     // PIN modal handling
@@ -247,6 +272,14 @@
         const hasPin = card.dataset.hasPin === '1';
 
         if (isManageMode) {
+            if (!canManage && currentProfileId && id != currentProfileId) {
+                if (hasPin) {
+                    openPinModal(id, name, color, icon);
+                } else {
+                    selectProfile(id);
+                }
+                return;
+            }
             openEditProfileModal(card);
             return;
         }
@@ -445,11 +478,43 @@
         lucide.createIcons();
     }
 
+    function setRatingSliderValue(val) {
+        const slider = document.getElementById('profileRatingSlider');
+        if (slider) {
+            slider.value = val;
+            updateRatingSliderUI(val);
+        }
+    }
+
+    function updateRatingSliderUI(val) {
+        const num = parseInt(val, 10);
+        const nameEl = document.getElementById('ratingLevelName');
+        const subEl = document.getElementById('ratingLevelSubtext');
+        const slider = document.getElementById('profileRatingSlider');
+        if (slider) {
+            const pct = (num / 2) * 100;
+            slider.style.background = `linear-gradient(to right, var(--accent) 0%, var(--accent) ${pct}%, rgba(255, 255, 255, 0.2) ${pct}%, rgba(255, 255, 255, 0.2) 100%)`;
+        }
+        if (!nameEl || !subEl) return;
+        if (num === 0) {
+            nameEl.textContent = "Adult";
+            subEl.textContent = "All ratings allowed (Unrestricted)";
+        } else if (num === 1) {
+            nameEl.textContent = "Teen";
+            subEl.textContent = "Up to PG-13 & TV-14";
+        } else {
+            nameEl.textContent = "Child";
+            subEl.textContent = "Up to PG & TV-PG";
+        }
+    }
+
     function openCreateProfileModal() {
         document.getElementById('modalTitle').textContent = "Add Profile";
+        const ratingSec = document.getElementById('contentRatingSection');
+        if (ratingSec) ratingSec.style.display = "block";
         document.getElementById('editProfileId').value = "";
         document.getElementById('profileNameInput').value = "";
-        document.getElementById('profileKidsInput').checked = false;
+        setRatingSliderValue(0);
         
         const pinInput = document.getElementById('profilePinInput');
         pinInput.type = "password";
@@ -476,15 +541,21 @@
         const name = card.dataset.name;
         const color = card.dataset.color;
         const icon = card.dataset.icon;
-        const isKids = card.dataset.kids === '1';
+        const ratingLevel = parseInt(card.dataset.ratingLevel !== undefined ? card.dataset.ratingLevel : (card.dataset.kids === '1' ? '2' : '0'), 10) || 0;
         const hasPin = card.dataset.hasPin === '1';
         const isPrimary = card.dataset.isPrimary === '1';
         const pin = card.dataset.pin || (hasPin ? '••••' : '');
 
-        document.getElementById('modalTitle').textContent = "Edit Profile";
+        const isOwnerEditing = canManage;
+        const ratingSec = document.getElementById('contentRatingSection');
+        if (ratingSec) {
+            ratingSec.style.display = isOwnerEditing ? "block" : "none";
+        }
+
+        document.getElementById('modalTitle').textContent = isOwnerEditing ? "Edit Profile" : "Manage Profile";
         document.getElementById('editProfileId').value = id;
         document.getElementById('profileNameInput').value = name;
-        document.getElementById('profileKidsInput').checked = isKids;
+        setRatingSliderValue(ratingLevel);
         
         const pinInput = document.getElementById('profilePinInput');
         pinInput.type = "password";
@@ -494,8 +565,8 @@
 
         document.getElementById('formError').style.display = "none";
 
-        // Only allow deleting non-primary profiles
-        document.getElementById('deleteProfileBtn').style.display = isPrimary ? "none" : "inline-flex";
+        // Only allow deleting non-primary profiles when owner is editing
+        document.getElementById('deleteProfileBtn').style.display = (isOwnerEditing && !isPrimary) ? "inline-flex" : "none";
 
         // Select matching color swatch
         const colorEl = document.querySelector(`.color-swatch-circle[data-color="${color}"]`) || document.querySelector('.color-swatch-circle');
@@ -510,8 +581,21 @@
         document.getElementById('profileNameInput').focus();
     }
 
+    function openSelfEditModal(e) {
+        if (e) e.preventDefault();
+        if (currentProfileId) {
+            const selfCard = document.querySelector(`.profile-card[data-id="${currentProfileId}"]`);
+            if (selfCard) {
+                openEditProfileModal(selfCard);
+            }
+        }
+    }
+
     function closeProfileModal() {
         document.getElementById('profileEditModal').style.display = "none";
+        if (!canManage && isManageMode) {
+            window.location.href = '/profiles';
+        }
     }
 
     function toggleProfilePinVisibility() {
@@ -532,7 +616,7 @@
         e.preventDefault();
         const id = document.getElementById('editProfileId').value;
         const name = document.getElementById('profileNameInput').value.trim();
-        const isKids = document.getElementById('profileKidsInput').checked;
+        const ratingLevel = parseInt(document.getElementById('profileRatingSlider').value, 10) || 0;
         const pin = document.getElementById('profilePinInput').value.trim();
 
         if (pin && pin !== '__EXISTING_PIN__' && pin !== '••••' && pin !== '••••••••') {
@@ -546,10 +630,14 @@
             name: name,
             avatar_color: activeColor,
             avatar_icon: activeIcon,
-            is_kids: isKids,
             pin: pin,
             remove_pin: !pin
         };
+
+        if (canManage) {
+            payload.rating_level = ratingLevel;
+            payload.is_kids = (ratingLevel === 2);
+        }
 
         const isNew = !id;
         const url = isNew ? '/api/profile/create' : `/api/profile/${id}/update`;
@@ -562,7 +650,11 @@
             });
             const data = await resp.json();
             if (resp.ok && data.success) {
-                window.location.reload();
+                if (!canManage) {
+                    window.location.href = '/profiles';
+                } else {
+                    window.location.reload();
+                }
             } else {
                 showFormError(data.error || "Failed to save profile.");
             }
@@ -580,7 +672,11 @@
             const resp = await fetch(`/api/profile/${id}/delete`, { method: 'POST' });
             const data = await resp.json();
             if (resp.ok && data.success) {
-                window.location.reload();
+                if (!canManage) {
+                    window.location.href = '/profiles';
+                } else {
+                    window.location.reload();
+                }
             } else {
                 showFormError(data.error || "Failed to delete profile.");
             }
@@ -598,6 +694,13 @@
     // Initialize Lucide icons on load and check query parameters
     document.addEventListener('DOMContentLoaded', () => {
         lucide.createIcons();
+        if (isManageMode && !canManage && currentProfileId) {
+            const selfCard = document.querySelector(`.profile-card[data-id="${currentProfileId}"]`);
+            if (selfCard) {
+                openEditProfileModal(selfCard);
+                return;
+            }
+        }
         const urlParams = new URLSearchParams(window.location.search);
         const targetId = urlParams.get('select') || urlParams.get('target');
         if (targetId) {

@@ -33,7 +33,9 @@ class HLSTranscodeWorker:
         audio_track: int,
         start_segment: int,
         hw_profile: str,
-        burn_sub: Optional[int] = None
+        burn_sub: Optional[int] = None,
+        enable_tonemap: bool = False,
+        tonemap_algo: str = "hable"
     ):
         self.session_key = session_key
         self.media_path = media_path
@@ -43,6 +45,8 @@ class HLSTranscodeWorker:
         self.start_segment = start_segment
         self.hw_profile = hw_profile
         self.burn_sub = burn_sub
+        self.enable_tonemap = enable_tonemap
+        self.tonemap_algo = tonemap_algo
         self.process: Optional[subprocess.Popen] = None
         self.last_active: float = time.time()
         self.lock = threading.Lock()
@@ -56,12 +60,19 @@ class HLSTranscodeWorker:
             start_time = self.start_segment * SEGMENT_DURATION
 
             probe = probe_media_streams(self.media_path)
+            is_hdr = probe.get("is_hdr", False)
+            color_transfer = probe.get("color_transfer")
             audio_tracks = probe.get("audio_tracks", [])
             selected_track = audio_tracks[self.audio_track] if (0 <= self.audio_track < len(audio_tracks)) else (audio_tracks[0] if audio_tracks else None)
             track_can_copy = selected_track.get("can_direct_stream", False) if selected_track else False
             
-            # Video stream copy is only possible when no subtitle burn-in is requested
-            can_direct_stream_video = (self.res == "original" and probe.get("can_direct_stream_video", False) and self.burn_sub is None)
+            # Video stream copy is only possible when no subtitle burn-in is requested AND HDR is not being tone mapped to SDR
+            can_direct_stream_video = (
+                self.res == "original" and
+                probe.get("can_direct_stream_video", False) and
+                self.burn_sub is None and
+                not (is_hdr and self.enable_tonemap)
+            )
 
             cmd = [get_ffmpeg_path(), "-v", "error", "-y"]
             if start_time > 0:
@@ -87,7 +98,11 @@ class HLSTranscodeWorker:
                 pipeline_args, v_map, _ = get_video_transcode_pipeline(
                     res=self.res,
                     profile=self.hw_profile,
-                    burn_sub_stream=self.burn_sub
+                    burn_sub_stream=self.burn_sub,
+                    is_hdr=is_hdr,
+                    enable_tonemap=self.enable_tonemap,
+                    color_transfer=color_transfer,
+                    tonemap_algo=self.tonemap_algo
                 )
                 cmd.extend(pipeline_args)
                 cmd.extend(["-map", v_map])
@@ -263,7 +278,8 @@ class HLSManager:
         file_path: str,
         audio_track: int = 0,
         burn_sub: Optional[str] = None,
-        token: Optional[str] = None
+        token: Optional[str] = None,
+        tonemap: Optional[int] = None
     ) -> str:
         """Constructs an HLS Master Playlist listing all available quality variants for ABR."""
         probe = probe_media_streams(file_path)
@@ -299,6 +315,7 @@ class HLSManager:
 
         token_param = f"&token={token}" if token else ""
         sub_param = f"&burn_sub={urllib.parse.quote(str(burn_sub))}" if burn_sub else ""
+        tonemap_param = f"&tonemap={tonemap}" if tonemap is not None else ""
 
         for res_key, w, h, br, name in active_tiers:
             codec_str = 'avc1.640028,mp4a.40.2' if h >= 1080 else 'avc1.4d401f,mp4a.40.2'
@@ -306,7 +323,7 @@ class HLSManager:
                 f'#EXT-X-STREAM-INF:BANDWIDTH={int(br * 1.15)},AVERAGE-BANDWIDTH={int(br)},'
                 f'RESOLUTION={w}x{h},CODECS="{codec_str}",NAME="{name}"'
             )
-            lines.append(f"variant_{res_key}.m3u8?audio_track={audio_track}{sub_param}{token_param}")
+            lines.append(f"variant_{res_key}.m3u8?audio_track={audio_track}{sub_param}{tonemap_param}{token_param}")
             lines.append("")
 
         return "\n".join(lines)
@@ -319,7 +336,8 @@ class HLSManager:
         duration: float,
         audio_track: int = 0,
         burn_sub: Optional[str] = None,
-        token: Optional[str] = None
+        token: Optional[str] = None,
+        tonemap: Optional[int] = None
     ) -> str:
         """Constructs an HLS VOD Media Playlist mapping all segments across total duration."""
         if duration <= 0:
@@ -339,12 +357,13 @@ class HLSManager:
 
         token_param = f"&token={token}" if token else ""
         sub_param = f"&burn_sub={urllib.parse.quote(str(burn_sub))}" if burn_sub else ""
+        tonemap_param = f"&tonemap={tonemap}" if tonemap is not None else ""
 
         for i in range(num_segments):
             seg_start = i * SEGMENT_DURATION
             seg_len = min(SEGMENT_DURATION, duration - seg_start)
             lines.append(f"#EXTINF:{seg_len:.6f},")
-            lines.append(f"segment_{res}_{i}.ts?audio_track={audio_track}{sub_param}{token_param}")
+            lines.append(f"segment_{res}_{i}.ts?audio_track={audio_track}{sub_param}{tonemap_param}{token_param}")
 
         lines.append("#EXT-X-ENDLIST")
         return "\n".join(lines)
@@ -358,22 +377,30 @@ class HLSManager:
         audio_track: int,
         segment_idx: int,
         burn_sub: Optional[str] = None,
-        hw_profile: str = "auto"
+        hw_profile: str = "auto",
+        tonemap: Optional[int] = None,
+        enable_tonemap: bool = False,
+        tonemap_algo: str = "hable"
     ) -> Optional[str]:
         """
         Retrieves a completed .ts segment, spawning or advancing the transcode worker as needed.
         """
         probe = probe_media_streams(file_path)
+        is_hdr = probe.get("is_hdr", False)
+        effective_enable_tonemap = (tonemap == 1) if tonemap is not None else enable_tonemap
+        tm_algo_clean = tonemap_algo.lower().strip() if tonemap_algo else "hable"
+        tm_key = f"_tm_{tm_algo_clean}" if (is_hdr and effective_enable_tonemap) else ""
+
         sub_idx = parse_burn_sub_index(burn_sub, probe.get("subtitle_tracks", []))
         sub_key = f"s{sub_idx}" if sub_idx is not None else "snone"
 
         cache_base = get_hls_cache_dir()
-        session_folder = f"{media_type}_{item_id}_{res}_a{audio_track}_{sub_key}"
+        session_folder = f"{media_type}_{item_id}_{res}_a{audio_track}_{sub_key}{tm_key}"
         output_dir = os.path.join(cache_base, session_folder)
         target_seg = os.path.join(output_dir, f"seg_{segment_idx:04d}.ts")
 
         # 1. If segment already on disk and finalized, return immediately
-        worker_key = f"{media_type}_{item_id}_{res}_{audio_track}_{sub_key}"
+        worker_key = f"{media_type}_{item_id}_{res}_{audio_track}_{sub_key}{tm_key}"
         with self.lock:
             existing_worker = self.workers.get(worker_key)
             if existing_worker:
@@ -420,7 +447,9 @@ class HLSManager:
                     audio_track=audio_track,
                     start_segment=segment_idx,
                     hw_profile=hw_profile,
-                    burn_sub=sub_idx
+                    burn_sub=sub_idx,
+                    enable_tonemap=effective_enable_tonemap,
+                    tonemap_algo=tm_algo_clean
                 )
                 self.workers[worker_key] = worker
                 worker_to_start = worker

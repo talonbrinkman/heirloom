@@ -68,6 +68,11 @@
                         <i data-lucide="sliders"></i>
                         <span>Manage Profiles</span>
                     </a>
+                    {% elif current_profile and not current_profile.is_primary %}
+                    <a href="/profiles?manage=1" class="profile-dropdown-item">
+                        <i data-lucide="pencil"></i>
+                        <span>Manage Profile</span>
+                    </a>
                     {% endif %}
                     <a href="/logout" class="profile-dropdown-item text-danger">
                         <i data-lucide="log-out"></i>
@@ -94,7 +99,7 @@
 
             <a href="/" class="mobile-menu-link">
                 <i data-lucide="home"></i>
-                <span>Dashboard</span>
+                <span>Home</span>
             </a>
 
             {% if has_movies and user.movies_access %}
@@ -127,7 +132,7 @@
             {% if user.is_admin and (current_profile is none or current_profile.is_primary) %}
             <a href="/server-dashboard" class="mobile-menu-link">
                 <i data-lucide="gauge"></i>
-                <span>Server Dashboard</span>
+                <span>Server</span>
                 <span id="mobileServerActivityBadge" class="mobile-menu-badge" style="display: none;">
                     <span id="mobileServerActivityText">Scanning...</span>
                 </span>
@@ -153,6 +158,11 @@
             <a href="/profiles?manage=1" class="mobile-menu-link">
                 <i data-lucide="sliders"></i>
                 <span>Manage Profiles</span>
+            </a>
+            {% elif current_profile and not current_profile.is_primary %}
+            <a href="/profiles?manage=1" class="mobile-menu-link">
+                <i data-lucide="pencil"></i>
+                <span>Manage Profile</span>
             </a>
             {% endif %}
 
@@ -241,9 +251,11 @@
                                     {% else %}
                                     <div class="poster-placeholder"></div>
                                     {% endif %}
+                                    {% if h.progress and h.progress > 0 %}
                                     <div class="progress-bg">
-                                        <div class="progress-fill" style="width: {{ h.progress or 0 }}%;"></div>
+                                        <div class="progress-fill" style="width: {{ h.progress }}%;"></div>
                                     </div>
+                                    {% endif %}
                                 </a>
                                 <a href="/play/{{ h.media_type }}/{{ h.item.id }}" class="icon-btn hover-play">
                                     <i data-lucide="play" fill="currentColor"></i>
@@ -292,7 +304,7 @@
                                     {% endif %}
                                 </div>
                             </div>
-                            <div class="media-title">{{ h.item.title }}</div>
+                            <div class="media-title"><a href="{% if h.media_type == 'tv' %}/series/{{ h.item.title | urlencode }}{% else %}/movie/{{ h.item.id }}{% endif %}">{{ h.item.title }}</a></div>
                             {% if h.item.year %}<div class="media-year">{{ h.item.year | safe }}</div>{% endif %}
                         </div>
                         {% endfor %}
@@ -349,24 +361,22 @@
                                         <button type="submit">Download</button>
                                     </form>
                                     {% endif %}
-                                    <form action="/watchlist/toggle" method="post">
-                                        <input type="hidden" name="media_type" value="{{ r.media_type }}">
-                                        <input type="hidden" name="item_id" value="{{ r.item.id }}">
-                                        <button type="submit">
-                                            {% if (r.media_type == 'movie' and r.item.id in user_watchlist_movies) or
-                                            (r.media_type == 'tv' and r.item.id in user_watchlist_tv) %}
-                                            Remove from Watchlist
-                                            {% else %}
-                                            Add to Watchlist
-                                            {% endif %}
-                                        </button>
+                                    {% if (r.media_type == 'movie' and r.item.id in user_watchlist_movies) or
+                                    (r.media_type == 'tv' and r.item.id in user_watchlist_tv) %}
+                                    <form action="/watchlist/remove_by_item/{{ r.media_type }}/{{ r.item.id }}" method="post">
+                                        <button type="submit">Remove from Watchlist</button>
                                     </form>
+                                    {% else %}
+                                    <form action="/watchlist/add/{{ r.media_type }}/{{ r.item.id }}" method="post">
+                                        <button type="submit">Add to Watchlist</button>
+                                    </form>
+                                    {% endif %}
                                     {% if user.is_admin %}
                                     <button type="button" class="fix-match-btn" data-media-type="{{ r.media_type }}" data-item-id="{{ r.item.id }}" data-title="{{ r.item.title }}" data-year="{{ r.item.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
                                     {% endif %}
                                 </div>
                             </div>
-                            <div class="media-title">{{ r.item.title }}</div>
+                            <div class="media-title"><a href="{% if r.media_type == 'tv' %}/series/{{ r.item.title | urlencode }}{% else %}/movie/{{ r.item.id }}{% endif %}">{{ r.item.title }}</a></div>
                             {% if r.item.year %}<div class="media-year">{{ r.item.year | safe }}</div>{% endif %}
                         </div>
                         {% endfor %}
@@ -431,7 +441,7 @@
                                     {% endif %}
                                 </div>
                             </div>
-                            <div class="media-title">{{ w.item.title }}</div>
+                            <div class="media-title"><a href="{% if w.media_type == 'tv' %}/series/{{ w.item.title | urlencode }}{% else %}/movie/{{ w.item.id }}{% endif %}">{{ w.item.title }}</a></div>
                             {% if w.item.year %}<div class="media-year">{{ w.item.year }}</div>{% endif %}
                         </div>
                         {% endfor %}
@@ -501,7 +511,7 @@
                                     {% endif %}
                                 </div>
                             </div>
-                            <div class="media-title">{{ m.title }}</div>
+                            <div class="media-title"><a href="/movie/{{ m.id }}">{{ m.title }}</a></div>
                             {% if m.year %}<div class="media-year">{{ m.year }}</div>{% endif %}
                         </div>
                         {% endfor %}
@@ -570,7 +580,7 @@
                                     {% endif %}
                                 </div>
                             </div>
-                            <div class="media-title">{{ t.title }}</div>
+                            <div class="media-title"><a href="/series/{{ t.title | urlencode }}">{{ t.title }}</a></div>
                             {% if t.year %}<div class="media-year">{{ t.year | safe }}</div>{% endif %}
                         </div>
                         {% endfor %}
@@ -657,8 +667,8 @@
                                     {% endif %}
                                 </div>
                             </div>
-                            <div class="media-title">{{ album.title }}</div>
-                            <div class="media-year">{{ album.artist_name }}{% if album.year %} &bull; {{ album.year }}{% endif %}</div>
+                            <div class="media-title"><a href="/album/{{ album.id }}?from=/">{{ album.title }}</a></div>
+                            <div class="media-year">{% if album.artist_id %}<a href="/artist/{{ album.artist_id }}">{{ album.artist_name }}</a>{% else %}{{ album.artist_name }}{% endif %}{% if album.year %} &bull; {{ album.year }}{% endif %}</div>
                         </div>
                         {% endfor %}
                     </div>

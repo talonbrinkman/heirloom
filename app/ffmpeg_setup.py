@@ -455,44 +455,108 @@ def parse_burn_sub_index(burn_sub: Optional[Union[str, int]], subtitle_tracks: l
 def get_video_transcode_pipeline(
     res: str = "original",
     profile: str = "auto",
-    burn_sub_stream: Optional[int] = None
+    burn_sub_stream: Optional[int] = None,
+    is_hdr: bool = False,
+    enable_tonemap: Union[bool, str] = False,
+    color_transfer: Optional[str] = None,
+    tonemap_algo: str = "hable"
 ) -> tuple[list[str], str, str]:
     """
     Constructs FFmpeg video encoding parameters, filter graph, and stream mapping.
-    Handles hardware acceleration, resolution downscaling, and dynamic bitmap subtitle burn-in.
+    Handles hardware acceleration, resolution downscaling, dynamic bitmap subtitle burn-in,
+    and real-time HDR to SDR tone mapping with selectable algorithms (Hable, Mobius, Reinhard, Linear, Gamma, Clip).
     Returns: (pipeline_ffmpeg_args, video_map_specifier, encoder_type)
     """
     enc_type, base_args = get_working_encoder(profile)
     
+    # Resolve tone mapping active state and algorithm
+    algo = "hable"
+    if isinstance(enable_tonemap, str):
+        lowered = enable_tonemap.lower().strip()
+        if lowered in ("disabled", "off", "0", "false", "none"):
+            tonemap_active = False
+        else:
+            tonemap_active = bool(is_hdr)
+            algo = lowered if lowered in ("hable", "mobius", "reinhard", "linear", "gamma", "clip") else "hable"
+    else:
+        tonemap_active = bool(is_hdr and enable_tonemap)
+        algo = tonemap_algo.lower().strip() if tonemap_algo and tonemap_algo.lower().strip() in ("hable", "mobius", "reinhard", "linear", "gamma", "clip") else "hable"
+
+    tin = "arib-std-b67" if str(color_transfer or "").lower() == "arib-std-b67" else "smpte2084"
+    tonemap_filter = f"setparams=color_primaries=bt2020:color_trc={tin}:colorspace=bt2020nc,zscale=t=linear:npl=100,tonemap=tonemap={algo}:desat=0.5,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p"
+
     if burn_sub_stream is not None:
         # Dynamic filter_complex pipeline: burns bitmap subtitles directly into video frames
-        if enc_type == "vaapi":
-            if res != "original":
-                fc = f"[0:v:0][0:{burn_sub_stream}]overlay,scale=-2:{res},format=nv12,hwupload[v]"
+        if tonemap_active:
+            if enc_type == "vaapi":
+                if res != "original":
+                    fc = f"[0:v:0]{tonemap_filter}[vtm];[vtm][0:{burn_sub_stream}]overlay,scale=-2:{res},format=nv12,hwupload[v]"
+                else:
+                    fc = f"[0:v:0]{tonemap_filter}[vtm];[vtm][0:{burn_sub_stream}]overlay,format=nv12,hwupload[v]"
+                args = ["-vaapi_device", "/dev/dri/renderD128", "-filter_complex", fc, "-c:v", "h264_vaapi"]
             else:
-                fc = f"[0:v:0][0:{burn_sub_stream}]overlay,format=nv12,hwupload[v]"
-            args = ["-vaapi_device", "/dev/dri/renderD128", "-filter_complex", fc, "-c:v", "h264_vaapi"]
+                if res != "original":
+                    fc = f"[0:v:0]{tonemap_filter}[vtm];[vtm][0:{burn_sub_stream}]overlay,scale=-2:{res},format=yuv420p[v]"
+                else:
+                    fc = f"[0:v:0]{tonemap_filter}[vtm];[vtm][0:{burn_sub_stream}]overlay,format=yuv420p[v]"
+                args = ["-filter_complex", fc] + list(base_args)
         else:
-            if res != "original":
-                fc = f"[0:v:0][0:{burn_sub_stream}]overlay[vsub];[vsub]scale=-2:{res}[v]"
+            if enc_type == "vaapi":
+                if res != "original":
+                    fc = f"[0:v:0][0:{burn_sub_stream}]overlay,scale=-2:{res},format=nv12,hwupload[v]"
+                else:
+                    fc = f"[0:v:0][0:{burn_sub_stream}]overlay,format=nv12,hwupload[v]"
+                args = ["-vaapi_device", "/dev/dri/renderD128", "-filter_complex", fc, "-c:v", "h264_vaapi"]
             else:
-                fc = f"[0:v:0][0:{burn_sub_stream}]overlay[v]"
-            args = ["-filter_complex", fc] + list(base_args)
+                if res != "original":
+                    fc = f"[0:v:0][0:{burn_sub_stream}]overlay[vsub];[vsub]scale=-2:{res}[v]"
+                else:
+                    fc = f"[0:v:0][0:{burn_sub_stream}]overlay[v]"
+                args = ["-filter_complex", fc] + list(base_args)
         return args, "[v]", enc_type
     else:
         # Standard video transcode without subtitle burn-in
-        if res != "original":
+        if tonemap_active:
             if enc_type == "vaapi":
-                args = ["-vaapi_device", "/dev/dri/renderD128", "-vf", f"format=nv12,hwupload,scale_vaapi=-2:{res}", "-c:v", "h264_vaapi"]
+                if res != "original":
+                    vf = f"{tonemap_filter},format=nv12,hwupload,scale_vaapi=-2:{res}"
+                else:
+                    vf = f"{tonemap_filter},format=nv12,hwupload"
+                args = ["-vaapi_device", "/dev/dri/renderD128", "-vf", vf, "-c:v", "h264_vaapi"]
             else:
-                args = list(base_args) + ["-vf", f"scale=-2:{res}"]
+                if res != "original":
+                    vf = f"{tonemap_filter},scale=-2:{res},format=yuv420p"
+                else:
+                    vf = f"{tonemap_filter}"
+                args = list(base_args) + ["-vf", vf]
         else:
-            args = list(base_args)
+            if res != "original":
+                if enc_type == "vaapi":
+                    args = ["-vaapi_device", "/dev/dri/renderD128", "-vf", f"format=nv12,hwupload,scale_vaapi=-2:{res}", "-c:v", "h264_vaapi"]
+                else:
+                    args = list(base_args) + ["-vf", f"scale=-2:{res}"]
+            else:
+                args = list(base_args)
         return args, "0:v:0", enc_type
 
-def get_video_transcode_args(res: str = "original", profile: str = "auto") -> list[str]:
-    """Generates FFmpeg video encoding parameters based on resolution and hardware profile."""
-    args, _, _ = get_video_transcode_pipeline(res=res, profile=profile, burn_sub_stream=None)
+def get_video_transcode_args(
+    res: str = "original",
+    profile: str = "auto",
+    is_hdr: bool = False,
+    enable_tonemap: Union[bool, str] = False,
+    color_transfer: Optional[str] = None,
+    tonemap_algo: str = "hable"
+) -> list[str]:
+    """Generates FFmpeg video encoding parameters based on resolution, hardware profile, and HDR tone mapping algorithm."""
+    args, _, _ = get_video_transcode_pipeline(
+        res=res,
+        profile=profile,
+        burn_sub_stream=None,
+        is_hdr=is_hdr,
+        enable_tonemap=enable_tonemap,
+        color_transfer=color_transfer,
+        tonemap_algo=tonemap_algo
+    )
     return args
 
 _media_probe_cache: dict[str, tuple[float, dict]] = {}
@@ -512,6 +576,12 @@ def probe_media_streams(file_path: str) -> dict:
             "width": None,
             "height": None,
             "duration": None,
+            "is_hdr": False,
+            "hdr_format": None,
+            "color_transfer": None,
+            "color_primaries": None,
+            "color_space": None,
+            "pix_fmt": None,
             "can_direct_stream_video": False,
             "can_direct_stream_audio": False,
             "audio_tracks": [],
@@ -548,6 +618,35 @@ def probe_media_streams(file_path: str) -> dict:
             video_codec = video_stream.get("codec_name", "").lower() if video_stream else None
             width = video_stream.get("width") if video_stream else None
             height = video_stream.get("height") if video_stream else None
+            color_space = video_stream.get("color_space") if video_stream else None
+            color_transfer = video_stream.get("color_transfer") if video_stream else None
+            color_primaries = video_stream.get("color_primaries") if video_stream else None
+            pix_fmt = video_stream.get("pix_fmt") if video_stream else None
+
+            # Detect HDR / Wide Color Gamut metadata:
+            is_hdr = False
+            hdr_format = None
+            transfer_str = str(color_transfer or "").lower()
+            primaries_str = str(color_primaries or "").lower()
+            space_str = str(color_space or "").lower()
+            pix_str = str(pix_fmt or "").lower()
+
+            side_data_list = video_stream.get("side_data_list", []) if video_stream else []
+            for sd in side_data_list:
+                sd_type = str(sd.get("side_data_type", "")).lower()
+                if "mastering display" in sd_type or "content light level" in sd_type or "hdr" in sd_type or "dovi" in sd_type:
+                    is_hdr = True
+                    if "dovi" in sd_type or "dolby vision" in sd_type:
+                        hdr_format = "Dolby Vision"
+
+            if not is_hdr:
+                if transfer_str in ("smpte2084", "arib-std-b67") or "2084" in transfer_str:
+                    is_hdr = True
+                    hdr_format = "HDR10" if (transfer_str == "smpte2084" or "2084" in transfer_str) else "HLG"
+                elif "bt2020" in primaries_str or "bt2020" in space_str:
+                    if any(b in pix_str for b in ("10le", "10be", "p010", "12le", "12be")):
+                        is_hdr = True
+                        hdr_format = "HDR10"
 
             # Audio tracks
             audio_tracks = []
@@ -708,6 +807,12 @@ def probe_media_streams(file_path: str) -> dict:
                 "height": height,
                 "duration": duration,
                 "bitrate": bitrate,
+                "is_hdr": is_hdr,
+                "hdr_format": hdr_format,
+                "color_transfer": color_transfer,
+                "color_primaries": color_primaries,
+                "color_space": color_space,
+                "pix_fmt": pix_fmt,
                 "can_direct_stream_video": can_direct_stream_video,
                 "can_direct_stream_audio": can_direct_stream_audio,
                 "audio_tracks": audio_tracks,
@@ -728,6 +833,12 @@ def probe_media_streams(file_path: str) -> dict:
         "width": None,
         "height": None,
         "duration": None,
+        "is_hdr": False,
+        "hdr_format": None,
+        "color_transfer": None,
+        "color_primaries": None,
+        "color_space": None,
+        "pix_fmt": None,
         "can_direct_stream_video": is_mp4,
         "can_direct_stream_audio": is_mp4,
         "audio_tracks": [

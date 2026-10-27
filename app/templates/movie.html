@@ -45,6 +45,11 @@
                             <i data-lucide="sliders"></i>
                             <span>Manage Profiles</span>
                         </a>
+                        {% elif current_profile and not current_profile.is_primary %}
+                        <a href="/profiles?manage=1" class="profile-dropdown-item">
+                            <i data-lucide="pencil"></i>
+                            <span>Manage Profile</span>
+                        </a>
                         {% endif %}
                         <a href="/logout" class="profile-dropdown-item text-danger">
                             <i data-lucide="log-out"></i>
@@ -83,6 +88,9 @@
                         <div class="metadata-block mt-20 mb-20">
                             {% if movie.director %}
                             <div class="mb-10"><strong style="color: var(--text-primary);">Director:</strong> <span style="color: var(--text-secondary);">{{ movie.director }}</span></div>
+                            {% endif %}
+                            {% if movie.collection_name %}
+                            <div class="mb-10"><strong style="color: var(--text-primary);">Part of:</strong> <a href="/library/movie?view=library&collection={{ movie.collection_name | urlencode }}" class="inline-link" style="color: var(--primary);">{{ movie.collection_name }}</a></div>
                             {% endif %}
                         </div>
                         

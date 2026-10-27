@@ -46,6 +46,11 @@
                         <i data-lucide="sliders"></i>
                         <span>Manage Profiles</span>
                     </a>
+                    {% elif current_profile and not current_profile.is_primary %}
+                    <a href="/profiles?manage=1" class="profile-dropdown-item">
+                        <i data-lucide="pencil"></i>
+                        <span>Manage Profile</span>
+                    </a>
                     {% endif %}
                     <a href="/logout" class="profile-dropdown-item text-danger">
                         <i data-lucide="log-out"></i>
@@ -113,7 +118,7 @@
                                 <i data-lucide="play" fill="currentColor"></i>
                             </button>
                         </div>
-                        <div class="media-title">{{ alb.title }}</div>
+                        <div class="media-title"><a href="/album/{{ alb.id }}?from={{ ('/artist/' ~ artist.id ~ ('?from=' ~ close_url|urlencode if close_url else '')) | urlencode }}">{{ alb.title }}</a></div>
                         <div class="media-year">{{ alb.year or '' }}</div>
                     </div>
                     {% endfor %}

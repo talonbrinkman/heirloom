@@ -335,13 +335,7 @@
                                 {% if u.is_admin %}
                                 <span class="badge"
                                     style="background: rgba(229, 9, 20, 0.2); color: var(--accent); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">ADMIN</span>
-                                {% endif %}
-                                {% if u.kids_mode %}
-                                <span class="badge"
-                                    style="background: rgba(33, 150, 243, 0.2); color: #2196f3; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">KIDS
-                                    MODE</span>
-                                {% endif %}
-                                {% if not u.is_admin and not u.kids_mode %}
+                                {% else %}
                                 <span style="font-size: 0.8rem; color: var(--text-muted);">Standard User</span>
                                 {% endif %}
                             </td>

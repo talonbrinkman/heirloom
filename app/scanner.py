@@ -278,7 +278,17 @@ def extract_date_taken(filepath: str) -> Optional[datetime]:
         except Exception:
             pass
 
-    # 2. Video creation_time via ffprobe
+    # 2. Filename timestamp patterns (fast regex check without spawning subprocess)
+    try:
+        fname = os.path.basename(filepath)
+        match = re.search(r'(20\d\d)[-_]?(0[1-9]|1[0-2])[-_]?(0[1-9]|[12]\d|3[01])', fname)
+        if match:
+            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            return datetime(year, month, day, tzinfo=timezone.utc)
+    except Exception:
+        pass
+
+    # 3. Video creation_time via ffprobe (fallback if filename has no timestamp)
     if ext in (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"):
         try:
             from .ffmpeg_setup import get_ffprobe_path
@@ -307,16 +317,6 @@ def extract_date_taken(filepath: str) -> Optional[datetime]:
                     return dt
         except Exception:
             pass
-
-    # 3. Filename timestamp patterns (e.g. 20230814_123456 or 2023-08-14)
-    try:
-        fname = os.path.basename(filepath)
-        match = re.search(r'(20\d\d)[-_]?(0[1-9]|1[0-2])[-_]?(0[1-9]|[12]\d|3[01])', fname)
-        if match:
-            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
-            return datetime(year, month, day, tzinfo=timezone.utc)
-    except Exception:
-        pass
 
     # 4. Filesystem timestamp
     try:
@@ -617,11 +617,25 @@ async def async_fetch_additional_details(client: Any, tmdb_id: int, media_type: 
 
             videos = data.get("videos", {}).get("results", [])
             trailer_key = extract_tmdb_trailer_key(videos)
+
+            collection_id = None
+            collection_name = None
+            collection_poster = None
+            collection_backdrop = None
+            if media_type == "movie":
+                col_data = data.get("belongs_to_collection")
+                if col_data and isinstance(col_data, dict):
+                    collection_id = col_data.get("id")
+                    collection_name = col_data.get("name")
+                    if col_data.get("poster_path"):
+                        collection_poster = await async_download_image(client, col_data.get("poster_path"), "collection", collection_id, "poster")
+                    if col_data.get("backdrop_path"):
+                        collection_backdrop = await async_download_image(client, col_data.get("backdrop_path"), "collection", collection_id, "backdrop")
                             
-            return cast_str, dir_str, content_rating, genres_str, trailer_key
+            return cast_str, dir_str, content_rating, genres_str, trailer_key, collection_id, collection_name, collection_poster, collection_backdrop
     except Exception:
         pass
-    return None, None, None, None, None
+    return None, None, None, None, None, None, None, None, None
 
 async def async_extract_chapter_markers(file_path: str):
     """Non-blocking chapter marker extraction using asyncio.create_subprocess_exec with polite process priority."""
@@ -1214,7 +1228,7 @@ class ScannerManager:
             if not self.is_scanning or self._abort_event.is_set():
                 return False
             now = time.time()
-            if now - self.last_validity_check < 3.0:
+            if now - self.last_validity_check < 10.0:
                 return True
             self.last_validity_check = now
             if not self.scanned_volumes:
@@ -1689,8 +1703,8 @@ class ScannerManager:
                 self.last_summary = "All media libraries are up to date."
             return
 
-        # 4. Async processing with HTTP connection pool and concurrency semaphore
-        semaphore = asyncio.Semaphore(4)
+        # 4. Async processing with HTTP connection pool and cooperative concurrency semaphore
+        semaphore = asyncio.Semaphore(2)
         from contextlib import asynccontextmanager
 
         @asynccontextmanager
@@ -1723,6 +1737,7 @@ class ScannerManager:
                 cast, director = None, None
                 rating, content_rating, genres_str = None, None, None
                 tmdb_id, trailer_key = None, None
+                col_id, col_name, col_poster, col_backdrop = None, None, None, None
 
                 if tmdb_api_key:
                     params = {"query": search_title, "api_key": tmdb_api_key}
@@ -1743,28 +1758,29 @@ class ScannerManager:
                             search_title = data.get("title", search_title)
                             year = data.get("release_date", "")[:4]
                             
-                            cast, director, content_rating, genres_str, trailer_key = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_api_key)
+                            cast, director, content_rating, genres_str, trailer_key, col_id, col_name, col_poster, col_backdrop = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_api_key)
                     except Exception as e:
                         print(f"[Scanner] Movie TMDB lookup failed for {search_title}: {e}")
-
-                intro_s, intro_e, cred_s, cred_e = await async_extract_chapter_markers(full_path)
 
                 batch_movies.append(Movie(
                     title=search_title, file_path=full_path, year=year,
                     plot=plot, poster_filename=poster_filename,
                     backdrop_filename=backdrop_filename, cast=cast, director=director, rating=rating,
                     content_rating=content_rating, genres=genres_str,
-                    intro_start=intro_s, intro_end=intro_e, credits_start=cred_s, credits_end=cred_e,
-                    trailer_key=trailer_key, tmdb_id=tmdb_id
+                    intro_start=None, intro_end=None, credits_start=None, credits_end=None,
+                    trailer_key=trailer_key, tmdb_id=tmdb_id,
+                    collection_id=col_id, collection_name=col_name,
+                    collection_poster_filename=col_poster,
+                    collection_backdrop_filename=col_backdrop
                 ))
 
                 with self._lock:
                     self.items_scanned += 1
 
-                # Polite yield between movies
-                await asyncio.sleep(0.02)
+                # Polite cooperative yield between movies
+                await asyncio.sleep(0.01)
 
-                if len(batch_movies) >= 10:
+                if len(batch_movies) >= 50:
                     with Session(engine) as session:
                         for m in batch_movies:
                             if not session.exec(select(Movie.id).where(Movie.file_path == m.file_path)).first():
@@ -1775,7 +1791,7 @@ class ScannerManager:
                             session.rollback()
                             print(f"[Scanner] Error committing movie batch: {e}")
                     batch_movies.clear()
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.15)
 
             if batch_movies:
                 with Session(engine) as session:
@@ -1788,7 +1804,41 @@ class ScannerManager:
                         session.rollback()
                         print(f"[Scanner] Error committing final movie batch: {e}")
                 batch_movies.clear()
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.15)
+
+            # 4A-2. Enrich existing movies with missing collection information if tmdb_id is present
+            if tmdb_api_key and not self._abort_event.is_set():
+                def _get_unenriched_movies():
+                    with Session(engine) as session:
+                        return session.exec(
+                            select(Movie.id, Movie.tmdb_id).where(
+                                Movie.tmdb_id != None,
+                                Movie.collection_id == None
+                            ).limit(50)
+                        ).all()
+                unenriched = await asyncio.to_thread(_get_unenriched_movies)
+                if unenriched:
+                    for mid, m_tmdb_id in unenriched:
+                        if self._abort_event.is_set() or not self.check_scan_necessary():
+                            break
+                        try:
+                            _, _, _, _, _, col_id, col_name, col_poster, col_backdrop = await async_fetch_additional_details(client, m_tmdb_id, "movie", tmdb_api_key)
+                            def _save_col(mid=mid, col_id=col_id, col_name=col_name, col_poster=col_poster, col_backdrop=col_backdrop):
+                                with Session(engine) as session:
+                                    m_rec = session.get(Movie, mid)
+                                    if m_rec:
+                                        m_rec.collection_id = col_id if col_id else 0
+                                        m_rec.collection_name = col_name
+                                        if col_poster:
+                                            m_rec.collection_poster_filename = col_poster
+                                        if col_backdrop:
+                                            m_rec.collection_backdrop_filename = col_backdrop
+                                        session.add(m_rec)
+                                        session.commit()
+                            await asyncio.to_thread(_save_col)
+                            await asyncio.sleep(0.05)
+                        except Exception:
+                            pass
 
             # 4B. Scan TV Shows
             batch_shows = []
@@ -1854,7 +1904,7 @@ class ScannerManager:
                             if not year:
                                 year = data.get("first_air_date", "")[:4]
                                 
-                            cast, director, content_rating, genres_str, _ = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_api_key)
+                            cast, director, content_rating, genres_str, _, _, _, _, _ = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_api_key)
                             
                             if season is not None:
                                 s_res = await client.get(
@@ -1868,24 +1918,22 @@ class ScannerManager:
                     except Exception as e:
                         print(f"[Scanner] TV TMDB lookup failed for {search_title}: {e}")
 
-                intro_s, intro_e, cred_s, cred_e = await async_extract_chapter_markers(full_path)
-
                 batch_shows.append(TVShow(
                     title=search_title, file_path=full_path, year=year,
                     plot=plot, poster_filename=poster_filename,
                     backdrop_filename=backdrop_filename, cast=cast, director=director, rating=rating,
                     season=season, episode=episode, season_poster_filename=season_poster_filename,
                     content_rating=content_rating, genres=genres_str,
-                    intro_start=intro_s, intro_end=intro_e, credits_start=cred_s, credits_end=cred_e
+                    intro_start=None, intro_end=None, credits_start=None, credits_end=None
                 ))
 
                 with self._lock:
                     self.items_scanned += 1
 
-                # Polite yield between TV episodes
-                await asyncio.sleep(0.02)
+                # Polite cooperative yield between TV episodes
+                await asyncio.sleep(0.01)
 
-                if len(batch_shows) >= 20:
+                if len(batch_shows) >= 100:
                     with Session(engine) as session:
                         for s in batch_shows:
                             if not session.exec(select(TVShow.id).where(TVShow.file_path == s.file_path)).first():
@@ -1896,7 +1944,7 @@ class ScannerManager:
                             session.rollback()
                             print(f"[Scanner] Error committing TV batch: {e}")
                     batch_shows.clear()
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.15)
 
             if batch_shows:
                 with Session(engine) as session:
@@ -1909,7 +1957,7 @@ class ScannerManager:
                         session.rollback()
                         print(f"[Scanner] Error committing final TV batch: {e}")
                 batch_shows.clear()
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.15)
 
             # 4C. Scan Photos & Home Videos
             batch_photos = []
@@ -1952,10 +2000,10 @@ class ScannerManager:
                 with self._lock:
                     self.items_scanned += 1
 
-                # Polite yield between photos / home videos
-                await asyncio.sleep(0.03)
+                # Polite cooperative yield between photos / home videos
+                await asyncio.sleep(0.01)
 
-                if len(batch_photos) >= 30:
+                if len(batch_photos) >= 100:
                     with Session(engine) as session:
                         for p_data in batch_photos:
                             existing = session.exec(select(Photo).where(Photo.file_path == p_data["file_path"])).first()
@@ -1986,7 +2034,7 @@ class ScannerManager:
                             session.rollback()
                             print(f"[Scanner] Error committing photo batch: {e}")
                     batch_photos.clear()
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.15)
 
             if batch_photos:
                 with Session(engine) as session:
@@ -2019,7 +2067,7 @@ class ScannerManager:
                         session.rollback()
                         print(f"[Scanner] Error committing final photo batch: {e}")
                 batch_photos.clear()
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.15)
 
             # 4D. Scan Music Library (File-First with TheAudioDB enrichment)
             batch_tracks = []
@@ -2055,18 +2103,18 @@ class ScannerManager:
                 with self._lock:
                     self.items_scanned += 1
 
-                # Polite yield between audio tracks
-                await asyncio.sleep(0.02)
+                # Polite cooperative yield between audio tracks
+                await asyncio.sleep(0.01)
 
-                if len(batch_tracks) >= 25:
+                if len(batch_tracks) >= 50:
                     await self._commit_music_batch(batch_tracks, artists_to_enrich, albums_to_enrich)
                     batch_tracks.clear()
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.15)
 
             if batch_tracks:
                 await self._commit_music_batch(batch_tracks, artists_to_enrich, albums_to_enrich)
                 batch_tracks.clear()
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.15)
 
             # Optional Online Enrichment via TheAudioDB (Throttled for 30 req/min free-tier limit)
             if theaudiodb_api_key and theaudiodb_api_key != "disabled":
@@ -2127,6 +2175,8 @@ class ScannerManager:
     async def _commit_music_batch(self, batch_tracks, artists_to_enrich, albums_to_enrich):
         def _commit():
             with Session(engine) as session:
+                artist_cache = {}
+                album_cache = {}
                 for item in batch_tracks:
                     meta = item["meta"]
                     fpath = item["full_path"]
@@ -2138,61 +2188,65 @@ class ScannerManager:
                         # 1. Match or Create Primary Artist (always normalized, case-insensitive match)
                         raw_artist_name = meta.get("album_artist") or meta.get("artist") or "Unknown Artist"
                         primary_artist_name = normalize_artist_name(raw_artist_name)
+                        norm_art_key = primary_artist_name.lower()
 
-                        # Match case-insensitively to prevent duplicates like 'Korn' vs 'KoRn'
-                        artist = session.exec(
-                            select(Artist).where(func.lower(Artist.name) == primary_artist_name.lower())
-                        ).first()
+                        artist = artist_cache.get(norm_art_key)
                         if not artist:
-                            artist = Artist(name=primary_artist_name)
-                            session.add(artist)
-                            session.commit()
-                            session.refresh(artist)
-                            artists_to_enrich.add((artist.id, artist.name))
-                        elif not artist.bio or not artist.thumbnail_filename:
-                            artists_to_enrich.add((artist.id, artist.name))
+                            artist = session.exec(
+                                select(Artist).where(func.lower(Artist.name) == norm_art_key)
+                            ).first()
+                            if not artist:
+                                artist = Artist(name=primary_artist_name)
+                                session.add(artist)
+                                session.flush()
+                                artists_to_enrich.add((artist.id, artist.name))
+                            elif not artist.bio or not artist.thumbnail_filename:
+                                artists_to_enrich.add((artist.id, artist.name))
+                            artist_cache[norm_art_key] = artist
 
                         # 2. Match or Create Album (case-insensitive title under primary artist)
                         raw_album_title = (meta.get("album") or "Unknown Album").strip()
                         album_title, disc_from_title = normalize_album_title(raw_album_title)
                         if disc_from_title and (not meta.get("disc_number") or meta.get("disc_number") == 1):
                             meta["disc_number"] = disc_from_title
-                        album = session.exec(
-                            select(Album).where(
-                                func.lower(Album.title) == album_title.lower(),
-                                Album.artist_id == artist.id
-                            )
-                        ).first()
+                        norm_alb_key = (artist.id, album_title.lower())
+                        album = album_cache.get(norm_alb_key)
                         if not album:
-                            album = Album(
-                                title=album_title,
-                                artist_id=artist.id,
-                                artist_name=artist.name,
-                                year=meta.get("year"),
-                                genre=meta.get("genre"),
-                                cover_filename=meta.get("cover_filename")
-                            )
-                            session.add(album)
-                            session.commit()
-                            session.refresh(album)
-                            if not album.cover_filename:
-                                albums_to_enrich.add((album.id, artist.name, album.title))
-                        else:
-                            dirty_alb = False
-                            if not album.cover_filename and meta.get("cover_filename"):
-                                album.cover_filename = meta["cover_filename"]
-                                dirty_alb = True
-                            if not album.year and meta.get("year"):
-                                album.year = meta["year"]
-                                dirty_alb = True
-                            if not album.genre and meta.get("genre"):
-                                album.genre = meta["genre"]
-                                dirty_alb = True
-                            if dirty_alb:
+                            album = session.exec(
+                                select(Album).where(
+                                    func.lower(Album.title) == album_title.lower(),
+                                    Album.artist_id == artist.id
+                                )
+                            ).first()
+                            if not album:
+                                album = Album(
+                                    title=album_title,
+                                    artist_id=artist.id,
+                                    artist_name=artist.name,
+                                    year=meta.get("year"),
+                                    genre=meta.get("genre"),
+                                    cover_filename=meta.get("cover_filename")
+                                )
                                 session.add(album)
-                                session.commit()
-                            elif not album.cover_filename:
-                                albums_to_enrich.add((album.id, artist.name, album.title))
+                                session.flush()
+                                if not album.cover_filename:
+                                    albums_to_enrich.add((album.id, artist.name, album.title))
+                            else:
+                                dirty_alb = False
+                                if not album.cover_filename and meta.get("cover_filename"):
+                                    album.cover_filename = meta["cover_filename"]
+                                    dirty_alb = True
+                                if not album.year and meta.get("year"):
+                                    album.year = meta["year"]
+                                    dirty_alb = True
+                                if not album.genre and meta.get("genre"):
+                                    album.genre = meta["genre"]
+                                    dirty_alb = True
+                                if dirty_alb:
+                                    session.add(album)
+                                elif not album.cover_filename:
+                                    albums_to_enrich.add((album.id, artist.name, album.title))
+                            album_cache[norm_alb_key] = album
 
                         # 3. Add or Update Track
                         existing_trk = session.exec(select(Track).where(Track.file_path == fpath)).first()
@@ -2233,12 +2287,14 @@ class ScannerManager:
                             if cover_art and not existing_trk.cover_filename:
                                 existing_trk.cover_filename = cover_art
                             session.add(existing_trk)
-
-                        session.commit()
                     except Exception as e:
-                        session.rollback()
-                        print(f"[Scanner] Error committing track {fpath}: {e}")
+                        print(f"[Scanner] Error processing track {fpath}: {e}")
 
+                try:
+                    session.commit()
+                except Exception as e:
+                    session.rollback()
+                    print(f"[Scanner] Error committing music batch: {e}")
         await asyncio.to_thread(_commit)
 
 # -----------------------------------------------------------------------------

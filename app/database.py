@@ -121,6 +121,21 @@ def create_db_and_tables():
             except Exception:
                 session.rollback()
 
+        # Migrations for Collection metadata
+        col_migrations = [
+            ("movie", "collection_id", "INTEGER"),
+            ("movie", "collection_name", "VARCHAR"),
+            ("movie", "collection_poster_filename", "VARCHAR"),
+            ("movie", "collection_backdrop_filename", "VARCHAR"),
+            ("tvshow", "collection_name", "VARCHAR"),
+        ]
+        for tbl, col, dt in col_migrations:
+            try:
+                session.exec(text(f"ALTER TABLE {tbl} ADD COLUMN {col} {dt}"))
+                session.commit()
+            except Exception:
+                session.rollback()
+
         # Migrations for WatchHistory current_time and duration
         for col in ["current_time", "duration"]:
             try:
@@ -253,6 +268,13 @@ def create_db_and_tables():
         except Exception:
             session.rollback()
 
+        try:
+            session.exec(text("ALTER TABLE profile ADD COLUMN rating_level INTEGER DEFAULT 0"))
+            session.exec(text("UPDATE profile SET rating_level = 2 WHERE is_kids = 1"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
         # InviteCode permissions migration
         for col, dt, default in [
             ("movies_access", "BOOLEAN", 0),
@@ -324,6 +346,24 @@ def create_db_and_tables():
                     session.exec(text(f"UPDATE watchhistory SET profile_id = {existing_profile.id} WHERE user_id = {u.id} AND profile_id IS NULL"))
                     session.exec(text(f"UPDATE watchlist SET profile_id = {existing_profile.id} WHERE user_id = {u.id} AND profile_id IS NULL"))
                     session.commit()
+        except Exception:
+            session.rollback()
+
+        # Clean up any duplicate watch history entries, retaining the newest record
+        try:
+            session.exec(text("""
+                DELETE FROM watchhistory 
+                WHERE id NOT IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY user_id, media_type, item_id 
+                            ORDER BY last_watched DESC, id DESC
+                        ) as rn 
+                        FROM watchhistory
+                    ) WHERE rn = 1
+                )
+            """))
+            session.commit()
         except Exception:
             session.rollback()
 

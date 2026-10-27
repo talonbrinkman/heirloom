@@ -131,6 +131,36 @@
             userFormTimers.set(formKey, timer);
         }
 
+        let transcodeSaveTimer = null;
+        function autoSaveTranscodeSettings() {
+            const form = document.getElementById('transcodeSettingsForm');
+            if (!form) return;
+            const formData = new FormData(form);
+            const statusEl = document.getElementById('transcodeSaveStatus');
+
+            fetch(form.action, {
+                method: 'POST',
+                body: formData
+            })
+            .then(res => {
+                if (res.ok) {
+                    if (statusEl) {
+                        statusEl.style.display = 'inline-flex';
+                        if (window.lucide) lucide.createIcons();
+                        clearTimeout(transcodeSaveTimer);
+                        transcodeSaveTimer = setTimeout(() => {
+                            statusEl.style.display = 'none';
+                        }, 2500);
+                    }
+                } else {
+                    console.error('Failed to save transcoding settings');
+                }
+            })
+            .catch(err => {
+                console.error('Error saving transcoding settings:', err);
+            });
+        }
+
         let currentDirPath = "";
         async function openDirBrowser() {
             document.getElementById('dirModal').style.display = 'flex';
@@ -653,10 +683,6 @@
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         u.watch_together_access %}checked{% endif %}>
                                     <span>Watch Together</span></label>
-                                <label class="toggle-pill"><input type="checkbox" name="kids_mode"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.kids_mode
-                                        %}checked{% endif %}>
-                                    <span>Kids Only</span></label>
                                 <label class="toggle-pill"><input type="checkbox" name="can_manage_profiles"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         u.can_manage_profiles %}checked{% endif %}>
@@ -722,10 +748,6 @@
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         invite.watch_together_access %}checked{% endif %}>
                                     <span>Watch Together</span></label>
-                                <label class="toggle-pill"><input type="checkbox" name="kids_mode"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if invite.kids_mode
-                                        %}checked{% endif %}>
-                                    <span>Kids Only</span></label>
                                 <label class="toggle-pill"><input type="checkbox" name="can_manage_profiles"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         invite.can_manage_profiles %}checked{% endif %}>
@@ -825,26 +847,46 @@
         </div>
 
         <div class="card">
-            <h2 class="mt-0">Hardware Accelerated Transcoding</h2>
-            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Select a hardware encoder if your server supports it
-                to reduce CPU usage when streaming to unsupported devices or at lower resolutions.</p>
-            <form action="/settings/transcoding" method="post" onsubmit="submitSaveForm(event)"
-                class="flex gap-10 align-center m-0">
-                <select name="hw_accel_profile" class="select-input flex-1 m-0">
-                    <option value="auto" {% if hw_accel_profile=='auto' or not hw_accel_profile %}selected{% endif %}>
-                        Auto (Detect best available)</option>
-                    <option value="software" {% if hw_accel_profile=='software' %}selected{% endif %}>Software (CPU /
-                        libx264)</option>
-                    <option value="nvenc" {% if hw_accel_profile=='nvenc' %}selected{% endif %}>NVIDIA NVENC
-                        (h264_nvenc)</option>
-                    <option value="qsv" {% if hw_accel_profile=='qsv' %}selected{% endif %}>Intel QuickSync (h264_qsv)
-                    </option>
-                    <option value="vaapi" {% if hw_accel_profile=='vaapi' %}selected{% endif %}>VA-API (h264_vaapi)
-                    </option>
-                    <option value="videotoolbox" {% if hw_accel_profile=='videotoolbox' %}selected{% endif %}>Apple
-                        VideoToolbox (h264_videotoolbox)</option>
-                </select>
-                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
+            <div class="flex align-center justify-between mt-0 mb-15">
+                <h2 class="m-0">Transcoding & Processing</h2>
+                <span id="transcodeSaveStatus" style="display: none; color: #4ade80; font-size: 0.9em; font-weight: 500;" class="align-center gap-5">
+                    <i data-lucide="check" style="width: 16px; height: 16px;"></i> Saved
+                </span>
+            </div>
+            <form id="transcodeSettingsForm" action="/settings/transcoding" method="post" class="m-0">
+                <div class="mb-20">
+                    <label style="font-weight: 600; display: block; margin-bottom: 6px;">Hardware Encoder</label>
+                    <p style="color: #ccc; font-size: 0.9em;" class="mb-10">Select a hardware encoder if your server supports it
+                        to reduce CPU usage when streaming to unsupported devices or at lower resolutions.</p>
+                    <select name="hw_accel_profile" class="select-input w-100 m-0" onchange="autoSaveTranscodeSettings()">
+                        <option value="auto" {% if hw_accel_profile=='auto' or not hw_accel_profile %}selected{% endif %}>
+                            Auto (Detect best available)</option>
+                        <option value="software" {% if hw_accel_profile=='software' %}selected{% endif %}>Software (CPU /
+                            libx264)</option>
+                        <option value="nvenc" {% if hw_accel_profile=='nvenc' %}selected{% endif %}>NVIDIA NVENC
+                            (h264_nvenc)</option>
+                        <option value="qsv" {% if hw_accel_profile=='qsv' %}selected{% endif %}>Intel QuickSync (h264_qsv)
+                        </option>
+                        <option value="vaapi" {% if hw_accel_profile=='vaapi' %}selected{% endif %}>VA-API (h264_vaapi)
+                        </option>
+                        <option value="videotoolbox" {% if hw_accel_profile=='videotoolbox' %}selected{% endif %}>Apple
+                            VideoToolbox (h264_videotoolbox)</option>
+                    </select>
+                </div>
+
+                <div class="mb-10">
+                    <label style="font-weight: 600; display: block; margin-bottom: 6px;">Real-Time HDR to SDR Tone Mapping</label>
+                    <p style="color: #ccc; font-size: 0.9em;" class="mb-10">Automatically maps high dynamic range colors (BT.2020 PQ / HLG / HDR10) into standard dynamic range (BT.709 SDR) when transcoding to eliminate washed-out, grayish colors on non-HDR displays.</p>
+                    <select name="hdr_tonemapping" id="hdr_tonemapping" class="select-input w-100 m-0" onchange="autoSaveTranscodeSettings()">
+                        <option value="disabled" {% if hdr_tonemapping == 'disabled' %}selected{% endif %}>Disabled (Passthrough / No Tone Mapping)</option>
+                        <option value="hable" {% if hdr_tonemapping == 'hable' or hdr_tonemapping == 'true' or not hdr_tonemapping %}selected{% endif %}>Hable (Filmic - Recommended / Plex Default)</option>
+                        <option value="mobius" {% if hdr_tonemapping == 'mobius' %}selected{% endif %}>Mobius (Preserves Saturated Highlights)</option>
+                        <option value="reinhard" {% if hdr_tonemapping == 'reinhard' %}selected{% endif %}>Reinhard (Preserves Shadow Details)</option>
+                        <option value="linear" {% if hdr_tonemapping == 'linear' %}selected{% endif %}>Linear (Perceptually Linear Stretch)</option>
+                        <option value="gamma" {% if hdr_tonemapping == 'gamma' %}selected{% endif %}>Gamma (Contrast Preservation)</option>
+                        <option value="clip" {% if hdr_tonemapping == 'clip' %}selected{% endif %}>Clip (Hard Clip Luminance)</option>
+                    </select>
+                </div>
             </form>
         </div>
         {% endif %}
@@ -855,7 +897,7 @@
             </form>
         </div>
         <div style="text-align: center; color: #888; font-size: 0.8em; margin-top: 10px;">
-            <strong>v1.4.0</strong>
+            <strong>v1.5.1</strong>
         </div>
     </div>
 

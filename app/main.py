@@ -17,6 +17,7 @@ import zipfile
 import hmac
 import hashlib
 import urllib.parse
+import random
 from collections import defaultdict, Counter
 from datetime import datetime, timezone, timedelta
 from .database import create_db_and_tables, get_session, engine
@@ -314,12 +315,40 @@ def make_profile_unlock_token(profile_id: int, user_session_token: str) -> str:
         return ""
     return hmac.new(user_session_token.encode('utf-8'), str(profile_id).encode('utf-8'), hashlib.sha256).hexdigest()[:32]
 
+CHILD_SAFE_RATINGS = {"G", "PG", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G", "TV-PG"}
+TEEN_SAFE_RATINGS = {"G", "PG", "PG-13", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G", "TV-PG", "TV-14"}
+
+def is_rating_allowed(rating: Optional[str], rating_level: int) -> bool:
+    """
+    Checks if a media item's content rating is permitted for the given rating level:
+    - 0: Adult (Unrestricted / all content allowed)
+    - 1: Teen (Up to PG-13 & TV-14)
+    - 2: Child (Up to PG & TV-PG)
+    """
+    if rating_level <= 0:
+        return True
+    if not rating:
+        return False
+    norm = rating.strip().upper()
+    if rating_level == 1:
+        return norm in TEEN_SAFE_RATINGS
+    if rating_level >= 2:
+        return norm in CHILD_SAFE_RATINGS
+    return True
+
+def is_kids_safe(rating: Optional[str]) -> bool:
+    return is_rating_allowed(rating, 2)
+
+def get_profile_rating_level(user: Optional[User], profile: Optional[Profile]) -> int:
+    if profile:
+        if getattr(profile, "rating_level", None) is not None:
+            return profile.rating_level
+        if getattr(profile, "is_kids", False):
+            return 2
+    return 0
+
 def is_profile_kids(user: Optional[User], profile: Optional[Profile]) -> bool:
-    if profile and profile.is_kids:
-        return True
-    if user and user.kids_mode:
-        return True
-    return False
+    return get_profile_rating_level(user, profile) >= 2
 
 def is_actual_admin(user: Optional[User], profile: Optional[Profile]) -> bool:
     if not user or not user.is_admin:
@@ -693,7 +722,7 @@ async def process_register(request: Request, username: str = Form(...), password
         music_access=bool(invite.music_access),
         downloads_access=bool(invite.downloads_access),
         watch_together_access=bool(invite.watch_together_access),
-        kids_mode=bool(invite.kids_mode),
+        kids_mode=False,
         can_manage_profiles=bool(invite.can_manage_profiles)
     )
     session.add(new_user)
@@ -750,20 +779,23 @@ async def view_profiles(
     active_id = request.cookies.get("active_profile_id")
     is_household_manager = bool(current_profile and current_profile.is_primary)
     can_manage = bool(is_household_manager and (current_user.is_admin or current_user.can_manage_profiles))
-    manage_mode = (request.query_params.get("manage") == "1") and can_manage
+    can_manage_self = bool(current_profile and not is_household_manager)
+    manage_mode = (request.query_params.get("manage") == "1") and (can_manage or can_manage_self)
 
     profile_data = []
     for p in profiles:
+        can_view_pin = (manage_mode and p.pin_hash and (can_manage or (can_manage_self and current_profile and current_profile.id == p.id)))
         profile_data.append({
             "id": p.id,
             "name": p.name,
             "avatar_color": p.avatar_color,
             "avatar_icon": p.avatar_icon or "user",
             "is_primary": p.is_primary,
-            "is_kids": p.is_kids,
+            "is_kids": (p.rating_level == 2 if p.rating_level is not None else p.is_kids),
+            "rating_level": p.rating_level if p.rating_level is not None else (2 if p.is_kids else 0),
             "has_pin": bool(p.pin_hash),
             "pin_hash": p.pin_hash,
-            "pin": (p.pin or "__EXISTING_PIN__") if (manage_mode and p.pin_hash) else "",
+            "pin": (p.pin or "__EXISTING_PIN__") if can_view_pin else "",
             "rewind_seconds": p.rewind_seconds or 0
         })
 
@@ -772,6 +804,7 @@ async def view_profiles(
         "current_profile": current_profile,
         "profiles": profile_data,
         "can_manage": can_manage,
+        "can_manage_self": can_manage_self,
         "manage_mode": manage_mode,
         "active_profile_id": int(active_id) if (active_id and active_id.isdigit()) else None
     })
@@ -790,7 +823,8 @@ async def list_profiles(
         "avatar_color": p.avatar_color,
         "avatar_icon": p.avatar_icon or "user",
         "is_primary": p.is_primary,
-        "is_kids": p.is_kids,
+        "is_kids": (p.rating_level == 2 if p.rating_level is not None else p.is_kids),
+        "rating_level": p.rating_level if p.rating_level is not None else (2 if p.is_kids else 0),
         "has_pin": bool(p.pin_hash),
         "rewind_seconds": p.rewind_seconds or 0
     } for p in profiles]
@@ -915,6 +949,7 @@ class CreateProfileRequest(BaseModel):
     name: str
     avatar_color: Optional[str] = "#e50914"
     avatar_icon: Optional[str] = "user"
+    rating_level: Optional[int] = 0
     is_kids: Optional[bool] = False
     pin: Optional[str] = None
     rewind_seconds: Optional[int] = 0
@@ -948,13 +983,16 @@ async def create_profile(
             return JSONResponse(status_code=400, content={"success": False, "error": "PIN must be 4 to 15 numeric digits."})
         pin_hash = hash_pin(pin_val)
 
+    r_level = body.rating_level if body.rating_level is not None else (2 if body.is_kids else 0)
+    is_kids = (r_level == 2)
     new_profile = Profile(
         user_id=current_user.id,
         name=name,
         avatar_color=body.avatar_color or "#e50914",
         avatar_icon=body.avatar_icon or "user",
         is_primary=False,
-        is_kids=bool(body.is_kids),
+        is_kids=is_kids,
+        rating_level=r_level,
         pin=pin_val if pin_hash else None,
         pin_hash=pin_hash,
         rewind_seconds=0
@@ -972,6 +1010,7 @@ async def create_profile(
             "avatar_icon": new_profile.avatar_icon,
             "is_primary": new_profile.is_primary,
             "is_kids": new_profile.is_kids,
+            "rating_level": new_profile.rating_level,
             "has_pin": bool(new_profile.pin_hash),
             "rewind_seconds": new_profile.rewind_seconds
         }
@@ -981,6 +1020,7 @@ class UpdateProfileRequest(BaseModel):
     name: str
     avatar_color: Optional[str] = "#e50914"
     avatar_icon: Optional[str] = "user"
+    rating_level: Optional[int] = None
     is_kids: Optional[bool] = False
     pin: Optional[str] = None
     remove_pin: Optional[bool] = False
@@ -1001,9 +1041,11 @@ async def update_profile(
     if not profile or profile.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Profile not found")
 
-    is_household_manager = bool(current_profile and current_profile.is_primary)
-    if not is_household_manager or not (current_user.is_admin or current_user.can_manage_profiles):
-        raise HTTPException(status_code=403, detail="Only household managers can manage profiles.")
+    is_household_manager = bool(current_profile and current_profile.is_primary) and (current_user.is_admin or current_user.can_manage_profiles)
+    is_self = bool(current_profile and profile.id == current_profile.id)
+
+    if not is_household_manager and not is_self:
+        raise HTTPException(status_code=403, detail="You do not have permission to manage this profile.")
 
     name = body.name.strip()
     if not name or len(name) > 30:
@@ -1012,7 +1054,15 @@ async def update_profile(
     profile.name = name
     profile.avatar_color = body.avatar_color or profile.avatar_color
     profile.avatar_icon = body.avatar_icon or profile.avatar_icon
-    profile.is_kids = bool(body.is_kids)
+
+    # Content rating can ONLY be changed by household managers
+    if is_household_manager:
+        if body.rating_level is not None:
+            profile.rating_level = body.rating_level
+            profile.is_kids = (body.rating_level == 2)
+        elif body.is_kids is not None:
+            profile.is_kids = bool(body.is_kids)
+            profile.rating_level = 2 if body.is_kids else 0
 
     if body.remove_pin or (body.pin is not None and not body.pin.strip()):
         profile.pin = None
@@ -1161,9 +1211,470 @@ def process_tv_shows(shows):
         result.append(item)
     return result
 
-def is_kids_safe(rating: str) -> bool:
-    if not rating: return False
-    return rating.strip().upper() in {"G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"}
+def get_tv_episode_sort_key(t: TVShow) -> tuple[int, int, int]:
+    m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', t.file_path, re.IGNORECASE)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), t.id or 0)
+    s = t.season if t.season is not None else 0
+    e = t.episode if t.episode is not None else 0
+    if s > 0 or e > 0:
+        return (s, e, t.id or 0)
+    return (0, 0, t.id or 0)
+
+def get_next_uncompleted_episode(
+    session: Session,
+    current_ep: TVShow,
+    user_id: int,
+    prof_id: Optional[int] = None
+) -> Optional[TVShow]:
+    series_episodes = session.exec(
+        select(TVShow).where(func.lower(TVShow.title) == current_ep.title.strip().lower())
+    ).all()
+    if not series_episodes:
+        return None
+    sorted_eps = sorted(series_episodes, key=get_tv_episode_sort_key)
+    cur_idx = -1
+    for i, ep in enumerate(sorted_eps):
+        if ep.id == current_ep.id:
+            cur_idx = i
+            break
+    if cur_idx == -1 or cur_idx + 1 >= len(sorted_eps):
+        return None
+
+    for ep in sorted_eps[cur_idx + 1:]:
+        q = select(WatchHistory).where(
+            WatchHistory.user_id == user_id,
+            WatchHistory.media_type == "tv",
+            WatchHistory.item_id == ep.id
+        )
+        if prof_id:
+            q = q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+        h = session.exec(q.order_by(WatchHistory.last_watched.desc())).first()
+        if not h or h.progress < 95.0:
+            return ep
+    return None
+
+def get_recently_watching(
+    session: Session,
+    current_user: User,
+    prof_id: Optional[int],
+    rating_level: int = 0,
+    is_kids: bool = False,
+    is_html: bool = False,
+    limit: int = 15
+) -> list[dict]:
+    r_level = rating_level if rating_level is not None and rating_level > 0 else (2 if is_kids else 0)
+    hist_query = select(WatchHistory).where(WatchHistory.user_id == current_user.id)
+    if prof_id:
+        hist_query = hist_query.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+    # Query a sufficiently large window so that after collapsing series and skipping finished movies,
+    # we have up to `limit` items
+    history_db = session.exec(hist_query.order_by(WatchHistory.last_watched.desc()).limit(limit * 6)).all()
+
+    history = []
+    seen_movie_keys = set()
+    seen_tv_shows = set()
+
+    for h in history_db:
+        if len(history) >= limit:
+            break
+        if h.media_type == 'movie' and not current_user.movies_access:
+            continue
+        if h.media_type == 'tv' and not current_user.tv_access:
+            continue
+
+        item_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
+        if not item_obj:
+            continue
+
+        if r_level > 0 and not is_rating_allowed(getattr(item_obj, 'content_rating', ''), r_level):
+            continue
+
+        if h.media_type == 'movie':
+            if h.progress >= 95.0:
+                continue
+            raw_year = str(getattr(item_obj, "year", "") or "").split(" • ")[0].strip()
+            m_key = ("tmdb", item_obj.tmdb_id) if item_obj.tmdb_id else ("title_year", item_obj.title.strip().lower(), raw_year)
+            if m_key in seen_movie_keys:
+                continue
+            seen_movie_keys.add(m_key)
+            item = {
+                "id": item_obj.id,
+                "title": item_obj.title,
+                "poster_filename": item_obj.poster_filename,
+                "file_path": item_obj.file_path,
+                "year": getattr(item_obj, "year", "")
+            }
+            history.append({"item": item, "media_type": "movie", "progress": h.progress})
+
+        elif h.media_type == 'tv':
+            tv_show_key = item_obj.title.strip().lower()
+            if tv_show_key in seen_tv_shows:
+                continue
+            seen_tv_shows.add(tv_show_key)
+
+            display_item = item_obj
+            display_progress = h.progress
+
+            if h.progress >= 95.0:
+                next_ep = get_next_uncompleted_episode(session, item_obj, current_user.id, prof_id)
+                if not next_ep:
+                    continue
+                if r_level > 0 and not is_rating_allowed(getattr(next_ep, 'content_rating', getattr(item_obj, 'content_rating', '')), r_level):
+                    continue
+                display_item = next_ep
+                q_n = select(WatchHistory).where(
+                    WatchHistory.user_id == current_user.id,
+                    WatchHistory.media_type == "tv",
+                    WatchHistory.item_id == next_ep.id
+                )
+                if prof_id:
+                    q_n = q_n.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+                n_hist = session.exec(q_n.order_by(WatchHistory.last_watched.desc())).first()
+                display_progress = n_hist.progress if n_hist else 0.0
+
+            item = {
+                "id": display_item.id,
+                "title": display_item.title,
+                "poster_filename": display_item.poster_filename,
+                "file_path": display_item.file_path,
+                "year": getattr(display_item, "year", "")
+            }
+
+            m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', item['file_path'])
+            if m:
+                s_num = int(m.group(1))
+                e_num = int(m.group(2))
+                if is_html:
+                    enc_title = urllib.parse.quote(display_item.title)
+                    s_link = f'<a href="/series/{enc_title}?season={s_num}">S{s_num}</a>'
+                    e_link = f'<a href="/series/{enc_title}?ep={display_item.id}">E{e_num}</a>'
+                    base = f"{s_link} • {e_link}"
+                    filename = os.path.splitext(os.path.basename(item['file_path']))[0]
+                    name_match = re.search(r'[Ss]\d+\s*[-_]?\s*[Ee]?\d+[ \-]*(.+)', filename, re.IGNORECASE)
+                    if name_match and name_match.group(1).strip():
+                        ep_title = name_match.group(1).strip()
+                        ep_link = f'<a href="/series/{enc_title}?ep={display_item.id}">{ep_title}</a>'
+                        item['year'] = f"{base}<br>{ep_link}"
+                    else:
+                        item['year'] = base
+                else:
+                    item['year'] = f"S{s_num} E{e_num}"
+
+            history.append({"item": item, "media_type": "tv", "progress": display_progress})
+
+    return history
+
+COLLECTION_FRANCHISE_DEFINITIONS = [
+    {
+        "name": "Marvel Cinematic Universe",
+        "keywords": [
+            "iron man", "thor", "captain america", "avengers", "guardians of the galaxy",
+            "ant-man", "doctor strange", "spider-man", "black panther", "captain marvel",
+            "black widow", "shang-chi", "eternals", "deadpool & wolverine", "deadpool 3",
+            "the incredible hulk", "hulk"
+        ]
+    },
+    {
+        "name": "Star Wars Saga",
+        "keywords": [
+            "star wars", "the empire strikes back", "return of the jedi", "the phantom menace",
+            "attack of the clones", "revenge of the sith", "the force awakens", "the last jedi",
+            "the rise of skywalker", "rogue one", "solo: a star wars story"
+        ]
+    },
+    {
+        "name": "Wizarding World",
+        "keywords": ["harry potter", "fantastic beasts"]
+    },
+    {
+        "name": "Middle-earth",
+        "keywords": [
+            "lord of the rings", "the hobbit", "the fellowship of the ring",
+            "the two towers", "the return of the king"
+        ]
+    },
+    {
+        "name": "The Dark Knight / Batman",
+        "keywords": ["batman", "the dark knight"]
+    },
+    {
+        "name": "James Bond (007)",
+        "keywords": [
+            "007", "james bond", "casino royale", "quantum of solace",
+            "skyfall", "spectre", "no time to die", "goldeneye", "goldfinger"
+        ]
+    },
+    {
+        "name": "Fast & Furious",
+        "keywords": [
+            "fast & furious", "the fast and the furious", "2 fast 2 furious",
+            "fast five", "fast & furious 6", "furious 7", "the fate of the furious",
+            "f9", "fast x", "hobbs & shaw"
+        ]
+    },
+    {
+        "name": "Jurassic Park",
+        "keywords": [
+            "jurassic park", "the lost world: jurassic park", "jurassic park iii",
+            "jurassic world", "fallen kingdom", "jurassic world dominion"
+        ]
+    },
+    {
+        "name": "Toy Story",
+        "keywords": ["toy story", "lightyear"]
+    },
+    {
+        "name": "Shrek Universe",
+        "keywords": ["shrek", "puss in boots"]
+    },
+    {
+        "name": "Mission: Impossible",
+        "keywords": ["mission: impossible", "mission impossible"]
+    },
+    {
+        "name": "Pirates of the Caribbean",
+        "keywords": ["pirates of the caribbean"]
+    },
+    {
+        "name": "Indiana Jones",
+        "keywords": [
+            "indiana jones", "raiders of the lost ark", "temple of doom",
+            "the last crusade", "kingdom of the crystal skull", "dial of destiny"
+        ]
+    },
+    {
+        "name": "The Matrix",
+        "keywords": ["the matrix", "matrix reloaded", "matrix revolutions", "matrix resurrections"]
+    },
+    {
+        "name": "John Wick",
+        "keywords": ["john wick"]
+    },
+    {
+        "name": "Despicable Me & Minions",
+        "keywords": ["despicable me", "minions"]
+    },
+    {
+        "name": "Planet of the Apes",
+        "keywords": [
+            "planet of the apes", "rise of the planet of the apes",
+            "dawn of the planet of the apes", "war for the planet of the apes",
+            "kingdom of the planet of the apes"
+        ]
+    },
+    {
+        "name": "The Hunger Games",
+        "keywords": ["hunger games", "catching fire", "mockingjay", "ballad of songbirds and snakes"]
+    },
+    {
+        "name": "Alien & Predator",
+        "keywords": [
+            "alien", "aliens", "alien 3", "alien resurrection", "alien: covenant",
+            "alien: romulus", "predator", "predators", "the predator", "prey", "alien vs. predator"
+        ]
+    },
+    {
+        "name": "Back to the Future",
+        "keywords": ["back to the future"]
+    },
+    {
+        "name": "X-Men",
+        "keywords": [
+            "x-men", "wolverine", "logan", "deadpool", "the new mutants",
+            "first class", "days of future past", "apocalypse", "dark phoenix"
+        ]
+    },
+]
+
+def item_matches_collection(item, collection_name: str) -> bool:
+    if not item or not getattr(item, "title", None):
+        return False
+    title_lower = item.title.strip().lower()
+    col_name_lower = collection_name.strip().lower()
+    
+    # 1. Direct match on item's TMDB collection name
+    if getattr(item, "collection_name", None) and item.collection_name.strip().lower() == col_name_lower:
+        return True
+
+    # 2. Check predefined franchises
+    for franchise in COLLECTION_FRANCHISE_DEFINITIONS:
+        if franchise["name"].lower() == col_name_lower:
+            for kw in franchise["keywords"]:
+                if kw.lower() in title_lower:
+                    return True
+            return False
+            
+    # 3. Check prefix-based collection (e.g. "Dune Collection" -> prefix "Dune")
+    clean_col = collection_name
+    if clean_col.endswith(" Collection"):
+        prefix = clean_col[:-11].strip().lower()
+    else:
+        prefix = clean_col.strip().lower()
+        
+    if prefix and title_lower.startswith(prefix):
+        return True
+    return False
+
+def build_categories_data(items) -> list[dict]:
+    categories = {}
+    for item in items:
+        if not getattr(item, "genres", None):
+            continue
+        genres = [g.strip() for g in item.genres.split(",") if g.strip()]
+        for g in genres:
+            if g not in categories:
+                categories[g] = {
+                    "name": g,
+                    "count": 0,
+                    "backdrop_filename": None,
+                    "poster_filename": None,
+                }
+            categories[g]["count"] += 1
+            if not categories[g]["backdrop_filename"] and getattr(item, "backdrop_filename", None):
+                categories[g]["backdrop_filename"] = item.backdrop_filename
+            if not categories[g]["poster_filename"] and getattr(item, "poster_filename", None):
+                categories[g]["poster_filename"] = item.poster_filename
+                
+    sorted_cats = sorted(categories.values(), key=lambda x: (-x["count"], x["name"].lower()))
+    return sorted_cats
+
+def build_collections_data(items) -> list[dict]:
+    collections = []
+    used_item_ids_by_predefined = set()
+    
+    # 1. Predefined franchises (Cinematic Universes: MCU, Star Wars, Middle-earth, etc.)
+    for franchise in COLLECTION_FRANCHISE_DEFINITIONS:
+        matched = []
+        for item in items:
+            t_lower = item.title.strip().lower()
+            if any(kw.lower() in t_lower for kw in franchise["keywords"]):
+                matched.append(item)
+        if matched:
+            matched.sort(key=lambda x: str(getattr(x, "year", "") or ""))
+            years = [str(getattr(x, "year", ""))[:4] for x in matched if getattr(x, "year", None)]
+            years = [y for y in years if y.isdigit()]
+            year_range = ""
+            if years:
+                min_y, max_y = min(years), max(years)
+                year_range = f"{min_y}" if min_y == max_y else f"{min_y} – {max_y}"
+            
+            poster = None
+            backdrop = None
+            for it in matched:
+                if not poster and getattr(it, "collection_poster_filename", None):
+                    poster = it.collection_poster_filename
+                if not backdrop and getattr(it, "collection_backdrop_filename", None):
+                    backdrop = it.collection_backdrop_filename
+            for it in matched:
+                if not poster and getattr(it, "poster_filename", None):
+                    poster = it.poster_filename
+                if not backdrop and getattr(it, "backdrop_filename", None):
+                    backdrop = it.backdrop_filename
+                    
+            collections.append({
+                "name": franchise["name"],
+                "count": len(matched),
+                "poster_filename": poster,
+                "backdrop_filename": backdrop,
+                "year_range": year_range,
+                "items": matched
+            })
+            for it in matched:
+                used_item_ids_by_predefined.add(it.id)
+
+    # 2. Native TMDB Collections (belongs_to_collection)
+    tmdb_groups = {}
+    for item in items:
+        if item.id in used_item_ids_by_predefined:
+            continue
+        c_name = getattr(item, "collection_name", None)
+        if c_name and c_name.strip():
+            tmdb_groups.setdefault(c_name.strip(), []).append(item)
+
+    for col_name, matched in tmdb_groups.items():
+        matched.sort(key=lambda x: str(getattr(x, "year", "") or ""))
+        years = [str(getattr(x, "year", ""))[:4] for x in matched if getattr(x, "year", None)]
+        years = [y for y in years if y.isdigit()]
+        year_range = ""
+        if years:
+            min_y, max_y = min(years), max(years)
+            year_range = f"{min_y}" if min_y == max_y else f"{min_y} – {max_y}"
+
+        poster = None
+        backdrop = None
+        for it in matched:
+            if not poster and getattr(it, "collection_poster_filename", None):
+                poster = it.collection_poster_filename
+            if not backdrop and getattr(it, "collection_backdrop_filename", None):
+                backdrop = it.collection_backdrop_filename
+        for it in matched:
+            if not poster and getattr(it, "poster_filename", None):
+                poster = it.poster_filename
+            if not backdrop and getattr(it, "backdrop_filename", None):
+                backdrop = it.backdrop_filename
+
+        collections.append({
+            "name": col_name,
+            "count": len(matched),
+            "poster_filename": poster,
+            "backdrop_filename": backdrop,
+            "year_range": year_range,
+            "items": matched
+        })
+        for it in matched:
+            used_item_ids_by_predefined.add(it.id)
+                
+    # 3. Dynamic prefix-based collections (e.g. "Dune: Part One", "Dune: Part Two")
+    prefix_groups = {}
+    for item in items:
+        if item.id in used_item_ids_by_predefined:
+            continue
+        title = item.title.strip()
+        sep = None
+        if ":" in title:
+            sep = ":"
+        elif " - " in title:
+            sep = " - "
+        if sep:
+            prefix = title.split(sep)[0].strip()
+            if len(prefix) >= 3:
+                prefix_groups.setdefault(prefix, []).append(item)
+                
+    for prefix, matched in prefix_groups.items():
+        if len(matched) >= 2:
+            matched.sort(key=lambda x: str(getattr(x, "year", "") or ""))
+            years = [str(getattr(x, "year", ""))[:4] for x in matched if getattr(x, "year", None)]
+            years = [y for y in years if y.isdigit()]
+            year_range = ""
+            if years:
+                min_y, max_y = min(years), max(years)
+                year_range = f"{min_y}" if min_y == max_y else f"{min_y} – {max_y}"
+            
+            poster = None
+            backdrop = None
+            for it in matched:
+                if not poster and getattr(it, "poster_filename", None):
+                    poster = it.poster_filename
+                if not backdrop and getattr(it, "backdrop_filename", None):
+                    backdrop = it.backdrop_filename
+                    
+            collections.append({
+                "name": f"{prefix} Collection",
+                "count": len(matched),
+                "poster_filename": poster,
+                "backdrop_filename": backdrop,
+                "year_range": year_range,
+                "items": matched
+            })
+            
+    collections.sort(key=lambda x: x["name"].lower())
+    return collections
+
+def get_release_year(item) -> int:
+    raw = str(getattr(item, "year", "") or "").split(" • ")[0].strip()
+    digits = "".join([c for c in raw if c.isdigit()])
+    return int(digits[:4]) if len(digits) >= 4 else 0
 
 def get_user_watched_status(session: Session, user_id: int, prof_id: Optional[int] = None):
     hist_q = select(WatchHistory).where(
@@ -1220,14 +1731,14 @@ async def root(
     if not current_user:
         return RedirectResponse(url="/login", status_code=303)
 
-    is_kids = is_profile_kids(current_user, current_profile)
+    rating_level = get_profile_rating_level(current_user, current_profile)
     prof_id = current_profile.id if current_profile else None
 
     movies = session.exec(select(Movie).order_by(Movie.id.desc())).all() if current_user.movies_access else []
     tv_shows_raw = session.exec(select(TVShow).order_by(TVShow.id.desc())).all() if current_user.tv_access else []    
-    if is_kids:
-        movies = [m for m in movies if is_kids_safe(m.content_rating)]
-        tv_shows_raw = [t for t in tv_shows_raw if is_kids_safe(t.content_rating)]
+    if rating_level > 0:
+        movies = [m for m in movies if is_rating_allowed(m.content_rating, rating_level)]
+        tv_shows_raw = [t for t in tv_shows_raw if is_rating_allowed(t.content_rating, rating_level)]
     photos = [p for p in (session.exec(select(Photo).order_by(Photo.id.desc())).all() if current_user.photos_access else []) if not (p.file_path and is_recycle_path(p.file_path))]
     recent_movies = process_movie_versions(movies)[:15]
     recent_photos = photos[:15]
@@ -1261,18 +1772,27 @@ async def root(
             "year": t_obj.year,
             "poster_filename": t_obj.poster_filename,
             "file_path": t_obj.file_path,
-            "episode_name": ""
+            "episode_name": "",
+            "media_type": "tv",
+            "item": t_obj
         }
         if count > 1:
             t['year'] = f"{count} Episodes"
         else:
             m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', t['file_path'])
             if m:
-                base = f"S{int(m.group(1))} • E{int(m.group(2))}"
+                s_num = int(m.group(1))
+                e_num = int(m.group(2))
+                enc_title = urllib.parse.quote(t_obj.title)
+                s_link = f'<a href="/series/{enc_title}?season={s_num}">S{s_num}</a>'
+                e_link = f'<a href="/series/{enc_title}?ep={t_obj.id}">E{e_num}</a>'
+                base = f"{s_link} • {e_link}"
                 filename = os.path.splitext(os.path.basename(t['file_path']))[0]
                 name_match = re.search(r'[Ss]\d+\s*[-_]?\s*[Ee]?\d+[ \-]*(.+)', filename, re.IGNORECASE)
                 if name_match and name_match.group(1).strip():
-                    t['year'] = f"{base}<br>{name_match.group(1).strip()}"
+                    ep_title = name_match.group(1).strip()
+                    ep_link = f'<a href="/series/{enc_title}?ep={t_obj.id}">{ep_title}</a>'
+                    t['year'] = f"{base}<br>{ep_link}"
                 else:
                     t['year'] = base
         recent_tv.append(t)
@@ -1288,49 +1808,11 @@ async def root(
         if w.media_type == 'tv' and not current_user.tv_access: continue
         item = session.get(Movie if w.media_type == 'movie' else TVShow, w.item_id)
         if item:
-            if is_kids and not is_kids_safe(getattr(item, 'content_rating', '')):
+            if rating_level > 0 and not is_rating_allowed(getattr(item, 'content_rating', ''), rating_level):
                 continue
             watchlist.append({"db_id": w.id, "item": item, "media_type": w.media_type})
 
-    hist_query = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.progress < 95.0)
-    if prof_id:
-        hist_query = hist_query.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
-    history_db = session.exec(hist_query.order_by(WatchHistory.last_watched.desc()).limit(15)).all()
-
-    history = []
-    seen_movie_keys = set()
-    for h in history_db:
-        if h.media_type == 'movie' and not current_user.movies_access: continue
-        if h.media_type == 'tv' and not current_user.tv_access: continue
-        item_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
-        if item_obj:
-            if is_kids and not is_kids_safe(getattr(item_obj, 'content_rating', '')):
-                continue
-            if h.media_type == 'movie':
-                raw_year = str(getattr(item_obj, "year", "") or "").split(" • ")[0].strip()
-                m_key = ("tmdb", item_obj.tmdb_id) if item_obj.tmdb_id else ("title_year", item_obj.title.strip().lower(), raw_year)
-                if m_key in seen_movie_keys:
-                    continue
-                seen_movie_keys.add(m_key)
-            item = {
-                "id": item_obj.id,
-                "title": item_obj.title,
-                "poster_filename": item_obj.poster_filename,
-                "file_path": item_obj.file_path,
-                "year": getattr(item_obj, "year", "")
-            }
-            if h.media_type == 'tv':
-                m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', item['file_path'])
-                if m:
-                    base = f"S{int(m.group(1))} • E{int(m.group(2))}"
-                    filename = os.path.splitext(os.path.basename(item['file_path']))[0]
-                    name_match = re.search(r'[Ss]\d+\s*[-_]?\s*[Ee]?\d+[ \-]*(.+)', filename, re.IGNORECASE)
-                    if name_match and name_match.group(1).strip():
-                        item['year'] = f"{base}<br>{name_match.group(1).strip()}"
-                    else:
-                        item['year'] = base
-            
-            history.append({"item": item, "media_type": h.media_type, "progress": h.progress})
+    history = get_recently_watching(session, current_user, prof_id, rating_level=rating_level, is_html=True, limit=15)
     
     user_watchlist_movies = [w.item_id for w in watchlist_db if w.media_type == 'movie']
     user_watchlist_tv = [w.item_id for w in watchlist_db if w.media_type == 'tv']
@@ -1374,7 +1856,14 @@ async def root(
     if "application/json" in request.headers.get("Accept", ""):
         return {
             "user": {"id": current_user.id, "username": current_user.username, "is_admin": is_actual_admin(current_user, current_profile), "watch_together_access": current_user.watch_together_access, "downloads_access": current_user.downloads_access},
-            "current_profile": {"id": current_profile.id, "name": current_profile.name, "avatar_color": current_profile.avatar_color, "avatar_icon": current_profile.avatar_icon, "is_kids": current_profile.is_kids} if current_profile else None,
+            "current_profile": {
+                "id": current_profile.id,
+                "name": current_profile.name,
+                "avatar_color": current_profile.avatar_color,
+                "avatar_icon": current_profile.avatar_icon,
+                "is_kids": (current_profile.rating_level == 2 if getattr(current_profile, 'rating_level', None) is not None else current_profile.is_kids),
+                "rating_level": getattr(current_profile, 'rating_level', 2 if current_profile.is_kids else 0)
+            } if current_profile else None,
             "recent_movies": recent_movies,
             "recent_tv": recent_tv,
             "recent_photos": recent_photos,
@@ -1402,24 +1891,34 @@ async def root(
 async def api_library(
     request: Request, media_type: str, page: int = 1, limit: int = 50, 
     search: str = "", sort: str = "title_asc",
+    genre: Optional[str] = None,
+    collection: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
 ):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
-    is_kids = is_profile_kids(current_user, current_profile)
+    rating_level = get_profile_rating_level(current_user, current_profile)
     prof_id = current_profile.id if current_profile else None
     
     if media_type == "movie":
         if not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
         query = select(Movie)
-        if is_kids:
-            query = query.where(Movie.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
+        if rating_level == 1:
+            query = query.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+        elif rating_level >= 2:
+            query = query.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
         if search:
             query = query.where(Movie.title.ilike(f"%{search}%"))
             
         raw_items = session.exec(query).all()
         processed = process_movie_versions(raw_items)
+
+        if genre:
+            target_g = genre.strip().lower()
+            processed = [m for m in processed if m.genres and target_g in [g.strip().lower() for g in m.genres.split(",")]]
+        if collection:
+            processed = [m for m in processed if item_matches_collection(m, collection)]
 
         if sort == "title_asc": processed.sort(key=lambda x: x.title.lower())
         elif sort == "title_desc": processed.sort(key=lambda x: x.title.lower(), reverse=True)
@@ -1432,13 +1931,21 @@ async def api_library(
     elif media_type == "tv":
         if not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
         query = select(TVShow)
-        if is_kids:
-            query = query.where(TVShow.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
+        if rating_level == 1:
+            query = query.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+        elif rating_level >= 2:
+            query = query.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
         if search:
             query = query.where(TVShow.title.ilike(f"%{search}%"))
         
         raw_items = session.exec(query).all()
         processed = process_tv_shows(raw_items)
+
+        if genre:
+            target_g = genre.strip().lower()
+            processed = [s for s in processed if s.genres and target_g in [g.strip().lower() for g in s.genres.split(",")]]
+        if collection:
+            processed = [s for s in processed if item_matches_collection(s, collection)]
         
         if sort == "title_asc": processed.sort(key=lambda x: x.title.lower())
         elif sort == "title_desc": processed.sort(key=lambda x: x.title.lower(), reverse=True)
@@ -1689,6 +2196,7 @@ async def api_library(
                 "title": item.title,
                 "year": item.year if hasattr(item, 'year') else None,
                 "poster_filename": item.poster_filename if hasattr(item, 'poster_filename') else None,
+                "rating": getattr(item, 'rating', None),
                 "album": None,
                 "url": url_path,
                 "in_watchlist": item.id in user_watchlist if hasattr(item, 'id') else False,
@@ -1709,14 +2217,14 @@ async def api_dashboard(
     session: Session = Depends(get_session)
 ):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
-    is_kids = is_profile_kids(current_user, current_profile)
+    rating_level = get_profile_rating_level(current_user, current_profile)
     prof_id = current_profile.id if current_profile else None
     
     movies = session.exec(select(Movie).order_by(Movie.id.desc())).all() if current_user.movies_access else []
     tv_shows_raw = session.exec(select(TVShow).order_by(TVShow.id.desc())).all() if current_user.tv_access else []    
-    if is_kids:
-        movies = [m for m in movies if is_kids_safe(m.content_rating)]
-        tv_shows_raw = [t for t in tv_shows_raw if is_kids_safe(t.content_rating)]
+    if rating_level > 0:
+        movies = [m for m in movies if is_rating_allowed(m.content_rating, rating_level)]
+        tv_shows_raw = [t for t in tv_shows_raw if is_rating_allowed(t.content_rating, rating_level)]
         
     recent_movies = [{"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year} for m in movies[:15]]
     
@@ -1762,7 +2270,7 @@ async def api_dashboard(
         if w.media_type == 'tv' and not current_user.tv_access: continue
         item_obj = session.get(Movie if w.media_type == 'movie' else TVShow, w.item_id)
         if item_obj:
-            if is_kids and not is_kids_safe(getattr(item_obj, 'content_rating', '')):
+            if rating_level > 0 and not is_rating_allowed(getattr(item_obj, 'content_rating', ''), rating_level):
                 continue
             item = {
                 "id": item_obj.id,
@@ -1776,33 +2284,7 @@ async def api_dashboard(
                     item['year'] = f"S{int(m.group(1))} E{int(m.group(2))}"
             watchlist.append({"item": item, "media_type": w.media_type})
         
-    hist_query = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.progress < 95.0)
-    if prof_id:
-        hist_query = hist_query.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
-    history_db = session.exec(hist_query.order_by(WatchHistory.last_watched.desc()).limit(15)).all()
-
-    history = []
-    for h in history_db:
-        if h.media_type == 'movie' and not current_user.movies_access: continue
-        if h.media_type == 'tv' and not current_user.tv_access: continue
-        item_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
-        if item_obj:
-            if is_kids and not is_kids_safe(getattr(item_obj, 'content_rating', '')):
-                continue
-            item = {
-                "id": item_obj.id,
-                "title": item_obj.title,
-                "poster_filename": item_obj.poster_filename,
-                "file_path": item_obj.file_path,
-                "year": getattr(item_obj, "year", "")
-            }
-            if h.media_type == 'tv':
-                m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', item['file_path'])
-                if m:
-                    base = f"S{int(m.group(1))} E{int(m.group(2))}"
-                    item['year'] = base
-            
-            history.append({"item": item, "media_type": h.media_type, "progress": h.progress})
+    history = get_recently_watching(session, current_user, prof_id, rating_level=rating_level, is_html=False, limit=15)
 
     import random
     from collections import Counter
@@ -1871,13 +2353,13 @@ async def api_movie(
 ):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
     if not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
-    is_kids = is_profile_kids(current_user, current_profile)
+    rating_level = get_profile_rating_level(current_user, current_profile)
     prof_id = current_profile.id if current_profile else None
     
     movie = session.get(Movie, movie_id)
     if not movie: raise HTTPException(status_code=404, detail="Movie not found")
-    if is_kids and not is_kids_safe(movie.content_rating):
-        raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+    if rating_level > 0 and not is_rating_allowed(movie.content_rating, rating_level):
+        raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
         
     cast_list = []
     if movie.cast and movie.cast.startswith("["):
@@ -1924,14 +2406,14 @@ async def api_series(
 ):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
     if not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
-    is_kids = is_profile_kids(current_user, current_profile)
+    rating_level = get_profile_rating_level(current_user, current_profile)
     prof_id = current_profile.id if current_profile else None
     
     show = session.get(TVShow, series_id)
     if not show: raise HTTPException(status_code=404, detail="Show not found")
     
-    if is_kids and not is_kids_safe(show.content_rating):
-        raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+    if rating_level > 0 and not is_rating_allowed(show.content_rating, rating_level):
+        raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
         
     cast_list = []
     if show.cast and show.cast.startswith("["):
@@ -1997,14 +2479,16 @@ async def api_search(
 ):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
     if not q: return {"items": []}
-    is_kids = is_profile_kids(current_user, current_profile)
+    rating_level = get_profile_rating_level(current_user, current_profile)
     
     import urllib.parse
     results = []
     if current_user.movies_access:
         query = select(Movie).where(Movie.title.ilike(f"%{q}%"))
-        if is_kids:
-            query = query.where(Movie.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
+        if rating_level == 1:
+            query = query.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+        elif rating_level >= 2:
+            query = query.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
         raw_movies = session.exec(query).all()
         movies = process_movie_versions(raw_movies)
         for m in movies[:10]:
@@ -2015,8 +2499,10 @@ async def api_search(
             
     if current_user.tv_access:
         query = select(TVShow).where(TVShow.title.ilike(f"%{q}%"))
-        if is_kids:
-            query = query.where(TVShow.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
+        if rating_level == 1:
+            query = query.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+        elif rating_level >= 2:
+            query = query.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
         shows = session.exec(query).all()
         processed = process_tv_shows(shows)
         for t in processed[:10]:
@@ -2144,7 +2630,8 @@ async def library_view(
     session: Session = Depends(get_session)
 ):
     if not current_user: return RedirectResponse(url="/login", status_code=303)
-    is_kids = is_profile_kids(current_user, current_profile)
+    rating_level = get_profile_rating_level(current_user, current_profile)
+    prof_id = current_profile.id if current_profile else None
     avail_vols = get_available_volumes(session)
 
     if media_type in avail_vols and not avail_vols[media_type]:
@@ -2152,19 +2639,122 @@ async def library_view(
 
     album_breadcrumbs = []
     clean_album = None
+    current_view = request.query_params.get("view", "library")
+    active_genre = request.query_params.get("genre")
+    active_collection = request.query_params.get("collection")
+    categories = []
+    collections = []
+    recommended_items = []
+    recently_added = []
+    recently_released = []
+    top_rated_items = []
 
     if media_type == "movie":
         if not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
         q_count = select(Movie)
-        if is_kids:
-            q_count = q_count.where(Movie.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
-        total_count = len(process_movie_versions(session.exec(q_count).all()))
+        if rating_level == 1:
+            q_count = q_count.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+        elif rating_level >= 2:
+            q_count = q_count.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+        all_movies = process_movie_versions(session.exec(q_count).all())
+        categories = build_categories_data(all_movies)
+        collections = build_collections_data(all_movies)
+
+        if current_view == "categories":
+            total_count = len(categories)
+        elif current_view == "collections":
+            total_count = len(collections)
+        elif current_view == "recommended":
+            watched_movie_ids, _, _ = get_user_watched_status(session, current_user.id, prof_id)
+            rated = [m for m in all_movies if m.rating is not None]
+            rated.sort(key=lambda m: m.rating or 0, reverse=True)
+            top_rated_items = rated[:15]
+
+            recently_added = sorted(all_movies, key=lambda m: m.id or 0, reverse=True)[:15]
+            recently_released = sorted(all_movies, key=get_release_year, reverse=True)[:15]
+
+            full_hist_query = select(WatchHistory).where(WatchHistory.user_id == current_user.id)
+            if prof_id:
+                full_hist_query = full_hist_query.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+            history_db_full = session.exec(full_hist_query.order_by(WatchHistory.last_watched.desc()).limit(100)).all()
+            genre_counts = Counter()
+            for h in history_db_full:
+                it_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
+                if it_obj and it_obj.genres:
+                    for g in it_obj.genres.split(','):
+                        genre_counts[g.strip()] += 1
+            top_genres = [g for g, _ in genre_counts.most_common(3)]
+            if top_genres:
+                cand = [m for m in all_movies if m.id not in watched_movie_ids and m.genres and any(g in m.genres for g in top_genres)]
+                random.shuffle(cand)
+                recommended_items = cand[:15]
+            else:
+                top_ids = {m.id for m in top_rated_items}
+                recommended_items = [m for m in all_movies if m.id not in top_ids][:15]
+                if not recommended_items:
+                    recommended_items = all_movies[:15]
+            total_count = len(recommended_items)
+        else: # view == "library"
+            if active_genre:
+                target_g = active_genre.strip().lower()
+                all_movies = [m for m in all_movies if m.genres and target_g in [g.strip().lower() for g in m.genres.split(",")]]
+            elif active_collection:
+                all_movies = [m for m in all_movies if item_matches_collection(m, active_collection)]
+            total_count = len(all_movies)
+
     elif media_type == "tv":
         if not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
-        q_count = select(func.count(func.distinct(TVShow.title)))
-        if is_kids:
-            q_count = q_count.where(TVShow.content_rating.in_(["G", "PG", "TV-Y", "TV-Y7", "TV-G", "TV-PG"]))
-        total_count = session.exec(q_count).one()
+        q_count = select(TVShow)
+        if rating_level == 1:
+            q_count = q_count.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+        elif rating_level >= 2:
+            q_count = q_count.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+        all_shows = process_tv_shows(session.exec(q_count).all())
+        categories = build_categories_data(all_shows)
+        collections = build_collections_data(all_shows)
+
+        if current_view == "categories":
+            total_count = len(categories)
+        elif current_view == "collections":
+            total_count = len(collections)
+        elif current_view == "recommended":
+            _, _, watched_tv_titles = get_user_watched_status(session, current_user.id, prof_id)
+            rated = [s for s in all_shows if s.rating is not None]
+            rated.sort(key=lambda s: s.rating or 0, reverse=True)
+            top_rated_items = rated[:15]
+
+            recently_added = sorted(all_shows, key=lambda s: s.id or 0, reverse=True)[:15]
+            recently_released = sorted(all_shows, key=get_release_year, reverse=True)[:15]
+
+            full_hist_query = select(WatchHistory).where(WatchHistory.user_id == current_user.id)
+            if prof_id:
+                full_hist_query = full_hist_query.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+            history_db_full = session.exec(full_hist_query.order_by(WatchHistory.last_watched.desc()).limit(100)).all()
+            genre_counts = Counter()
+            for h in history_db_full:
+                it_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
+                if it_obj and it_obj.genres:
+                    for g in it_obj.genres.split(','):
+                        genre_counts[g.strip()] += 1
+            top_genres = [g for g, _ in genre_counts.most_common(3)]
+            if top_genres:
+                cand = [s for s in all_shows if s.title.strip().lower() not in watched_tv_titles and s.genres and any(g in s.genres for g in top_genres)]
+                random.shuffle(cand)
+                recommended_items = cand[:15]
+            else:
+                top_ids = {s.id for s in top_rated_items}
+                recommended_items = [s for s in all_shows if s.id not in top_ids][:15]
+                if not recommended_items:
+                    recommended_items = all_shows[:15]
+            total_count = len(recommended_items)
+        else: # view == "library"
+            if active_genre:
+                target_g = active_genre.strip().lower()
+                all_shows = [s for s in all_shows if s.genres and target_g in [g.strip().lower() for g in s.genres.split(",")]]
+            elif active_collection:
+                all_shows = [s for s in all_shows if item_matches_collection(s, active_collection)]
+            total_count = len(all_shows)
+
     elif media_type == "photo":
         if not current_user.photos_access: raise HTTPException(status_code=403, detail="Forbidden")
         raw_album = request.query_params.get("album")
@@ -2209,7 +2799,16 @@ async def library_view(
         "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
         "media_type": media_type, "total_count": total_count, "album": clean_album, "album_breadcrumbs": album_breadcrumbs,
         "has_movies": avail_vols["movie"], "has_tv": avail_vols["tv"], "has_photos": avail_vols["photo"], "has_music": avail_vols["music"],
-        "music_view": request.query_params.get("view", "albums")
+        "music_view": request.query_params.get("view", "albums"),
+        "current_view": current_view,
+        "active_genre": active_genre,
+        "active_collection": active_collection,
+        "categories": categories,
+        "collections": collections,
+        "recommended_items": recommended_items,
+        "recently_added": recently_added,
+        "recently_released": recently_released,
+        "top_rated_items": top_rated_items
     })
 @app.get("/movie/{movie_id}", response_class=HTMLResponse)
 async def movie_view(
@@ -2221,13 +2820,13 @@ async def movie_view(
 ):
     if not current_user: return RedirectResponse(url="/login", status_code=303)
     if not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
-    is_kids = is_profile_kids(current_user, current_profile)
+    rating_level = get_profile_rating_level(current_user, current_profile)
     prof_id = current_profile.id if current_profile else None
     
     movie = session.get(Movie, movie_id)
     if not movie: raise HTTPException(status_code=404, detail="Movie not found")
-    if is_kids and not is_kids_safe(movie.content_rating):
-        raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+    if rating_level > 0 and not is_rating_allowed(movie.content_rating, rating_level):
+        raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
         
     cast_list = []
     if movie.cast and movie.cast.startswith("["):
@@ -2251,8 +2850,8 @@ async def movie_view(
             v_q = v_q.where(Movie.year.like(f"{raw_year}%"))
 
     raw_versions = session.exec(v_q).all()
-    if is_kids:
-        raw_versions = [v for v in raw_versions if is_kids_safe(v.content_rating)]
+    if rating_level > 0:
+        raw_versions = [v for v in raw_versions if is_rating_allowed(v.content_rating, rating_level)]
 
     movie_versions = []
     for v in raw_versions:
@@ -2356,8 +2955,9 @@ async def get_movie_trailer(
     if not movie:
         raise HTTPException(status_code=404, detail="Movie not found")
 
-    if is_profile_kids(current_user, current_profile) and not is_kids_safe(getattr(movie, 'content_rating', '')):
-        raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+    rating_level = get_profile_rating_level(current_user, current_profile)
+    if rating_level > 0 and not is_rating_allowed(getattr(movie, 'content_rating', ''), rating_level):
+        raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
 
     # 1. Local trailer hoarder support (checked FIRST by default)
     local_path = find_local_trailer(movie.file_path)
@@ -2448,8 +3048,9 @@ async def stream_movie_trailer(
     movie = session.get(Movie, item_id)
     if not movie or not os.path.exists(movie.file_path):
         raise HTTPException(status_code=404, detail="Movie not found")
-    if is_profile_kids(current_user, current_profile) and not is_kids_safe(getattr(movie, 'content_rating', '')):
-        raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+    rating_level = get_profile_rating_level(current_user, current_profile)
+    if rating_level > 0 and not is_rating_allowed(getattr(movie, 'content_rating', ''), rating_level):
+        raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
 
     trailer_path = find_local_trailer(movie.file_path)
     if not trailer_path or not os.path.exists(trailer_path):
@@ -2493,20 +3094,21 @@ async def series_view(
     request: Request,
     title: str,
     ep: Optional[int] = None,
+    season: Optional[int] = None,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
 ):
     if not current_user: return RedirectResponse(url="/login", status_code=303)
     if not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
-    is_kids = is_profile_kids(current_user, current_profile)
+    rating_level = get_profile_rating_level(current_user, current_profile)
     prof_id = current_profile.id if current_profile else None
     
     shows = session.exec(select(TVShow).where(TVShow.title == title)).all()
     if not shows:
         raise HTTPException(status_code=404, detail="Series not found")
-    if is_kids and not is_kids_safe(shows[0].content_rating):
-        raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+    if rating_level > 0 and not is_rating_allowed(shows[0].content_rating, rating_level):
+        raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
         
     cast_list = []
     if shows[0].cast and shows[0].cast.startswith("["):
@@ -2530,13 +3132,38 @@ async def series_view(
         selected_episode = next((e for e in shows if e.id == ep), None)
         if selected_episode:
             resume_link = f"/play/tv/{selected_episode.id}"
+    elif season is not None:
+        def get_ep_season(e):
+            if getattr(e, 'season', None) is not None: return e.season
+            m = re.search(r'S(\d+)E(\d+)', e.file_path, re.IGNORECASE)
+            return int(m.group(1)) if m else 0
+        matching_season_eps = [e for e in shows if get_ep_season(e) == season]
+        if matching_season_eps:
+            selected_episode = matching_season_eps[0]
+            resume_link = f"/play/tv/{selected_episode.id}"
             
     if not selected_episode:
         # Default behavior: use first episode or history
-        selected_episode = shows[0]
+        sorted_shows = sorted(shows, key=get_tv_episode_sort_key)
+        selected_episode = sorted_shows[0]
         if history:
-            has_progress = True
-            resume_link = f"/play/tv/{history.item_id}"
+            hist_ep = next((e for e in shows if e.id == history.item_id), None)
+            if history.progress < 95.0 and history.progress > 0:
+                has_progress = True
+                if hist_ep:
+                    selected_episode = hist_ep
+                resume_link = f"/play/tv/{history.item_id}"
+            elif history.progress >= 95.0:
+                next_ep = get_next_uncompleted_episode(session, hist_ep, current_user.id, prof_id) if hist_ep else None
+                if next_ep:
+                    selected_episode = next_ep
+                    resume_link = f"/play/tv/{next_ep.id}"
+                else:
+                    resume_link = f"/play/tv/{selected_episode.id}"
+            else:
+                if hist_ep:
+                    selected_episode = hist_ep
+                resume_link = f"/play/tv/{selected_episode.id}"
         else:
             resume_link = f"/play/tv/{selected_episode.id}"
         
@@ -3225,8 +3852,9 @@ async def play_video(
     
     item = session.get(Movie if media_type == "movie" else TVShow, item_id)
     if not item: raise HTTPException(status_code=404, detail="Item not found")
-    if is_profile_kids(current_user, current_profile) and not is_kids_safe(item.content_rating):
-        raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+    rating_level = get_profile_rating_level(current_user, current_profile)
+    if rating_level > 0 and not is_rating_allowed(item.content_rating, rating_level):
+        raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
 
     is_trailer = bool(trailer)
     if is_trailer:
@@ -3287,13 +3915,16 @@ async def play_video(
             else:
                 return RedirectResponse(url=f"/movie/{item.id}?no_trailer=1", status_code=303)
 
-        token = request.query_params.get("token", "")
+        ua = request.headers.get("user-agent", "")
+        is_apple = any(k in ua for k in ["Macintosh", "Mac OS", "iPhone", "iPad", "iPod", "CFNetwork"])
+        token = request.query_params.get("token") or (current_user.session_token if current_user else "")
         return templates.TemplateResponse(request=request, name="player.html", context={
             "item": item, "media_type": media_type, "history": None, "season_episode": "",
-            "duration": duration, "next_episode_id": None, "subtitle_url": None,
+            "duration": duration, "next_episode_id": None, "prev_episode_id": None, "subtitle_url": None,
             "subtitle_tracks": [], "media_bitrate": probe.get("bitrate") if probe else None,
             "sync_session_id": None, "is_sync_host": False, "sync_initial_time": 0.0,
             "user": current_user, "current_profile": current_profile, "token": token, "is_mobile": mobile == "1",
+            "is_apple": is_apple,
             "audio_tracks": audio_tracks,
             "is_trailer": True,
             "trailer_source": trailer_source,
@@ -3302,7 +3933,23 @@ async def play_video(
         })
         
     prof_id = current_profile.id if current_profile else None
-    history_entry = session.exec(select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == item_id).where(WatchHistory.media_type == media_type).where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))).first()
+    all_hist = session.exec(
+        select(WatchHistory).where(
+            WatchHistory.user_id == current_user.id,
+            WatchHistory.item_id == item_id,
+            WatchHistory.media_type == media_type
+        ).order_by(WatchHistory.last_watched.desc())
+    ).all()
+    
+    history_entry = None
+    if all_hist:
+        history_entry = next((h for h in all_hist if h.profile_id == prof_id), None)
+        if not history_entry:
+            history_entry = next((h for h in all_hist if h.profile_id is None), all_hist[0])
+        # Purge any duplicate records for this item so only one persists
+        for extra in all_hist:
+            if extra.id != history_entry.id:
+                session.delete(extra)
     
     if media_type == "movie":
         sibling_ids = get_sibling_movie_ids(session, item)
@@ -3357,6 +4004,7 @@ async def play_video(
                 break
     
     next_episode_id = None
+    prev_episode_id = None
 
     season_episode = ""
     if media_type == "tv":
@@ -3368,25 +4016,12 @@ async def play_video(
             if name_match and name_match.group(1).strip():
                 season_episode += f"<br>{name_match.group(1).strip()}"
                 
-        # Clean up older episodes from continue watching
-        series_episodes = session.exec(select(TVShow).where(TVShow.title == item.title)).all()
-        series_ep_ids = [ep.id for ep in series_episodes]
-        clean_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id.in_(series_ep_ids)).where(WatchHistory.id != history_entry.id)
-        if prof_id:
-            clean_q = clean_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
-        old_history = session.exec(clean_q).all()
-        for old_h in old_history:
-            session.delete(old_h)
-        session.commit()
-        
-        def get_s_e(t):
-            m = re.search(r'S(\d+)E(\d+)', t.file_path, re.IGNORECASE)
-            if m: return (int(m.group(1)), int(m.group(2)))
-            return (0, 0)
-            
-        sorted_eps = sorted(series_episodes, key=get_s_e)
+        series_episodes = session.exec(select(TVShow).where(func.lower(TVShow.title) == item.title.strip().lower())).all()
+        sorted_eps = sorted(series_episodes, key=get_tv_episode_sort_key)
         for i, ep in enumerate(sorted_eps):
             if ep.id == item_id:
+                if i > 0:
+                    prev_episode_id = sorted_eps[i-1].id
                 if i + 1 < len(sorted_eps):
                     next_episode_id = sorted_eps[i+1].id
                 break
@@ -3490,12 +4125,22 @@ async def play_video(
         ip=client_ip
     )
 
+    ua = request.headers.get("user-agent", "")
+    is_apple = any(k in ua for k in ["Macintosh", "Mac OS", "iPhone", "iPad", "iPod", "CFNetwork"])
+    active_token = token or (current_user.session_token if current_user else "")
+
+    hdr_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "hdr_tonemapping")).first()
+    server_hdr_tonemapping = (hdr_cfg.value == "true") if hdr_cfg else True
+
     return templates.TemplateResponse(request=request, name="player.html", context={
         "item": item, "media_type": media_type, "history": history_entry, "season_episode": season_episode,
-        "duration": duration, "next_episode_id": next_episode_id, "subtitle_url": subtitle_url,
+        "duration": duration, "next_episode_id": next_episode_id, "prev_episode_id": prev_episode_id, "subtitle_url": subtitle_url,
         "subtitle_tracks": subtitle_tracks, "media_bitrate": probe.get("bitrate"),
+        "is_hdr": probe.get("is_hdr", False), "hdr_format": probe.get("hdr_format", "HDR"),
+        "server_hdr_tonemapping": server_hdr_tonemapping,
         "sync_session_id": sync, "is_sync_host": is_sync_host, "sync_initial_time": sync_initial_time,
-        "user": current_user, "current_profile": current_profile, "token": token, "is_mobile": mobile == "1",
+        "user": current_user, "current_profile": current_profile, "token": active_token, "is_mobile": mobile == "1",
+        "is_apple": is_apple,
         "audio_tracks": audio_tracks, "is_restart": bool(restart)
     })
 
@@ -3520,7 +4165,8 @@ async def get_subtitle(
         file_path = item.file_path
         content_rating = item.content_rating
 
-    if is_profile_kids(current_user, current_profile) and not is_kids_safe(content_rating):
+    rating_level = get_profile_rating_level(current_user, current_profile)
+    if rating_level > 0 and not is_rating_allowed(content_rating, rating_level):
         return Response(status_code=403)
 
     if stream_idx is not None and not track_id:
@@ -3674,10 +4320,22 @@ async def update_progress(
     if progress >= 95.0:
         active_stream_manager.stop_stream(session_key)
         for t_id in sibling_ids:
-            hist_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == t_id).where(WatchHistory.media_type == media_type)
-            if prof_id:
-                hist_q = hist_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
-            entry = session.exec(hist_q).first()
+            all_entries = session.exec(
+                select(WatchHistory).where(
+                    WatchHistory.user_id == current_user.id,
+                    WatchHistory.item_id == t_id,
+                    WatchHistory.media_type == media_type
+                ).order_by(WatchHistory.last_watched.desc())
+            ).all()
+            entry = None
+            if all_entries:
+                entry = next((e for e in all_entries if e.profile_id == prof_id), None)
+                if not entry:
+                    entry = next((e for e in all_entries if e.profile_id is None), all_entries[0])
+                for extra in all_entries:
+                    if extra.id != entry.id:
+                        session.delete(extra)
+
             t_dur = dur_val
             if media_type == "movie" and t_id != item_id:
                 t_m = session.get(Movie, t_id)
@@ -3703,6 +4361,37 @@ async def update_progress(
                 )
                 session.add(entry)
 
+        if media_type == "tv":
+            cur_tv = session.get(TVShow, item_id)
+            if cur_tv:
+                next_ep = get_next_uncompleted_episode(session, cur_tv, current_user.id, prof_id)
+                if next_ep:
+                    q_next = select(WatchHistory).where(
+                        WatchHistory.user_id == current_user.id,
+                        WatchHistory.media_type == "tv",
+                        WatchHistory.item_id == next_ep.id
+                    )
+                    if prof_id:
+                        q_next = q_next.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+                    next_hist = session.exec(q_next.order_by(WatchHistory.last_watched.desc())).first()
+                    now_ts = datetime.now(timezone.utc)
+                    if next_hist:
+                        if next_hist.progress < 95.0:
+                            next_hist.last_watched = now_ts
+                            session.add(next_hist)
+                    else:
+                        new_next = WatchHistory(
+                            user_id=current_user.id,
+                            profile_id=prof_id,
+                            media_type="tv",
+                            item_id=next_ep.id,
+                            progress=0.0,
+                            current_time=0.0,
+                            duration=float(next_ep.runtime * 60) if next_ep.runtime else 0.0,
+                            last_watched=now_ts
+                        )
+                        session.add(new_next)
+
         for attempt in range(5):
             try:
                 session.commit()
@@ -3720,10 +4409,21 @@ async def update_progress(
 
     # Progress < 95.0 (In Progress)
     for t_id in sibling_ids:
-        hist_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == t_id).where(WatchHistory.media_type == media_type)
-        if prof_id:
-            hist_q = hist_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
-        entry = session.exec(hist_q).first()
+        all_entries = session.exec(
+            select(WatchHistory).where(
+                WatchHistory.user_id == current_user.id,
+                WatchHistory.item_id == t_id,
+                WatchHistory.media_type == media_type
+            ).order_by(WatchHistory.last_watched.desc())
+        ).all()
+        entry = None
+        if all_entries:
+            entry = next((e for e in all_entries if e.profile_id == prof_id), None)
+            if not entry:
+                entry = next((e for e in all_entries if e.profile_id is None), all_entries[0])
+            for extra in all_entries:
+                if extra.id != entry.id:
+                    session.delete(extra)
 
         t_dur = dur_val
         if media_type == "movie" and t_id != item_id:
@@ -3832,6 +4532,7 @@ async def stream_video(
     start: float = 0.0,
     audio_track: int = 0,
     burn_sub: Optional[str] = None,
+    tonemap: Optional[int] = None,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile)
 ):
@@ -3842,15 +4543,29 @@ async def stream_video(
     with Session(engine) as session:
         item = session.get(Movie if media_type == "movie" else TVShow, item_id)
         if not item or not os.path.exists(item.file_path): raise HTTPException(status_code=404, detail="Video file missing")
-        if is_profile_kids(current_user, current_profile) and not is_kids_safe(getattr(item, 'content_rating', '')):
-            raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+        rating_level = get_profile_rating_level(current_user, current_profile)
+        if rating_level > 0 and not is_rating_allowed(getattr(item, 'content_rating', ''), rating_level):
+            raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
         hw_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
         hw_profile = hw_config.value if hw_config else "auto"
+        hdr_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "hdr_tonemapping")).first()
+        raw_hdr = str(hdr_cfg.value).strip().lower() if hdr_cfg else "hable"
+        if raw_hdr in ("disabled", "false", "0", "off"):
+            server_hdr_enabled = False
+            server_tonemap_algo = "hable"
+        else:
+            server_hdr_enabled = True
+            server_tonemap_algo = raw_hdr if raw_hdr in ("hable", "mobius", "reinhard", "linear", "gamma", "clip") else "hable"
         file_path = item.file_path
 
     file_ext = os.path.splitext(file_path)[1].lower().lstrip(".")
     is_mp4 = (file_ext in ["mp4", "m4v"])
     probe = probe_media_streams(file_path)
+    is_hdr = probe.get("is_hdr", False)
+    enable_tonemap = (tonemap == 1) if tonemap is not None else server_hdr_enabled
+    tonemap_active = bool(is_hdr and enable_tonemap)
+    tonemap_algo = server_tonemap_algo
+
     audio_tracks = probe.get("audio_tracks", [])
     subtitle_tracks = probe.get("subtitle_tracks", [])
 
@@ -3870,9 +4585,10 @@ async def stream_video(
 
     # 1. Native Direct Play:
     # Requires original resolution, MP4 container, start at 0:00, primary audio track (audio_track == 0),
-    # web-compatible video & audio codecs, and NO subtitle burn-in requested.
+    # web-compatible video & audio codecs, NO subtitle burn-in requested, and not tone-mapping HDR.
     is_direct_play = (
         not burn_sub_active and
+        not tonemap_active and
         res == "original" and
         is_mp4 and
         start == 0.0 and
@@ -3889,13 +4605,14 @@ async def stream_video(
             "X-Play-Type": "direct_play",
             "X-Audio-Track": str(audio_track),
             "X-Burn-Sub": "none",
+            "X-Tone-Mapping": "off",
         }
         return FileResponse(file_path, media_type="video/mp4", headers=headers)
 
     # 2. Smart Remuxing / Direct Stream:
     # When video codec is already web-compatible (H.264), native resolution is requested,
-    # and no subtitle burn-in is active, stream-copy video (-c:v copy).
-    can_direct_stream_video = (not burn_sub_active and res == "original" and probe.get("can_direct_stream_video", False))
+    # no subtitle burn-in is active, and HDR is not being tone mapped to SDR.
+    can_direct_stream_video = (not burn_sub_active and not tonemap_active and res == "original" and probe.get("can_direct_stream_video", False))
 
     actual_start = start
     if start > 0.0 and can_direct_stream_video:
@@ -3945,11 +4662,15 @@ async def stream_video(
     else:
         # 3. Full Video Transcoding:
         # Required when downscaling resolution, when source video codec is incompatible,
-        # or when burning in bitmap/PGS subtitles directly into video frames.
+        # when burning in bitmap/PGS subtitles, or when tone mapping HDR content to SDR.
         pipeline_args, v_map, encoder_type = get_video_transcode_pipeline(
             res=res,
             profile=hw_profile,
-            burn_sub_stream=sub_idx
+            burn_sub_stream=sub_idx,
+            is_hdr=is_hdr,
+            enable_tonemap=enable_tonemap,
+            color_transfer=probe.get("color_transfer"),
+            tonemap_algo=tonemap_algo
         )
         cmd.extend(pipeline_args)
         cmd.extend(["-map", v_map])
@@ -3976,6 +4697,8 @@ async def stream_video(
             "software": "Software CPU (libx264)"
         }
         base_method = method_names.get(encoder_type, encoder_type)
+        if tonemap_active:
+            base_method = f"{base_method} [HDR Tone Map ({tonemap_algo})]"
         if burn_sub_active:
             sub_label = burn_sub_track.get("label", f"Track #{sub_idx}") if burn_sub_track else f"Track #{sub_idx}"
             transcode_method = f"{base_method} [Burn-in: {sub_label}] (Audio: {track_label})"
@@ -3991,6 +4714,7 @@ async def stream_video(
         "X-Play-Type": play_type,
         "X-Audio-Track": str(audio_track),
         "X-Burn-Sub": str(sub_idx) if burn_sub_active else "none",
+        "X-Tone-Mapping": f"active ({tonemap_algo})" if tonemap_active else "off",
         "X-Actual-Start": str(actual_start),
     }
 
@@ -4015,6 +4739,7 @@ async def get_stream_info(
     start: float = 0.0,
     audio_track: int = 0,
     burn_sub: Optional[str] = None,
+    tonemap: Optional[int] = None,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile)
 ):
@@ -4025,16 +4750,30 @@ async def get_stream_info(
     with Session(engine) as session:
         item = session.get(Movie if media_type == "movie" else TVShow, item_id)
         if not item or not os.path.exists(item.file_path): raise HTTPException(status_code=404, detail="Video file missing")
-        if is_profile_kids(current_user, current_profile) and not is_kids_safe(getattr(item, 'content_rating', '')):
-            raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+        rating_level = get_profile_rating_level(current_user, current_profile)
+        if rating_level > 0 and not is_rating_allowed(getattr(item, 'content_rating', ''), rating_level):
+            raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
         hw_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
         hw_profile = hw_config.value if hw_config else "auto"
+        hdr_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "hdr_tonemapping")).first()
+        raw_hdr = str(hdr_cfg.value).strip().lower() if hdr_cfg else "hable"
+        if raw_hdr in ("disabled", "false", "0", "off"):
+            server_hdr_enabled = False
+            server_tonemap_algo = "hable"
+        else:
+            server_hdr_enabled = True
+            server_tonemap_algo = raw_hdr if raw_hdr in ("hable", "mobius", "reinhard", "linear", "gamma", "clip") else "hable"
         file_path = item.file_path
         item_title = item.title
 
     file_ext = os.path.splitext(file_path)[1].lower().lstrip(".")
     is_mp4 = (file_ext in ["mp4", "m4v"])
     probe = probe_media_streams(file_path)
+    is_hdr = probe.get("is_hdr", False)
+    enable_tonemap = (tonemap == 1) if tonemap is not None else server_hdr_enabled
+    tonemap_active = bool(is_hdr and enable_tonemap)
+    tonemap_algo = server_tonemap_algo
+
     audio_tracks = probe.get("audio_tracks", [])
     subtitle_tracks = probe.get("subtitle_tracks", [])
 
@@ -4052,13 +4791,13 @@ async def get_stream_info(
     track_can_copy = selected_track.get("can_direct_stream", False) if selected_track else False
     track_label = selected_track.get("label", f"Track {audio_track + 1}") if selected_track else "None"
 
-    if not burn_sub_active and res == "original" and is_mp4 and start == 0.0 and audio_track == 0 and probe.get("can_direct_stream_video", True) and track_can_copy:
+    if not burn_sub_active and not tonemap_active and res == "original" and is_mp4 and start == 0.0 and audio_track == 0 and probe.get("can_direct_stream_video", True) and track_can_copy:
         is_transcode = False
         method = "Direct Play"
         encoder = "none"
         hw_accel = False
         play_type = "direct_play"
-    elif not burn_sub_active and res == "original" and probe.get("can_direct_stream_video", False):
+    elif not burn_sub_active and not tonemap_active and res == "original" and probe.get("can_direct_stream_video", False):
         is_transcode = False
         hw_accel = False
         if not selected_track:
@@ -4085,6 +4824,8 @@ async def get_stream_info(
             "software": "Software CPU (libx264)"
         }
         base_method = method_names.get(encoder, encoder)
+        if tonemap_active:
+            base_method = f"{base_method} [HDR Tone Map ({tonemap_algo})]"
         if burn_sub_active:
             sub_label = burn_sub_track.get("label", f"Track #{sub_idx}") if burn_sub_track else f"Track #{sub_idx}"
             method = f"{base_method} [Burn-in: {sub_label}] (Audio: {track_label})"
@@ -4092,7 +4833,7 @@ async def get_stream_info(
             method = f"{base_method} (Audio: {track_label})"
         play_type = "transcode"
 
-    can_direct_stream_video = (not burn_sub_active and res == "original" and probe.get("can_direct_stream_video", False))
+    can_direct_stream_video = (not burn_sub_active and not tonemap_active and res == "original" and probe.get("can_direct_stream_video", False))
     actual_start = start
     if start > 0.0 and can_direct_stream_video:
         actual_start = get_keyframe_before_time(file_path, start)
@@ -4116,6 +4857,11 @@ async def get_stream_info(
         "play_type": play_type,
         "container": file_ext,
         "video_codec": probe.get("video_codec"),
+        "is_hdr": is_hdr,
+        "hdr_format": probe.get("hdr_format"),
+        "tone_mapping_enabled": enable_tonemap,
+        "tone_mapping_active": tonemap_active,
+        "tone_mapping_algo": tonemap_algo,
         "bitrate": probe.get("bitrate"),
         "width": probe.get("width"),
         "height": probe.get("height"),
@@ -4135,6 +4881,7 @@ async def get_hls_master(
     item_id: int,
     audio_track: int = 0,
     burn_sub: Optional[str] = None,
+    tonemap: Optional[int] = None,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile)
 ):
@@ -4149,9 +4896,17 @@ async def get_hls_master(
         item = session.get(Movie if media_type == "movie" else TVShow, item_id)
         if not item or not os.path.exists(item.file_path):
             raise HTTPException(status_code=404, detail="Media file missing")
-        if is_profile_kids(current_user, current_profile) and not is_kids_safe(getattr(item, 'content_rating', '')):
-            raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+        rating_level = get_profile_rating_level(current_user, current_profile)
+        if rating_level > 0 and not is_rating_allowed(getattr(item, 'content_rating', ''), rating_level):
+            raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
         file_path = item.file_path
+        if tonemap is None:
+            hdr_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "hdr_tonemapping")).first()
+            raw_hdr = str(hdr_cfg.value).strip().lower() if hdr_cfg else "hable"
+            if raw_hdr in ("disabled", "false", "0", "off"):
+                tonemap = 0
+            else:
+                tonemap = 1
 
     token = request.query_params.get("token")
     content = hls_manager.build_master_playlist(
@@ -4160,7 +4915,8 @@ async def get_hls_master(
         file_path=file_path,
         audio_track=audio_track,
         burn_sub=burn_sub,
-        token=token
+        token=token,
+        tonemap=tonemap
     )
     return Response(content=content, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-cache"})
 
@@ -4172,6 +4928,7 @@ async def get_hls_variant(
     res: str,
     audio_track: int = 0,
     burn_sub: Optional[str] = None,
+    tonemap: Optional[int] = None,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile)
 ):
@@ -4186,9 +4943,17 @@ async def get_hls_variant(
         item = session.get(Movie if media_type == "movie" else TVShow, item_id)
         if not item or not os.path.exists(item.file_path):
             raise HTTPException(status_code=404, detail="Media file missing")
-        if is_profile_kids(current_user, current_profile) and not is_kids_safe(getattr(item, 'content_rating', '')):
-            raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+        rating_level = get_profile_rating_level(current_user, current_profile)
+        if rating_level > 0 and not is_rating_allowed(getattr(item, 'content_rating', ''), rating_level):
+            raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
         file_path = item.file_path
+        if tonemap is None:
+            hdr_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "hdr_tonemapping")).first()
+            raw_hdr = str(hdr_cfg.value).strip().lower() if hdr_cfg else "hable"
+            if raw_hdr in ("disabled", "false", "0", "off"):
+                tonemap = 0
+            else:
+                tonemap = 1
 
     probe = probe_media_streams(file_path)
     duration = probe.get("duration") or 0.0
@@ -4201,7 +4966,8 @@ async def get_hls_variant(
         duration=duration,
         audio_track=audio_track,
         burn_sub=burn_sub,
-        token=token
+        token=token,
+        tonemap=tonemap
     )
     return Response(content=content, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-cache"})
 
@@ -4213,6 +4979,7 @@ async def get_hls_segment(
     segment_idx: int,
     audio_track: int = 0,
     burn_sub: Optional[str] = None,
+    tonemap: Optional[int] = None,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile)
 ):
@@ -4227,11 +4994,20 @@ async def get_hls_segment(
         item = session.get(Movie if media_type == "movie" else TVShow, item_id)
         if not item or not os.path.exists(item.file_path):
             raise HTTPException(status_code=404, detail="Media file missing")
-        if is_profile_kids(current_user, current_profile) and not is_kids_safe(getattr(item, 'content_rating', '')):
-            raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+        rating_level = get_profile_rating_level(current_user, current_profile)
+        if rating_level > 0 and not is_rating_allowed(getattr(item, 'content_rating', ''), rating_level):
+            raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
         file_path = item.file_path
         hw_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
         hw_profile = hw_config.value if hw_config else "auto"
+        hdr_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "hdr_tonemapping")).first()
+        raw_hdr = str(hdr_cfg.value).strip().lower() if hdr_cfg else "hable"
+        if raw_hdr in ("disabled", "false", "0", "off"):
+            server_hdr_enabled = False
+            server_tonemap_algo = "hable"
+        else:
+            server_hdr_enabled = True
+            server_tonemap_algo = raw_hdr if raw_hdr in ("hable", "mobius", "reinhard", "linear", "gamma", "clip") else "hable"
 
     seg_path = hls_manager.get_segment(
         media_type=media_type,
@@ -4241,7 +5017,10 @@ async def get_hls_segment(
         audio_track=audio_track,
         segment_idx=segment_idx,
         burn_sub=burn_sub,
-        hw_profile=hw_profile
+        hw_profile=hw_profile,
+        tonemap=tonemap,
+        enable_tonemap=server_hdr_enabled,
+        tonemap_algo=server_tonemap_algo
     )
     if not seg_path or not os.path.exists(seg_path):
         raise HTTPException(status_code=404, detail="Segment generation timed out or failed")
@@ -4306,6 +5085,55 @@ async def add_watchlist(
         session.add(Watchlist(user_id=current_user.id, profile_id=prof_id, media_type=media_type, item_id=item_id))
         session.commit()
     return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
+
+@app.post("/watchlist/toggle")
+async def toggle_watchlist(
+    request: Request,
+    media_type: Optional[str] = Form(None),
+    item_id: Optional[int] = Form(None),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user: return RedirectResponse(url="/login", status_code=303)
+    if not media_type or not item_id:
+        try:
+            body = await request.json()
+            media_type = body.get("media_type")
+            item_id = int(body.get("item_id"))
+        except Exception:
+            pass
+    if not media_type or not item_id:
+        media_type = request.query_params.get("media_type")
+        iid_str = request.query_params.get("item_id")
+        if iid_str and iid_str.isdigit():
+            item_id = int(iid_str)
+    if not media_type or not item_id:
+        return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
+
+    prof_id = current_profile.id if current_profile else None
+    q = select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.media_type == media_type).where(Watchlist.item_id == item_id)
+    if prof_id:
+        q = q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+    existing = session.exec(q).first()
+    if existing:
+        items = session.exec(q).all()
+        for it in items:
+            session.delete(it)
+        session.commit()
+        in_watchlist = False
+    else:
+        session.add(Watchlist(user_id=current_user.id, profile_id=prof_id, media_type=media_type, item_id=item_id))
+        session.commit()
+        in_watchlist = True
+
+    if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
+        return {"status": "success", "in_watchlist": in_watchlist}
+    return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
+
+@app.get("/.well-known/appspecific/com.chrome.devtools.json")
+async def chrome_devtools_manifest():
+    return {}
 
 @app.post("/history/remove/{media_type}/{item_id}")
 async def remove_history(
@@ -4422,6 +5250,36 @@ async def mark_watched(
                         last_watched=datetime.now(timezone.utc)
                     )
                     session.add(hist)
+
+            if scope == "episode" and tv_item:
+                next_ep = get_next_uncompleted_episode(session, tv_item, current_user.id, prof_id)
+                if next_ep:
+                    q_next = select(WatchHistory).where(
+                        WatchHistory.user_id == current_user.id,
+                        WatchHistory.media_type == "tv",
+                        WatchHistory.item_id == next_ep.id
+                    )
+                    if prof_id:
+                        q_next = q_next.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+                    next_hist = session.exec(q_next.order_by(WatchHistory.last_watched.desc())).first()
+                    now_ts = datetime.now(timezone.utc)
+                    if next_hist:
+                        if next_hist.progress < 95.0:
+                            next_hist.last_watched = now_ts
+                            session.add(next_hist)
+                    else:
+                        new_next = WatchHistory(
+                            user_id=current_user.id,
+                            profile_id=prof_id,
+                            media_type="tv",
+                            item_id=next_ep.id,
+                            progress=0.0,
+                            current_time=0.0,
+                            duration=float(next_ep.runtime * 60) if next_ep.runtime else 0.0,
+                            last_watched=now_ts
+                        )
+                        session.add(new_next)
+
             session.commit()
             
     if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
@@ -4551,10 +5409,11 @@ async def download_tv_season(
         if not all_episodes:
             raise HTTPException(status_code=404, detail="No episodes found")
 
-        if is_profile_kids(current_user, current_profile):
-            all_episodes = [ep for ep in all_episodes if is_kids_safe(getattr(ep, 'content_rating', ''))]
+        rating_level = get_profile_rating_level(current_user, current_profile)
+        if rating_level > 0:
+            all_episodes = [ep for ep in all_episodes if is_rating_allowed(getattr(ep, 'content_rating', ''), rating_level)]
             if not all_episodes:
-                raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+                raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
 
         def get_ep_season(ep: TVShow) -> int:
             if ep.season is not None:
@@ -4621,10 +5480,11 @@ async def download_tv_show(
         if not all_episodes:
             raise HTTPException(status_code=404, detail="No episodes found")
 
-        if is_profile_kids(current_user, current_profile):
-            all_episodes = [ep for ep in all_episodes if is_kids_safe(getattr(ep, 'content_rating', ''))]
+        rating_level = get_profile_rating_level(current_user, current_profile)
+        if rating_level > 0:
+            all_episodes = [ep for ep in all_episodes if is_rating_allowed(getattr(ep, 'content_rating', ''), rating_level)]
             if not all_episodes:
-                raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+                raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
 
         def get_ep_season(ep: TVShow) -> int:
             if ep.season is not None:
@@ -4759,8 +5619,9 @@ async def download_media(
     else:
         item = session.get(TVShow, item_id)
     if not item or not os.path.exists(item.file_path): raise HTTPException(status_code=404, detail="File missing")
-    if media_type not in ("photo", "track", "music") and is_profile_kids(current_user, current_profile) and not is_kids_safe(getattr(item, 'content_rating', '')):
-        raise HTTPException(status_code=403, detail="Not appropriate for Kids Mode")
+    rating_level = get_profile_rating_level(current_user, current_profile)
+    if media_type not in ("photo", "track", "music") and rating_level > 0 and not is_rating_allowed(getattr(item, 'content_rating', ''), rating_level):
+        raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
     file_path = item.file_path
     
     filename = os.path.basename(file_path)
@@ -4852,15 +5713,57 @@ def get_server_metrics(session: Session) -> dict:
         "active_streams_count": len(active_streams)
     }
 
+def cleanup_duplicate_watch_history(session: Session) -> int:
+    """
+    Finds and deletes duplicate WatchHistory records for the same user and media item,
+    retaining only the record with the most recent last_watched timestamp.
+    """
+    try:
+        dup_groups = session.exec(
+            select(WatchHistory.user_id, WatchHistory.media_type, WatchHistory.item_id)
+            .group_by(WatchHistory.user_id, WatchHistory.media_type, WatchHistory.item_id)
+            .having(func.count(WatchHistory.id) > 1)
+        ).all()
+
+        deleted_count = 0
+        for uid, mtype, iid in dup_groups:
+            records = session.exec(
+                select(WatchHistory)
+                .where(
+                    WatchHistory.user_id == uid,
+                    WatchHistory.media_type == mtype,
+                    WatchHistory.item_id == iid
+                )
+                .order_by(WatchHistory.last_watched.desc(), WatchHistory.id.desc())
+            ).all()
+
+            if len(records) > 1:
+                # Keep the first (most recently watched) record and delete all duplicates
+                for r in records[1:]:
+                    session.delete(r)
+                    deleted_count += 1
+
+        if deleted_count > 0:
+            session.commit()
+        return deleted_count
+    except Exception:
+        session.rollback()
+        return 0
+
 def get_user_and_watch_stats(session: Session, limit: int = 25) -> dict:
+    # First, proactively clean up any duplicate records stored in the database
+    cleanup_duplicate_watch_history(session)
+
+    # Fetch a wider pool to allow deduplication across series/sibling titles
     history_records = session.exec(
-        select(WatchHistory).order_by(WatchHistory.last_watched.desc()).limit(limit)
+        select(WatchHistory).order_by(WatchHistory.last_watched.desc()).limit(limit * 3)
     ).all()
 
     user_ids = {h.user_id for h in history_records}
     users = {u.id: u for u in session.exec(select(User).where(User.id.in_(user_ids))).all()} if user_ids else {}
 
     recent_history = []
+    seen_history_keys = set()
     now = datetime.now(timezone.utc)
     for h in history_records:
         u = users.get(h.user_id)
@@ -4906,6 +5809,19 @@ def get_user_and_watch_stats(session: Session, limit: int = 25) -> dict:
                             dur_sec = float(t.runtime)
                     except Exception:
                         pass
+
+        # Deduplicate: A user watching the same episode or movie should only appear once (the latest watch update)
+        if h.media_type == "tv":
+            dedup_key = (h.user_id, "tv", title.strip().lower(), (season_episode or str(h.item_id)).lower())
+        elif h.media_type == "movie":
+            clean_year = str(year).split(" • ")[0].strip()
+            dedup_key = (h.user_id, "movie", title.strip().lower(), clean_year or str(h.item_id))
+        else:
+            dedup_key = (h.user_id, h.media_type, h.item_id)
+
+        if dedup_key in seen_history_keys:
+            continue
+        seen_history_keys.add(dedup_key)
 
         if dur_sec > 0 and not cur_sec:
             cur_sec = dur_sec * (h.progress / 100.0)
@@ -4962,6 +5878,9 @@ def get_user_and_watch_stats(session: Session, limit: int = 25) -> dict:
             "time_ago": time_ago,
             "last_watched": h.last_watched.strftime("%Y-%m-%d %H:%M") if h.last_watched else ""
         })
+
+        if len(recent_history) >= limit:
+            break
 
     all_users = session.exec(select(User)).all()
     users_list = []
@@ -5107,9 +6026,24 @@ async def view_settings(
         
         hw_accel_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
         hw_accel_profile = hw_accel_config.value if hw_accel_config else "auto"
+
+        hdr_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hdr_tonemapping")).first()
+        if hdr_config:
+            raw_hdr = str(hdr_config.value).strip().lower()
+            if raw_hdr in ("true", "1", "on"):
+                hdr_tonemapping = "hable"
+            elif raw_hdr in ("false", "0", "off", "disabled"):
+                hdr_tonemapping = "disabled"
+            elif raw_hdr in ("hable", "mobius", "reinhard", "linear", "gamma", "clip"):
+                hdr_tonemapping = raw_hdr
+            else:
+                hdr_tonemapping = "hable"
+        else:
+            hdr_tonemapping = "hable"
     else:
         mounted_volumes = {"movie": False, "tv": False, "photo": False, "music": False}
         theaudiodb_key = ""
+        hdr_tonemapping = "hable"
     
     rewind_seconds = current_profile.rewind_seconds if (current_profile and current_profile.rewind_seconds is not None) else (current_user.rewind_seconds or 0)
     
@@ -5118,12 +6052,14 @@ async def view_settings(
         "is_admin": is_admin, "can_change_password": can_change_password,
         "invites": invites, "users": users, "volume_paths": volume_paths, "mounted_volumes": mounted_volumes,
         "host_url": host_url, "remote_url": remote_url, "tmdb_key": tmdb_key, "theaudiodb_key": theaudiodb_key,
-        "hw_accel_profile": hw_accel_profile, "rewind_seconds": rewind_seconds
+        "hw_accel_profile": hw_accel_profile, "hdr_tonemapping": hdr_tonemapping, "rewind_seconds": rewind_seconds
     })
 
 @app.post("/settings/transcoding")
 async def save_transcoding_settings(
+    request: Request,
     hw_accel_profile: str = Form("auto"),
+    hdr_tonemapping: str = Form("hable"),
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
@@ -5136,8 +6072,22 @@ async def save_transcoding_settings(
     else:
         config.value = hw_accel_profile.strip()
         session.add(config)
+
+    valid_algos = {"disabled", "hable", "mobius", "reinhard", "linear", "gamma", "clip"}
+    hdr_val = str(hdr_tonemapping).strip().lower()
+    if hdr_val not in valid_algos:
+        hdr_val = "hable" if hdr_val in ("true", "1", "on") else "disabled"
+
+    hdr_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "hdr_tonemapping")).first()
+    if not hdr_cfg:
+        hdr_cfg = SystemConfig(key="hdr_tonemapping", value=hdr_val)
+        session.add(hdr_cfg)
+    else:
+        hdr_cfg.value = hdr_val
+        session.add(hdr_cfg)
+
     session.commit()
-    return RedirectResponse(url="/settings", status_code=303)
+    return JSONResponse({"status": "ok", "hdr_tonemapping": hdr_val, "hw_accel_profile": hw_accel_profile.strip()})
 
 @app.post("/settings/change_password")
 async def change_password(
@@ -5309,13 +6259,19 @@ async def fix_media_match(
 
             poster_filename = await async_download_image(client, m_data.get("poster_path"), "movie", tmdb_id, "poster")
             backdrop_filename = await async_download_image(client, m_data.get("backdrop_path"), "movie", tmdb_id, "backdrop")
-            cast, director, content_rating, genres_str, trailer_key = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_key)
+            cast, director, content_rating, genres_str, trailer_key, col_id, col_name, col_poster, col_backdrop = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_key)
 
             movie.title = m_data.get("title") or movie.title
             movie.year = (m_data.get("release_date") or "")[:4] or movie.year
             movie.plot = m_data.get("overview") or movie.plot
             movie.rating = m_data.get("vote_average") or movie.rating
             movie.tmdb_id = tmdb_id
+            movie.collection_id = col_id if col_id else 0
+            movie.collection_name = col_name
+            if col_poster:
+                movie.collection_poster_filename = col_poster
+            if col_backdrop:
+                movie.collection_backdrop_filename = col_backdrop
             if trailer_key:
                 movie.trailer_key = trailer_key
             if poster_filename:
@@ -5349,7 +6305,7 @@ async def fix_media_match(
 
             poster_filename = await async_download_image(client, s_data.get("poster_path"), "tv", tmdb_id, "poster")
             backdrop_filename = await async_download_image(client, s_data.get("backdrop_path"), "tv", tmdb_id, "backdrop")
-            cast, director, content_rating, genres_str, _ = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_key)
+            cast, director, content_rating, genres_str, _, _, _, _, _ = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_key)
 
             new_title = s_data.get("name") or old_title
             new_year = (s_data.get("first_air_date") or "")[:4] or show.year
@@ -5711,7 +6667,6 @@ async def update_invite(
 
         invite.downloads_access = downloads_access == "on"
         invite.watch_together_access = watch_together_access == "on"
-        invite.kids_mode = kids_mode == "on"
         invite.can_manage_profiles = can_manage_profiles == "on"
         session.add(invite)
         session.commit()
@@ -5752,7 +6707,6 @@ async def update_user(
 
         user.downloads_access = downloads_access == "on"
         user.watch_together_access = watch_together_access == "on"
-        user.kids_mode = kids_mode == "on"
         user.can_manage_profiles = can_manage_profiles == "on"
         session.add(user)
         session.commit()

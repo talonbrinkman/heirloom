@@ -46,6 +46,11 @@
                         <i data-lucide="sliders"></i>
                         <span>Manage Profiles</span>
                     </a>
+                    {% elif current_profile and not current_profile.is_primary %}
+                    <a href="/profiles?manage=1" class="profile-dropdown-item">
+                        <i data-lucide="pencil"></i>
+                        <span>Manage Profile</span>
+                    </a>
                     {% endif %}
                     <a href="/logout" class="profile-dropdown-item text-danger">
                         <i data-lucide="log-out"></i>
