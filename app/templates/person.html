@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Heirloom - {{ person.name }}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/fix-match.js"></script>
+    <style>
+        body {
+            background-color: #000000 !important;
+        }
+        @media (max-width: 768px) {
+            .person-layout .info-poster {
+                display: block !important;
+                margin: 0 auto 20px auto;
+                max-width: 220px;
+                width: 60%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="flex gap-15 align-center">
+            <a href="javascript:history.back()" class="icon-link" title="Back">
+                <i data-lucide="arrow-left"></i>
+            </a>
+            <h1 class="m-0"><a href="/" style="color: inherit; text-decoration: none;">Heirloom</a></h1>
+        </div>
+        <div class="flex gap-15 align-center">
+            <div class="inbox">
+                <a href="#" class="icon-link" id="inboxBtn" onclick="toggleInbox(event)" title="Inbox">
+                    <i data-lucide="bell"></i>
+                    <span id="inboxBadge" class="inbox-badge" style="display: none;"></span>
+                </a>
+                <div id="inboxMenu" class="dropdown-menu inbox-menu" style="display: none;">
+                    <div id="inboxItems">Loading...</div>
+                </div>
+            </div>
+            <a href="/settings" class="icon-link" title="Settings">
+                <i data-lucide="settings"></i>
+            </a>
+            <!-- Profile Switcher Dropdown -->
+            <div class="profile-header-container">
+                <button type="button" class="profile-header-btn" onclick="toggleProfileDropdown(event)" title="Current Profile: {{ current_profile.name if current_profile else user.username }}">
+                    <div class="profile-header-avatar" style="background: {{ current_profile.avatar_color if current_profile and current_profile.avatar_color else '#e50914' }};">
+                        <i data-lucide="{{ current_profile.avatar_icon if current_profile and current_profile.avatar_icon else 'user' }}"></i>
+                    </div>
+                    <span class="profile-header-name">{{ current_profile.name if current_profile else user.username }}</span>
+                </button>
+                <div id="profileDropdownMenu" class="profile-dropdown-menu" style="display: none;">
+                    <a href="/profiles" class="profile-dropdown-item">
+                        <i data-lucide="users"></i>
+                        <span>Switch Profiles</span>
+                    </a>
+                    {% if (user.is_admin or user.can_manage_profiles) and (current_profile is none or current_profile.is_primary) %}
+                    <a href="/profiles?manage=1" class="profile-dropdown-item">
+                        <i data-lucide="sliders"></i>
+                        <span>Manage Profiles</span>
+                    </a>
+                    {% elif current_profile and not current_profile.is_primary %}
+                    <a href="/profiles?manage=1" class="profile-dropdown-item">
+                        <i data-lucide="pencil"></i>
+                        <span>Manage Profile</span>
+                    </a>
+                    {% endif %}
+                    <a href="/logout" class="profile-dropdown-item text-danger">
+                        <i data-lucide="log-out"></i>
+                        <span>Sign Out</span>
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="layout-wrapper">
+        <div class="main-content">
+            <div class="info-layout person-layout">
+                {% if person.profile_filename %}
+                <img src="/metadata/{{ person.profile_filename }}" class="info-poster" alt="{{ person.name }}" style="object-fit: cover; aspect-ratio: 2 / 3; max-height: 450px;">
+                {% else %}
+                <div class="info-poster placeholder-poster flex align-center justify-center" style="border-radius: var(--radius); background: #181818; aspect-ratio: 2 / 3; height: 420px;">
+                    <i data-lucide="user" style="width: 72px; height: 72px; color: var(--text-muted);"></i>
+                </div>
+                {% endif %}
+
+                <div class="info-details">
+                    <!-- Name -->
+                    <h1 class="info-title m-0 mb-15">{{ person.name }}</h1>
+
+                    <!-- What they are like actor, director, etc. -->
+                    {% if person.role_display %}
+                    <div class="info-meta-row flex align-center gap-15 mb-15">
+                        <span class="meta-genres" style="font-size: 1.05rem; font-weight: 600;">{{ person.role_display }}</span>
+                    </div>
+                    {% endif %}
+
+                    <!-- Birthdate with age in parenthesis (- Death date if applicable) -->
+                    {% if person.dates_display or person.place_of_birth %}
+                    <div class="metadata-block mb-15">
+                        {% if person.dates_display %}
+                        <div class="mb-5"><span style="color: var(--text-secondary);">{{ person.dates_display }}</span></div>
+                        {% endif %}
+                        {% if person.place_of_birth %}
+                        <div class="mb-5"><span style="color: var(--text-secondary);">{{ person.place_of_birth }}</span></div>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+
+                    <!-- Biography -->
+                    <div class="info-plot mb-15" style="max-height: 280px; overflow-y: auto; line-height: 1.6; color: var(--text-secondary); white-space: pre-line;">{{ person.biography or "No biography available." }}</div>
+                </div>
+            </div>
+
+            <!-- Known For Carousel -->
+            {% if known_for %}
+            <div class="card mt-20" style="background: transparent; border: none; padding: 0;">
+                <h2 style="margin-bottom: 15px;">Known For</h2>
+                <div class="carousel-container">
+                    <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
+                    <div class="carousel-row">
+                        {% for item in known_for %}
+                        <div class="media-card">
+                            <div class="poster-container">
+                                <a href="{{ item.url }}">
+                                    {% if item.poster_filename %}
+                                    <img src="/metadata/{{ item.poster_filename }}" class="poster" alt="{{ item.title }}">
+                                    {% else %}
+                                    <div class="poster-placeholder"><i data-lucide="{% if item.media_type == 'tv' %}tv{% else %}film{% endif %}"></i></div>
+                                    {% endif %}
+                                </a>
+                                <a href="{{ item.play_url }}" class="icon-btn hover-play">
+                                    <i data-lucide="play" fill="currentColor"></i>
+                                </a>
+                                <button class="icon-btn three-dots-btn" onclick="toggleMenu(event, 'menu-kf-{{ item.media_type }}-{{ item.id }}')">
+                                    <i data-lucide="more-vertical" fill="white"></i>
+                                </button>
+                                {% if item.is_watched %}
+                                <div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>
+                                {% endif %}
+                                <div class="dropdown-menu" id="menu-kf-{{ item.media_type }}-{{ item.id }}">
+                                    {% if item.media_type == 'tv' %}
+                                        {% if item.is_watched %}
+                                        <form action="/history/mark_unwatched/tv/{{ item.id }}?scope=series" method="post">
+                                            <button type="submit">Mark Series as Unwatched</button>
+                                        </form>
+                                        {% else %}
+                                        <form action="/history/mark_watched/tv/{{ item.id }}?scope=series" method="post">
+                                            <button type="submit">Mark Series as Watched</button>
+                                        </form>
+                                        {% endif %}
+                                        {% if item.in_watchlist %}
+                                        <form action="/watchlist/remove_by_item/tv/{{ item.id }}" method="post">
+                                            <button type="submit">Remove from Watchlist</button>
+                                        </form>
+                                        {% else %}
+                                        <form action="/watchlist/add/tv/{{ item.id }}" method="post">
+                                            <button type="submit">Add to Watchlist</button>
+                                        </form>
+                                        {% endif %}
+                                    {% else %}
+                                        {% if item.is_watched %}
+                                        <form action="/history/mark_unwatched/movie/{{ item.id }}" method="post">
+                                            <button type="submit">Mark as Unwatched</button>
+                                        </form>
+                                        {% else %}
+                                        <form action="/history/mark_watched/movie/{{ item.id }}" method="post">
+                                            <button type="submit">Mark as Watched</button>
+                                        </form>
+                                        {% endif %}
+                                        {% if item.in_watchlist %}
+                                        <form action="/watchlist/remove_by_item/movie/{{ item.id }}" method="post">
+                                            <button type="submit">Remove from Watchlist</button>
+                                        </form>
+                                        {% else %}
+                                        <form action="/watchlist/add/movie/{{ item.id }}" method="post">
+                                            <button type="submit">Add to Watchlist</button>
+                                        </form>
+                                        {% endif %}
+                                    {% endif %}
+                                    {% if user.watch_together_access %}
+                                    <button type="button" onclick="openWatchTogether('{{ item.media_type }}', {{ item.id }})">Watch Together</button>
+                                    {% endif %}
+                                    {% if user.downloads_access %}
+                                    <form action="/download/{{ item.media_type }}/{{ item.id }}" method="get">
+                                        <button type="submit">Download</button>
+                                    </form>
+                                    {% endif %}
+                                    {% if user.is_admin %}
+                                    <button type="button" class="fix-match-btn" data-media-type="{{ item.media_type }}" data-item-id="{{ item.id }}" data-title="{{ item.title }}" data-year="{{ item.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <div class="media-title"><a href="{{ item.url }}">{{ item.title }}</a></div>
+                            {% if item.year %}<div class="media-year">{{ item.year }}</div>{% endif %}
+                            {% if item.rating %}
+                            <div class="media-rating">
+                                <i data-lucide="star"></i>
+                                <span>{{ "%.1f"|format(item.rating) }}</span>
+                            </div>
+                            {% endif %}
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
+                </div>
+            </div>
+            {% else %}
+            <div class="card mt-20" style="background: transparent; border: none; padding: 0;">
+                <h2 style="margin-bottom: 15px;">Known For</h2>
+                <p class="text-muted" style="margin-top: 10px;">No titles found in your library for this person.</p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Watch Together Invite Modal -->
+    <div id="watchTogetherModal" class="modal-overlay" style="display: none;">
+        <div class="modal-card">
+            <div class="flex justify-between align-center mb-15">
+                <h3 class="m-0">Watch Together</h3>
+                <button type="button" class="icon-btn" onclick="closeWatchTogetherModal()"><i data-lucide="x"></i></button>
+            </div>
+            <p class="text-muted" style="font-size: 0.9rem; margin-bottom: 15px;">Invite someone on this server to watch in sync with you!</p>
+            <div id="wtUserList" class="flex flex-col gap-10" style="max-height: 250px; overflow-y: auto;">
+                <div class="text-muted text-center py-20">Loading users...</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/lucide.min.js"></script>
+    <script>lucide.createIcons();</script>
+
+    <script>
+        async function loadInbox() {
+            try {
+                const res = await fetch('/api/inbox');
+                const data = await res.json();
+                const badge = document.getElementById('inboxBadge');
+                const itemsContainer = document.getElementById('inboxItems');
+
+                if (data.unread_count > 0) {
+                    badge.innerText = data.unread_count;
+                    badge.style.display = 'block';
+                } else {
+                    badge.style.display = 'none';
+                }
+
+                if (!data.items || data.items.length === 0) {
+                    itemsContainer.innerHTML = '<div class="inbox-empty">No notifications</div>';
+                    return;
+                }
+
+                itemsContainer.innerHTML = data.items.map(item => `
+                    <div class="inbox-item ${item.read ? 'read' : 'unread'}">
+                        <div>${item.message}</div>
+                        <div class="inbox-time">${new Date(item.created_at).toLocaleString()}</div>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error("Inbox load error:", err);
+            }
+        }
+
+        function toggleInbox(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const profileMenu = document.getElementById('profileDropdownMenu');
+            if (profileMenu) profileMenu.style.display = 'none';
+
+            const menu = document.getElementById('inboxMenu');
+            const isHidden = menu.style.display === 'none' || menu.style.display === '';
+            menu.style.display = isHidden ? 'block' : 'none';
+            if (isHidden) {
+                loadInbox();
+                fetch('/api/inbox/read', { method: 'POST' });
+                const badge = document.getElementById('inboxBadge');
+                if (badge) badge.style.display = 'none';
+            }
+        }
+
+        function toggleProfileDropdown(event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            const inboxMenu = document.getElementById('inboxMenu');
+            if (inboxMenu) inboxMenu.style.display = 'none';
+
+            const menu = document.getElementById('profileDropdownMenu');
+            if (menu) {
+                const isHidden = menu.style.display === 'none' || menu.style.display === '';
+                menu.style.display = isHidden ? 'flex' : 'none';
+            }
+        }
+
+        document.addEventListener('click', function (e) {
+            const container = document.querySelector('.profile-header-container');
+            if (container && !container.contains(e.target)) {
+                const menu = document.getElementById('profileDropdownMenu');
+                if (menu) menu.style.display = 'none';
+            }
+            const inbox = document.querySelector('.inbox');
+            if (inbox && !inbox.contains(e.target)) {
+                const menu = document.getElementById('inboxMenu');
+                if (menu) menu.style.display = 'none';
+            }
+        });
+
+        function toggleMenu(event, menuId) {
+            event.preventDefault();
+            event.stopPropagation();
+
+            document.querySelectorAll('.dropdown-menu.show').forEach(menu => {
+                if (menu.id !== menuId) {
+                    menu.classList.remove('show');
+                }
+            });
+
+            const menu = document.getElementById(menuId);
+            if (menu) {
+                const isShowing = !menu.classList.contains('show');
+                if (isShowing) {
+                    document.body.appendChild(menu);
+                    menu.style.position = 'fixed';
+                    menu.style.visibility = 'hidden';
+                    menu.classList.add('show');
+
+                    const btnRect = event.currentTarget.getBoundingClientRect();
+                    const menuRect = menu.getBoundingClientRect();
+                    const menuWidth = menuRect.width || 270;
+                    const menuHeight = menuRect.height || 150;
+                    const viewportWidth = window.innerWidth;
+                    const viewportHeight = window.innerHeight;
+
+                    let left = btnRect.left;
+                    if (left < 10) left = 10;
+                    if (left + menuWidth > viewportWidth - 10) {
+                        left = Math.max(10, viewportWidth - menuWidth - 10);
+                    }
+
+                    let top = btnRect.bottom + 5;
+                    if (top + menuHeight > viewportHeight - 10 && btnRect.top - menuHeight - 5 > 10) {
+                        top = btnRect.top - menuHeight - 5;
+                    }
+
+                    menu.style.left = left + 'px';
+                    menu.style.right = 'auto';
+                    menu.style.top = top + 'px';
+                    menu.style.visibility = 'visible';
+                } else {
+                    menu.classList.remove('show');
+                }
+            }
+        }
+
+        function scrollCarousel(btn, direction) {
+            const row = btn.parentElement.querySelector('.carousel-row');
+            const scrollAmount = row.clientWidth * 0.8;
+            row.scrollBy({ left: direction * scrollAmount, behavior: 'smooth' });
+            setTimeout(() => { if (window.lucide) lucide.createIcons(); }, 300);
+        }
+
+        function updateCarouselArrows() {
+            document.querySelectorAll('.carousel-container').forEach(container => {
+                const row = container.querySelector('.carousel-row');
+                const leftBtn = container.querySelector('.carousel-arrow.left');
+                const rightBtn = container.querySelector('.carousel-arrow.right');
+                
+                if (!row || !leftBtn || !rightBtn) return;
+                
+                if (row.scrollWidth > row.clientWidth) {
+                    leftBtn.style.display = row.scrollLeft > 10 ? 'flex' : 'none';
+                    rightBtn.style.display = (row.scrollLeft + row.clientWidth) < (row.scrollWidth - 10) ? 'flex' : 'none';
+                } else {
+                    leftBtn.style.display = 'none';
+                    rightBtn.style.display = 'none';
+                }
+            });
+        }
+
+        document.querySelectorAll('.carousel-row').forEach(row => {
+            row.addEventListener('scroll', updateCarouselArrows);
+        });
+        window.addEventListener('resize', updateCarouselArrows);
+
+        // Watch Together helpers
+        let currentWtMedia = null;
+        async function openWatchTogether(mediaType, itemId) {
+            currentWtMedia = { mediaType, itemId };
+            const modal = document.getElementById('watchTogetherModal');
+            modal.style.display = 'flex';
+            const list = document.getElementById('wtUserList');
+            list.innerHTML = '<div class="text-muted text-center py-20">Loading friends...</div>';
+
+            try {
+                const res = await fetch('/api/watch_together/users');
+                const data = await res.json();
+                if (!data.users || data.users.length === 0) {
+                    list.innerHTML = '<div class="text-muted text-center py-20">No other users online/registered</div>';
+                    return;
+                }
+                list.innerHTML = data.users.map(u => `
+                    <div class="flex justify-between align-center p-10 bg-dark rounded">
+                        <span>${u.username}</span>
+                        <button class="btn btn-sm btn-primary" onclick="sendWatchInvite(${u.id})">Invite</button>
+                    </div>
+                `).join('');
+            } catch (err) {
+                list.innerHTML = '<div class="text-danger text-center py-20">Failed to load users</div>';
+            }
+        }
+
+        function closeWatchTogetherModal() {
+            document.getElementById('watchTogetherModal').style.display = 'none';
+        }
+
+        async function sendWatchInvite(targetUserId) {
+            if (!currentWtMedia) return;
+            try {
+                const res = await fetch('/api/watch_together/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        media_type: currentWtMedia.mediaType,
+                        item_id: currentWtMedia.itemId,
+                        invite_user_id: targetUserId
+                    })
+                });
+                const data = await res.json();
+                if (data.session_id) {
+                    window.location.href = `/play/${currentWtMedia.mediaType}/${currentWtMedia.itemId}?session=${data.session_id}`;
+                }
+            } catch (err) {
+                alert("Failed to start Watch Together session");
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            loadInbox();
+            updateCarouselArrows();
+        });
+    </script>
+</body>
+</html>
+

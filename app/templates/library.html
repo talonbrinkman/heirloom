@@ -215,7 +215,7 @@
                 {% if media_type == 'music' %}
                 <div class="subnav-bar">
                     <a href="/library/music?view=albums" class="subnav-tab {% if music_view == 'albums' %}active{% endif %}">
-                        <i data-lucide="disc"></i> Albums
+                        <i data-lucide="disc-3"></i> Albums
                     </a>
                     <a href="/library/music?view=artists" class="subnav-tab {% if music_view == 'artists' %}active{% endif %}">
                         <i data-lucide="mic-2"></i> Artists
@@ -323,7 +323,7 @@
                                         {% if m.poster_filename %}
                                         <img src="/metadata/{{ m.poster_filename }}" class="poster">
                                         {% else %}
-                                        <div class="poster-placeholder"><i data-lucide="film"></i></div>
+                                        <div class="poster-placeholder"><i data-lucide="{% if media_type == 'photo' %}image{% elif media_type == 'music' %}sixteenth-notes{% elif media_type == 'tv' %}tv{% else %}film{% endif %}"></i></div>
                                         {% endif %}
                                     </a>
                                     <a href="/play/{{ media_type }}/{{ m.id }}" class="icon-btn hover-play">
@@ -360,7 +360,7 @@
                                         {% if m.poster_filename %}
                                         <img src="/metadata/{{ m.poster_filename }}" class="poster">
                                         {% else %}
-                                        <div class="poster-placeholder"><i data-lucide="film"></i></div>
+                                        <div class="poster-placeholder"><i data-lucide="{% if media_type == 'photo' %}image{% elif media_type == 'music' %}sixteenth-notes{% elif media_type == 'tv' %}tv{% else %}film{% endif %}"></i></div>
                                         {% endif %}
                                     </a>
                                     <a href="/play/{{ media_type }}/{{ m.id }}" class="icon-btn hover-play">
@@ -397,7 +397,7 @@
                                         {% if m.poster_filename %}
                                         <img src="/metadata/{{ m.poster_filename }}" class="poster">
                                         {% else %}
-                                        <div class="poster-placeholder"><i data-lucide="film"></i></div>
+                                        <div class="poster-placeholder"><i data-lucide="{% if media_type == 'photo' %}image{% elif media_type == 'music' %}sixteenth-notes{% elif media_type == 'tv' %}tv{% else %}film{% endif %}"></i></div>
                                         {% endif %}
                                     </a>
                                     <a href="/play/{{ media_type }}/{{ m.id }}" class="icon-btn hover-play">
@@ -434,7 +434,7 @@
                                         {% if m.poster_filename %}
                                         <img src="/metadata/{{ m.poster_filename }}" class="poster">
                                         {% else %}
-                                        <div class="poster-placeholder"><i data-lucide="film"></i></div>
+                                        <div class="poster-placeholder"><i data-lucide="{% if media_type == 'photo' %}image{% elif media_type == 'music' %}sixteenth-notes{% elif media_type == 'tv' %}tv{% else %}film{% endif %}"></i></div>
                                         {% endif %}
                                     </a>
                                     <a href="/play/{{ media_type }}/{{ m.id }}" class="icon-btn hover-play">
@@ -502,7 +502,7 @@
                         {% endif %}
                     </div>
                     <div style="position: relative;">
-                        <button class="btn btn-secondary" onclick="toggleMenu(event, 'sortMenu')">
+                        <button class="btn-sm btn-secondary" onclick="toggleMenu(event, 'sortMenu')">
                             <i data-lucide="arrow-down-up" style="width: 16px; height: 16px;"></i>
                             <span id="currentSortText">Title (A-Z)</span>
                         </button>
@@ -629,7 +629,8 @@
                             let typeLabel = 'Movie';
                             if (item.type === 'photo') { iconName = 'image'; typeLabel = 'Photo'; }
                             else if (item.type === 'tv') { iconName = 'tv'; typeLabel = 'TV Show'; }
-                            else if (item.type === 'music') { iconName = 'music'; typeLabel = 'Music'; }
+                            else if (item.type === 'music') { iconName = 'sixteenth-notes'; typeLabel = 'Music'; }
+                            else if (item.type === 'person') { iconName = 'user'; typeLabel = 'Person'; }
 
                             return `
                             <a href="${item.url}" class="search-result">
@@ -781,7 +782,19 @@
                         posterStyle = 'filter: blur(8px) brightness(0.6); transform: scale(1.1);';
                     }
 
-                    const placeholderIcon = isArtist ? 'mic-2' : (isPlaylist ? 'list-music' : (isAlbum || isTrack ? 'disc' : 'film'));
+                    let placeholderIcon = 'film';
+                    if (mediaType === 'photo') {
+                        placeholderIcon = 'image';
+                    } else if (mediaType === 'music') {
+                        if (isArtist) placeholderIcon = 'mic-2';
+                        else if (isPlaylist) placeholderIcon = 'list-music';
+                        else if (isAlbum) placeholderIcon = 'disc-3';
+                        else placeholderIcon = 'sixteenth-notes';
+                    } else if (mediaType === 'tv') {
+                        placeholderIcon = 'tv';
+                    } else {
+                        placeholderIcon = 'film';
+                    }
                     const posterHtml = m.poster_filename
                         ? `<img src="/metadata/${m.poster_filename}" class="poster" style="${posterStyle}">`
                         : `<div class="poster-placeholder"><i data-lucide="${placeholderIcon}"></i></div>`;

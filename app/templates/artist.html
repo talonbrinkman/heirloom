@@ -111,7 +111,7 @@
                                 {% if alb.cover_filename %}
                                 <img src="/metadata/{{ alb.cover_filename }}" class="poster" alt="{{ alb.title }}">
                                 {% else %}
-                                <div class="poster-placeholder"><i data-lucide="disc"></i></div>
+                                <div class="poster-placeholder"><i data-lucide="disc-3"></i></div>
                                 {% endif %}
                             </a>
                             <button type="button" class="icon-btn hover-play" onclick="HeirloomPlayer.playAlbum({{ alb.id }})" title="Play">

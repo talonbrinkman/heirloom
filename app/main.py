@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Depends, Form, Request, HTTPException, Response, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, Depends, Form, Request, HTTPException, Response, WebSocket, WebSocketDisconnect, Query, BackgroundTasks
+import threading
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -22,7 +23,7 @@ from collections import defaultdict, Counter
 from datetime import datetime, timezone, timedelta
 from .database import create_db_and_tables, get_session, engine
 from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile, Artist, Album, Track, Playlist, PlaylistTrack
-from .scanner import scan_media_library, scanner_manager, is_recycle_name, is_recycle_path, download_image, async_download_image, async_fetch_additional_details, SafeHTTPClient, httpx, find_local_trailer, extract_tmdb_trailer_key
+from .scanner import METADATA_DIR, scan_media_library, scanner_manager, is_recycle_name, is_recycle_path, download_image, async_download_image, async_fetch_additional_details, SafeHTTPClient, httpx, find_local_trailer, extract_tmdb_trailer_key
 from .watcher import start_watcher, stop_watcher, scanner_debouncer
 from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time, sanitize_vtt_content, get_video_transcode_pipeline, parse_burn_sub_index
 from .hls_manager import hls_manager
@@ -256,10 +257,14 @@ def on_startup():
             session.add(fed_key)
             session.commit()
 
-        # Consolidate any split music featured artists and fragmented albums
+        # Consolidate any split music featured artists and fragmented albums (run once at setup)
         try:
-            from .scanner import consolidate_music_artists_and_albums
-            consolidate_music_artists_and_albums(session)
+            cons_done = session.exec(select(SystemConfig).where(SystemConfig.key == "music_consolidation_done")).first()
+            if not cons_done:
+                from .scanner import consolidate_music_artists_and_albums
+                consolidate_music_artists_and_albums(session)
+                session.add(SystemConfig(key="music_consolidation_done", value="true"))
+                session.commit()
         except Exception as e:
             session.rollback()
             print(f"[Startup] Note during music artist/album consolidation: {e}")
@@ -267,6 +272,10 @@ def on_startup():
     import threading
     def fix_sideways_photo_thumbnails():
         try:
+            with Session(engine) as s:
+                orient_done = s.exec(select(SystemConfig).where(SystemConfig.key == "photo_orientation_done")).first()
+                if orient_done:
+                    return
             from PIL import Image
             from .scanner import METADATA_DIR, _generate_photo_thumbnail
             with Session(engine) as s:
@@ -294,6 +303,9 @@ def on_startup():
                                     _generate_photo_thumbnail(p.file_path, t_path, False)
                 except Exception:
                     pass
+            with Session(engine) as s:
+                s.add(SystemConfig(key="photo_orientation_done", value="true"))
+                s.commit()
         except Exception as e:
             print(f"[Startup] Note checking photo thumbnails: {e}")
 
@@ -1247,6 +1259,374 @@ def process_tv_shows(shows):
         result.append(item)
     return result
 
+
+_enriching_movies = set()
+_enriching_tv = set()
+_enrich_lock = threading.Lock()
+
+async def async_enrich_movie(movie_id: int):
+    """Non-blocking background enrichment of movie logo, cast photos, and metadata."""
+    with _enrich_lock:
+        if movie_id in _enriching_movies:
+            return
+        _enriching_movies.add(movie_id)
+
+    try:
+        with Session(engine) as session:
+            movie = session.get(Movie, movie_id)
+            if not movie:
+                return
+
+            tmdb_config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
+            tmdb_key = tmdb_config.value if tmdb_config and tmdb_config.value else os.getenv("TMDB_API_KEY")
+            if not tmdb_key:
+                return
+
+            tmdb_id = movie.tmdb_id
+            if not tmdb_id and movie.poster_filename:
+                m_match = re.search(r'movie_(\d+)_', movie.poster_filename)
+                if m_match:
+                    tmdb_id = int(m_match.group(1))
+
+            raw_client = httpx.AsyncClient(timeout=10.0) if httpx is not None else None
+            if not raw_client:
+                return
+            client = SafeHTTPClient(raw_client)
+
+            try:
+                if not tmdb_id:
+                    s_url = "https://api.themoviedb.org/3/search/movie"
+                    params = {"query": movie.title, "api_key": tmdb_key}
+                    raw_year = (movie.year or "")[:4]
+                    if raw_year.isdigit():
+                        params["year"] = raw_year
+                    s_res = await client.get(s_url, params=params)
+                    if s_res.status_code == 200:
+                        results = s_res.json().get("results", [])
+                        if results:
+                            tmdb_id = results[0].get("id")
+
+                if not tmdb_id:
+                    if not movie.logo_filename:
+                        movie.logo_filename = "none"
+                        session.add(movie)
+                        session.commit()
+                    return
+
+                movie.tmdb_id = tmdb_id
+
+                cast_str, dir_str, content_rating, genres_str, trailer_key, col_id, col_name, col_poster, col_backdrop, logo_filename = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_key)
+
+                changed = False
+                if logo_filename and (not movie.logo_filename or movie.logo_filename == "none"):
+                    movie.logo_filename = logo_filename
+                    changed = True
+                elif not movie.logo_filename:
+                    movie.logo_filename = "none"
+                    changed = True
+
+                if cast_str and (not movie.cast or movie.cast == "[]" or '"profile_filename": null' in (movie.cast or '')):
+                    movie.cast = cast_str
+                    changed = True
+
+                if dir_str and not movie.director:
+                    movie.director = dir_str
+                    changed = True
+
+                if content_rating and not movie.content_rating:
+                    movie.content_rating = content_rating
+                    changed = True
+
+                if genres_str and not movie.genres:
+                    movie.genres = genres_str
+                    changed = True
+
+                if trailer_key and not movie.trailer_key:
+                    movie.trailer_key = trailer_key
+                    changed = True
+
+                if col_name and not movie.collection_name:
+                    movie.collection_id = col_id
+                    movie.collection_name = col_name
+                    movie.collection_poster_filename = col_poster
+                    movie.collection_backdrop_filename = col_backdrop
+                    changed = True
+
+                if changed:
+                    session.add(movie)
+                    session.commit()
+            finally:
+                await raw_client.aclose()
+    except Exception as e:
+        print(f"[Enrichment] Error enriching movie {movie_id}: {e}")
+    finally:
+        with _enrich_lock:
+            _enriching_movies.discard(movie_id)
+
+
+async def async_enrich_tv_show(title: str):
+    """Non-blocking background enrichment of TV show logo, cast photos, and season posters."""
+    with _enrich_lock:
+        if title in _enriching_tv:
+            return
+        _enriching_tv.add(title)
+
+    try:
+        with Session(engine) as session:
+            eps = session.exec(select(TVShow).where(TVShow.title == title)).all()
+            if not eps:
+                return
+            rep = eps[0]
+
+            tmdb_config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
+            tmdb_key = tmdb_config.value if tmdb_config and tmdb_config.value else os.getenv("TMDB_API_KEY")
+            if not tmdb_key:
+                return
+
+            tmdb_id = None
+            for e in eps:
+                if e.poster_filename:
+                    m_match = re.search(r'tv_(\d+)_', e.poster_filename)
+                    if m_match:
+                        tmdb_id = int(m_match.group(1))
+                        break
+
+            raw_client = httpx.AsyncClient(timeout=10.0) if httpx is not None else None
+            if not raw_client:
+                return
+            client = SafeHTTPClient(raw_client)
+
+            try:
+                if not tmdb_id:
+                    s_url = "https://api.themoviedb.org/3/search/tv"
+                    params = {"query": title, "api_key": tmdb_key}
+                    raw_year = (rep.year or "")[:4]
+                    if raw_year.isdigit():
+                        params["first_air_date_year"] = raw_year
+                    s_res = await client.get(s_url, params=params)
+                    if s_res.status_code == 200:
+                        results = s_res.json().get("results", [])
+                        if results:
+                            tmdb_id = results[0].get("id")
+
+                if not tmdb_id:
+                    if not rep.logo_filename:
+                        for e in eps:
+                            e.logo_filename = "none"
+                            session.add(e)
+                        session.commit()
+                    return
+
+                # 1. Fetch additional details (cast with photos, director, genres, logo)
+                cast_str, dir_str, content_rating, genres_str, _, _, _, _, _, logo_filename = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_key)
+
+                # 2. Check missing season posters across the seasons of this show
+                seasons = set()
+                for e in eps:
+                    m = re.search(r'S(\d+)', e.file_path, re.IGNORECASE)
+                    if m:
+                        seasons.add(int(m.group(1)))
+                    elif e.season is not None:
+                        seasons.add(e.season)
+
+                season_posters = {}
+                for s in seasons:
+                    has_sp = any(e.season_poster_filename for e in eps if ((re.search(r'S(\d+)', e.file_path, re.IGNORECASE) and int(re.search(r'S(\d+)', e.file_path, re.IGNORECASE).group(1)) == s) or e.season == s))
+                    if not has_sp:
+                        try:
+                            s_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s}?api_key={tmdb_key}"
+                            s_res = await client.get(s_url, timeout=10.0)
+                            if s_res.status_code == 200:
+                                s_data = s_res.json()
+                                if s_data.get("poster_path"):
+                                    sp_fn = await async_download_image(client, s_data["poster_path"], f"tv_s{s}", tmdb_id, "poster")
+                                    if sp_fn:
+                                        season_posters[s] = sp_fn
+                        except Exception:
+                            pass
+
+                # 3. Update all episodes
+                for e in eps:
+                    if logo_filename and (not e.logo_filename or e.logo_filename == "none"):
+                        e.logo_filename = logo_filename
+                    elif not e.logo_filename:
+                        e.logo_filename = "none"
+
+                    if cast_str and (not e.cast or e.cast == "[]" or '"profile_filename": null' in (e.cast or '')):
+                        e.cast = cast_str
+
+                    if dir_str and not e.director:
+                        e.director = dir_str
+
+                    if content_rating and not e.content_rating:
+                        e.content_rating = content_rating
+
+                    if genres_str and not e.genres:
+                        e.genres = genres_str
+
+                    m = re.search(r'S(\d+)', e.file_path, re.IGNORECASE)
+                    s_num = int(m.group(1)) if m else e.season
+                    if s_num in season_posters and not e.season_poster_filename:
+                        e.season_poster_filename = season_posters[s_num]
+
+                    session.add(e)
+
+                session.commit()
+            finally:
+                await raw_client.aclose()
+    except Exception as e:
+        print(f"[Enrichment] Error enriching TV show {title}: {e}")
+    finally:
+        with _enrich_lock:
+            _enriching_tv.discard(title)
+
+def get_related_movies(session: Session, movie: Movie, rating_level: int = 0, limit: int = 15) -> list[Movie]:
+    """
+    Returns up to limit related movies based on collection, genres, director, and cast,
+    filtered by parental rating and deduplicated across editions/versions.
+    """
+    sibling_ids = set(get_sibling_movie_ids(session, movie))
+    if movie.id:
+        sibling_ids.add(movie.id)
+
+    q = select(Movie).where(~Movie.id.in_(sibling_ids))
+    if rating_level == 1:
+        q = q.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+    elif rating_level >= 2:
+        q = q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+
+    raw_candidates = session.exec(q).all()
+    unique_candidates = process_movie_versions(raw_candidates)
+
+    cur_genres = set(g.strip().lower() for g in (movie.genres or '').split(',') if g.strip())
+    cur_collection = (movie.collection_name or '').strip().lower()
+    cur_director = (movie.director or '').strip().lower()
+
+    cur_cast = set()
+    if movie.cast:
+        try:
+            if movie.cast.startswith('['):
+                import json
+                for a in json.loads(movie.cast):
+                    if isinstance(a, dict) and a.get('name'):
+                        cur_cast.add(a['name'].strip().lower())
+                    elif isinstance(a, str):
+                        cur_cast.add(a.strip().lower())
+            else:
+                for a in movie.cast.split(','):
+                    if a.strip(): cur_cast.add(a.strip().lower())
+        except Exception:
+            pass
+
+    scored = []
+    for cand in unique_candidates:
+        score = 0
+        cand_genres = set(g.strip().lower() for g in (cand.genres or '').split(',') if g.strip())
+        shared_genres = cur_genres & cand_genres
+        score += len(shared_genres) * 3
+
+        if cur_collection and cand.collection_name and cand.collection_name.strip().lower() == cur_collection:
+            score += 10
+
+        if cur_director and cand.director and cand.director.strip().lower() == cur_director:
+            score += 4
+
+        if cur_cast and cand.cast:
+            cand_cast = set()
+            try:
+                if cand.cast.startswith('['):
+                    import json
+                    for a in json.loads(cand.cast):
+                        if isinstance(a, dict) and a.get('name'):
+                            cand_cast.add(a['name'].strip().lower())
+                        elif isinstance(a, str):
+                            cand_cast.add(a.strip().lower())
+                else:
+                    for a in cand.cast.split(','):
+                        if a.strip(): cand_cast.add(a.strip().lower())
+            except Exception:
+                pass
+            score += len(cur_cast & cand_cast)
+
+        scored.append((score, cand.rating or 0, cand.id or 0, cand))
+
+    scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+    return [item[3] for item in scored[:limit]]
+
+
+def get_related_shows(session: Session, show: TVShow, rating_level: int = 0, limit: int = 15) -> list[TVShow]:
+    """
+    Returns up to limit related TV shows based on collection, genres, director, and cast,
+    filtered by parental rating and grouped into unified series representations.
+    """
+    title_clean = (show.title or '').strip().lower()
+
+    subq = select(func.min(TVShow.id)).where(func.lower(TVShow.title) != title_clean).group_by(func.lower(TVShow.title))
+    q = select(TVShow).where(TVShow.id.in_(subq))
+    if rating_level == 1:
+        q = q.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+    elif rating_level >= 2:
+        q = q.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+
+    candidates = session.exec(q).all()
+    unique_candidates = process_tv_shows(candidates)
+
+    cur_genres = set(g.strip().lower() for g in (show.genres or '').split(',') if g.strip())
+    cur_collection = (show.collection_name or '').strip().lower()
+    cur_director = (show.director or '').strip().lower()
+
+    cur_cast = set()
+    if show.cast:
+        try:
+            if show.cast.startswith('['):
+                import json
+                for a in json.loads(show.cast):
+                    if isinstance(a, dict) and a.get('name'):
+                        cur_cast.add(a['name'].strip().lower())
+                    elif isinstance(a, str):
+                        cur_cast.add(a.strip().lower())
+            else:
+                for a in show.cast.split(','):
+                    if a.strip(): cur_cast.add(a.strip().lower())
+        except Exception:
+            pass
+
+    scored = []
+    for cand in unique_candidates:
+        score = 0
+        cand_genres = set(g.strip().lower() for g in (cand.genres or '').split(',') if g.strip())
+        shared_genres = cur_genres & cand_genres
+        score += len(shared_genres) * 3
+
+        if cur_collection and cand.collection_name and cand.collection_name.strip().lower() == cur_collection:
+            score += 10
+
+        if cur_director and cand.director and cand.director.strip().lower() == cur_director:
+            score += 4
+
+        if cur_cast and cand.cast:
+            cand_cast = set()
+            try:
+                if cand.cast.startswith('['):
+                    import json
+                    for a in json.loads(cand.cast):
+                        if isinstance(a, dict) and a.get('name'):
+                            cand_cast.add(a['name'].strip().lower())
+                        elif isinstance(a, str):
+                            cand_cast.add(a.strip().lower())
+                else:
+                    for a in cand.cast.split(','):
+                        if a.strip(): cand_cast.add(a.strip().lower())
+            except Exception:
+                pass
+            score += len(cur_cast & cand_cast)
+
+        scored.append((score, cand.rating or 0, cand.id or 0, cand))
+
+    scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+    return [item[3] for item in scored[:limit]]
+
+
 def get_tv_episode_sort_key(t: TVShow) -> tuple[int, int, int]:
     m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', t.file_path, re.IGNORECASE)
     if m:
@@ -1311,6 +1691,12 @@ def get_recently_watching(
     seen_movie_keys = set()
     seen_tv_shows = set()
 
+    # Batch fetch movies and TV shows for history records to avoid N+1 queries
+    hist_m_ids = [h.item_id for h in history_db if h.media_type == 'movie']
+    hist_t_ids = [h.item_id for h in history_db if h.media_type == 'tv']
+    movies_by_id = {m.id: m for m in session.exec(select(Movie).where(Movie.id.in_(hist_m_ids))).all()} if hist_m_ids else {}
+    tv_by_id = {t.id: t for t in session.exec(select(TVShow).where(TVShow.id.in_(hist_t_ids))).all()} if hist_t_ids else {}
+
     for h in history_db:
         if len(history) >= limit:
             break
@@ -1319,7 +1705,7 @@ def get_recently_watching(
         if h.media_type == 'tv' and not current_user.tv_access:
             continue
 
-        item_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
+        item_obj = movies_by_id.get(h.item_id) if h.media_type == 'movie' else tv_by_id.get(h.item_id)
         if not item_obj:
             continue
 
@@ -1713,6 +2099,7 @@ def get_release_year(item) -> int:
     return int(digits[:4]) if len(digits) >= 4 else 0
 
 def get_user_watched_status(session: Session, user_id: int, prof_id: Optional[int] = None):
+    from sqlmodel import or_
     hist_q = select(WatchHistory).where(
         WatchHistory.user_id == user_id,
         WatchHistory.progress >= 90.0
@@ -1723,22 +2110,34 @@ def get_user_watched_status(session: Session, user_id: int, prof_id: Optional[in
     
     watched_movie_ids = {h.item_id for h in watched_records if h.media_type == 'movie'}
     if watched_movie_ids:
-        all_watched_movies = session.exec(select(Movie).where(Movie.id.in_(list(watched_movie_ids)))).all()
-        for wm in all_watched_movies:
-            for sib_id in get_sibling_movie_ids(session, wm):
-                watched_movie_ids.add(sib_id)
+        all_watched_movies = session.exec(select(Movie.id, Movie.tmdb_id, Movie.title).where(Movie.id.in_(list(watched_movie_ids)))).all()
+        tmdb_ids = {m[1] for m in all_watched_movies if m[1]}
+        titles = {m[2].strip().lower() for m in all_watched_movies if m[2]}
+        conditions = []
+        if tmdb_ids:
+            conditions.append(Movie.tmdb_id.in_(list(tmdb_ids)))
+        if titles:
+            conditions.append(func.lower(Movie.title).in_(list(titles)))
+        if conditions:
+            sibling_ids = session.exec(select(Movie.id).where(or_(*conditions))).all()
+            watched_movie_ids.update(sibling_ids)
 
     watched_tv_episode_ids = {h.item_id for h in watched_records if h.media_type == 'tv'}
-    
-    all_tv = session.exec(select(TVShow.id, TVShow.title)).all()
-    show_episodes_map = defaultdict(set)
-    for ep_id, ep_title in all_tv:
-        show_episodes_map[ep_title.strip().lower()].add(ep_id)
-        
     watched_tv_titles = set()
-    for title_key, ep_ids in show_episodes_map.items():
-        if ep_ids and ep_ids.issubset(watched_tv_episode_ids):
-            watched_tv_titles.add(title_key)
+    if watched_tv_episode_ids:
+        cand_titles = session.exec(
+            select(TVShow.title).where(TVShow.id.in_(list(watched_tv_episode_ids))).distinct()
+        ).all()
+        if cand_titles:
+            cand_episodes = session.exec(
+                select(TVShow.id, TVShow.title).where(TVShow.title.in_(cand_titles))
+            ).all()
+            show_episodes_map = defaultdict(set)
+            for ep_id, ep_title in cand_episodes:
+                show_episodes_map[ep_title.strip().lower()].add(ep_id)
+            for title_key, ep_ids in show_episodes_map.items():
+                if ep_ids and ep_ids.issubset(watched_tv_episode_ids):
+                    watched_tv_titles.add(title_key)
             
     return watched_movie_ids, watched_tv_episode_ids, watched_tv_titles
 
@@ -1756,7 +2155,7 @@ def get_available_volumes(session: Session) -> dict[str, bool]:
     }
 
 @app.get("/", response_class=HTMLResponse)
-async def root(
+def root(
     request: Request,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
@@ -1770,18 +2169,38 @@ async def root(
     rating_level = get_profile_rating_level(current_user, current_profile)
     prof_id = current_profile.id if current_profile else None
 
-    movies = session.exec(select(Movie).order_by(Movie.id.desc())).all() if current_user.movies_access else []
-    tv_shows_raw = session.exec(select(TVShow).order_by(TVShow.id.desc())).all() if current_user.tv_access else []    
-    if rating_level > 0:
-        movies = [m for m in movies if is_rating_allowed(m.content_rating, rating_level)]
-        tv_shows_raw = [t for t in tv_shows_raw if is_rating_allowed(t.content_rating, rating_level)]
-    photos = [p for p in (session.exec(select(Photo).order_by(Photo.id.desc())).all() if current_user.photos_access else []) if not (p.file_path and is_recycle_path(p.file_path))]
-    recent_movies = process_movie_versions(movies)[:15]
-    recent_photos = photos[:15]
+    # High performance: SQL-level filtering and pagination instead of loading the entire library
+    if current_user.movies_access:
+        m_q = select(Movie)
+        if rating_level == 1:
+            m_q = m_q.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+        elif rating_level >= 2:
+            m_q = m_q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+        raw_recent_movies = session.exec(m_q.order_by(Movie.id.desc()).limit(45)).all()
+        recent_movies = process_movie_versions(raw_recent_movies)[:15]
+    else:
+        recent_movies = []
+
+    if current_user.tv_access:
+        t_q = select(TVShow)
+        if rating_level == 1:
+            t_q = t_q.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+        elif rating_level >= 2:
+            t_q = t_q.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+        tv_shows_raw = session.exec(t_q.order_by(TVShow.id.desc()).limit(80)).all()
+    else:
+        tv_shows_raw = []
+
+    if current_user.photos_access:
+        photo_q = select(Photo).where(~Photo.file_path.like("%#recycle%")).order_by(Photo.id.desc()).limit(15)
+        recent_photos = session.exec(photo_q).all()
+    else:
+        recent_photos = []
+
     recent_albums = []
     if current_user.music_access:
         try:
-            recent_albums = session.exec(select(Album).order_by(Album.id.desc())).all()[:15]
+            recent_albums = session.exec(select(Album).order_by(Album.id.desc()).limit(15)).all()
         except Exception:
             recent_albums = []
     
@@ -1839,14 +2258,19 @@ async def root(
         watchlist_db = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id)).all()
 
     watchlist = []
-    for w in watchlist_db:
-        if w.media_type == 'movie' and not current_user.movies_access: continue
-        if w.media_type == 'tv' and not current_user.tv_access: continue
-        item = session.get(Movie if w.media_type == 'movie' else TVShow, w.item_id)
-        if item:
-            if rating_level > 0 and not is_rating_allowed(getattr(item, 'content_rating', ''), rating_level):
-                continue
-            watchlist.append({"db_id": w.id, "item": item, "media_type": w.media_type})
+    if watchlist_db:
+        w_m_ids = [w.item_id for w in watchlist_db if w.media_type == 'movie']
+        w_t_ids = [w.item_id for w in watchlist_db if w.media_type == 'tv']
+        w_movies = {m.id: m for m in session.exec(select(Movie).where(Movie.id.in_(w_m_ids))).all()} if w_m_ids else {}
+        w_tv = {t.id: t for t in session.exec(select(TVShow).where(TVShow.id.in_(w_t_ids))).all()} if w_t_ids else {}
+        for w in watchlist_db:
+            if w.media_type == 'movie' and not current_user.movies_access: continue
+            if w.media_type == 'tv' and not current_user.tv_access: continue
+            item = w_movies.get(w.item_id) if w.media_type == 'movie' else w_tv.get(w.item_id)
+            if item:
+                if rating_level > 0 and not is_rating_allowed(getattr(item, 'content_rating', ''), rating_level):
+                    continue
+                watchlist.append({"db_id": w.id, "item": item, "media_type": w.media_type})
 
     history = get_recently_watching(session, current_user, prof_id, rating_level=rating_level, is_html=True, limit=15)
     
@@ -1855,15 +2279,22 @@ async def root(
     
     import random
     from collections import Counter
+    from sqlmodel import or_
     full_hist_query = select(WatchHistory).where(WatchHistory.user_id == current_user.id)
     if prof_id:
         full_hist_query = full_hist_query.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
     history_db_full = session.exec(full_hist_query.order_by(WatchHistory.last_watched.desc()).limit(100)).all()
+    
+    hist_m_ids = [h.item_id for h in history_db_full if h.media_type == 'movie']
+    hist_t_ids = [h.item_id for h in history_db_full if h.media_type == 'tv']
+    h_movies = {m.id: m for m in session.exec(select(Movie).where(Movie.id.in_(hist_m_ids))).all()} if hist_m_ids else {}
+    h_tv = {t.id: t for t in session.exec(select(TVShow).where(TVShow.id.in_(hist_t_ids))).all()} if hist_t_ids else {}
+
     watched_movie_ids = set()
     watched_tv_titles = set()
     genre_counts = Counter()
     for h in history_db_full:
-        item_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
+        item_obj = h_movies.get(h.item_id) if h.media_type == 'movie' else h_tv.get(h.item_id)
         if item_obj:
             if h.media_type == 'movie': watched_movie_ids.add(h.item_id)
             else: watched_tv_titles.add(item_obj.title.strip().lower())
@@ -1873,14 +2304,31 @@ async def root(
     top_genres = [g for g, _ in genre_counts.most_common(3)]
     recommended = []
     if top_genres:
-        candidate_movies = [m for m in movies if m.id not in watched_movie_ids and m.genres and any(g in m.genres for g in top_genres)]
-        unique_shows = process_tv_shows(tv_shows_raw)
-        candidate_shows = [s for s in unique_shows if s.title.strip().lower() not in watched_tv_titles and s.genres and any(g in s.genres for g in top_genres)]
-        
-        for m in candidate_movies:
-            recommended.append({"item": {"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year}, "media_type": "movie"})
-        for s in candidate_shows:
-            recommended.append({"item": {"id": s.id, "title": s.title, "poster_filename": s.poster_filename, "year": getattr(s, 'year', '')}, "media_type": "tv"})
+        if current_user.movies_access:
+            m_filters = [Movie.genres.like(f"%{g}%") for g in top_genres]
+            cand_m_q = select(Movie).where(or_(*m_filters))
+            if rating_level == 1:
+                cand_m_q = cand_m_q.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+            elif rating_level >= 2:
+                cand_m_q = cand_m_q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+            if watched_movie_ids:
+                cand_m_q = cand_m_q.where(Movie.id.not_in(list(watched_movie_ids)[:500]))
+            cand_movies = session.exec(cand_m_q.order_by(Movie.rating.desc().nullslast()).limit(20)).all()
+            for m in cand_movies:
+                recommended.append({"item": {"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year}, "media_type": "movie"})
+
+        if current_user.tv_access:
+            tv_filters = [TVShow.genres.like(f"%{g}%") for g in top_genres]
+            cand_tv_q = select(TVShow).where(or_(*tv_filters))
+            if rating_level == 1:
+                cand_tv_q = cand_tv_q.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+            elif rating_level >= 2:
+                cand_tv_q = cand_tv_q.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+            cand_shows_raw = session.exec(cand_tv_q.order_by(TVShow.rating.desc().nullslast()).limit(40)).all()
+            cand_shows = process_tv_shows(cand_shows_raw)
+            for s in cand_shows:
+                if s.title.strip().lower() not in watched_tv_titles:
+                    recommended.append({"item": {"id": s.id, "title": s.title, "poster_filename": s.poster_filename, "year": getattr(s, 'year', '')}, "media_type": "tv"})
             
         random.shuffle(recommended)
         recommended = recommended[:15]
@@ -1924,7 +2372,7 @@ async def root(
     })
 
 @app.get("/api/library/{media_type}")
-async def api_library(
+def api_library(
     request: Request, media_type: str, page: int = 1, limit: int = 50, 
     search: str = "", sort: str = "title_asc",
     genre: Optional[str] = None,
@@ -1939,70 +2387,72 @@ async def api_library(
     
     if media_type == "movie":
         if not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
-        query = select(Movie)
+        
+        # Deduplicate editions at SQL level via grouping by tmdb_id or normalized title
+        subq = select(func.min(Movie.id)).group_by(func.coalesce(Movie.tmdb_id, func.lower(Movie.title)))
+        query = select(Movie).where(Movie.id.in_(subq))
+        
         if rating_level == 1:
             query = query.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
         elif rating_level >= 2:
             query = query.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
         if search:
             query = query.where(Movie.title.ilike(f"%{search}%"))
-            
-        raw_items = session.exec(query).all()
-        processed = process_movie_versions(raw_items)
-
         if genre:
-            target_g = genre.strip().lower()
-            processed = [m for m in processed if m.genres and target_g in [g.strip().lower() for g in m.genres.split(",")]]
+            query = query.where(Movie.genres.ilike(f"%{genre.strip()}%"))
         if collection:
-            processed = [m for m in processed if item_matches_collection(m, collection)]
+            query = query.where((Movie.collection_name.ilike(f"%{collection.strip()}%")) | (Movie.title.ilike(f"%{collection.strip()}%")))
 
-        if sort == "title_asc": processed.sort(key=lambda x: x.title.lower())
-        elif sort == "title_desc": processed.sort(key=lambda x: x.title.lower(), reverse=True)
-        elif sort in ("rating_desc", "rating"):
-            processed.sort(key=lambda x: x.title.lower())
-            processed.sort(key=lambda x: (float(x.rating) if isinstance(getattr(x, 'rating', None), (int, float)) else -1.0), reverse=True)
-        elif sort == "rating_asc":
-            processed.sort(key=lambda x: x.title.lower())
-            processed.sort(key=lambda x: (float(x.rating) if isinstance(getattr(x, 'rating', None), (int, float)) else 999.0))
-        elif sort == "year_desc": processed.sort(key=lambda x: str(x.year) if x.year else "", reverse=True)
-        elif sort == "year_asc": processed.sort(key=lambda x: str(x.year) if x.year else "")
-        elif sort == "date_desc": processed.sort(key=lambda x: x.id, reverse=True)
-        elif sort == "date_asc": processed.sort(key=lambda x: x.id)
+        if sort == "title_asc": query = query.order_by(Movie.title.asc())
+        elif sort == "title_desc": query = query.order_by(Movie.title.desc())
+        elif sort in ("rating_desc", "rating"): query = query.order_by(Movie.rating.desc().nullslast(), Movie.title.asc())
+        elif sort == "rating_asc": query = query.order_by(Movie.rating.asc().nullslast(), Movie.title.asc())
+        elif sort == "year_desc": query = query.order_by(Movie.year.desc(), Movie.title.asc())
+        elif sort == "year_asc": query = query.order_by(Movie.year.asc(), Movie.title.asc())
+        elif sort == "date_desc": query = query.order_by(Movie.id.desc())
+        elif sort == "date_asc": query = query.order_by(Movie.id.asc())
 
-        items = processed[(page - 1) * limit : page * limit]
+        items = session.exec(query.offset((page - 1) * limit).limit(limit)).all()
     elif media_type == "tv":
         if not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
-        query = select(TVShow)
+        
+        # One representative show record per distinct title
+        subq = select(func.min(TVShow.id)).group_by(func.lower(TVShow.title))
+        query = select(TVShow).where(TVShow.id.in_(subq))
+        
         if rating_level == 1:
             query = query.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
         elif rating_level >= 2:
             query = query.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
         if search:
             query = query.where(TVShow.title.ilike(f"%{search}%"))
-        
-        raw_items = session.exec(query).all()
-        processed = process_tv_shows(raw_items)
-
         if genre:
-            target_g = genre.strip().lower()
-            processed = [s for s in processed if s.genres and target_g in [g.strip().lower() for g in s.genres.split(",")]]
+            query = query.where(TVShow.genres.ilike(f"%{genre.strip()}%"))
         if collection:
-            processed = [s for s in processed if item_matches_collection(s, collection)]
+            query = query.where((TVShow.collection_name.ilike(f"%{collection.strip()}%")) | (TVShow.title.ilike(f"%{collection.strip()}%")))
         
-        if sort == "title_asc": processed.sort(key=lambda x: x.title.lower())
-        elif sort == "title_desc": processed.sort(key=lambda x: x.title.lower(), reverse=True)
-        elif sort in ("rating_desc", "rating"):
-            processed.sort(key=lambda x: x.title.lower())
-            processed.sort(key=lambda x: (float(x.rating) if isinstance(getattr(x, 'rating', None), (int, float)) else -1.0), reverse=True)
-        elif sort == "rating_asc":
-            processed.sort(key=lambda x: x.title.lower())
-            processed.sort(key=lambda x: (float(x.rating) if isinstance(getattr(x, 'rating', None), (int, float)) else 999.0))
-        elif sort == "year_desc": processed.sort(key=lambda x: str(x.year) if x.year else "", reverse=True)
-        elif sort == "year_asc": processed.sort(key=lambda x: str(x.year) if x.year else "")
-        elif sort == "date_desc": processed.sort(key=lambda x: x.id, reverse=True)
-        elif sort == "date_asc": processed.sort(key=lambda x: x.id)
+        if sort == "title_asc": query = query.order_by(TVShow.title.asc())
+        elif sort == "title_desc": query = query.order_by(TVShow.title.desc())
+        elif sort in ("rating_desc", "rating"): query = query.order_by(TVShow.rating.desc().nullslast(), TVShow.title.asc())
+        elif sort == "rating_asc": query = query.order_by(TVShow.rating.asc().nullslast(), TVShow.title.asc())
+        elif sort == "year_desc": query = query.order_by(TVShow.year.desc(), TVShow.title.asc())
+        elif sort == "year_asc": query = query.order_by(TVShow.year.asc(), TVShow.title.asc())
+        elif sort == "date_desc": query = query.order_by(TVShow.id.desc())
+        elif sort == "date_asc": query = query.order_by(TVShow.id.asc())
         
-        items = processed[(page - 1) * limit : page * limit]
+        paged_shows = session.exec(query.offset((page - 1) * limit).limit(limit)).all()
+        if paged_shows:
+            p_titles = [s.title for s in paged_shows]
+            season_counts_res = session.exec(
+                select(TVShow.title, func.count(func.distinct(TVShow.season))).where(TVShow.title.in_(p_titles)).group_by(TVShow.title)
+            ).all()
+            s_counts = {t.lower(): c for t, c in season_counts_res}
+            for s in paged_shows:
+                sc = s_counts.get(s.title.lower(), 0)
+                if sc > 0:
+                    season_text = f"{sc} Season{'s' if sc > 1 else ''}"
+                    s.year = f"{s.year} • {season_text}" if s.year else season_text
+        items = paged_shows
     elif media_type == "photo":
         if not current_user.photos_access: raise HTTPException(status_code=403, detail="Forbidden")
         query = select(Photo)
@@ -2029,8 +2479,10 @@ async def api_library(
                 else:
                     q_art = q_art.order_by(Artist.name.asc())
                 artists = session.exec(q_art.offset((page - 1) * limit).limit(limit)).all()
+                art_ids = [a.id for a in artists]
+                album_counts_map = dict(session.exec(select(Album.artist_id, func.count(Album.id)).where(Album.artist_id.in_(art_ids)).group_by(Album.artist_id)).all()) if art_ids else {}
                 for art in artists:
-                    album_count = len(session.exec(select(Album.id).where(Album.artist_id == art.id)).all())
+                    album_count = album_counts_map.get(art.id, 0)
                     music_result.append({
                         "id": art.id,
                         "title": art.name,
@@ -2072,8 +2524,10 @@ async def api_library(
                 if search:
                     q_pl = q_pl.where(Playlist.name.ilike(f"%{search}%"))
                 playlists = session.exec(q_pl.offset((page - 1) * limit).limit(limit)).all()
+                pl_ids = [p.id for p in playlists]
+                pl_counts_map = dict(session.exec(select(PlaylistTrack.playlist_id, func.count(PlaylistTrack.id)).where(PlaylistTrack.playlist_id.in_(pl_ids)).group_by(PlaylistTrack.playlist_id)).all()) if pl_ids else {}
                 for pl in playlists:
-                    track_count = len(session.exec(select(PlaylistTrack.id).where(PlaylistTrack.playlist_id == pl.id)).all())
+                    track_count = pl_counts_map.get(pl.id, 0)
                     first_trk_id = session.exec(select(PlaylistTrack.track_id).where(PlaylistTrack.playlist_id == pl.id).order_by(PlaylistTrack.track_order.asc())).first()
                     first_cov = None
                     if first_trk_id:
@@ -2259,7 +2713,7 @@ async def api_me(current_user: User = Depends(get_current_user)):
     return {"id": current_user.id, "username": current_user.username}
 
 @app.get("/api/dashboard")
-async def api_dashboard(
+def api_dashboard(
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
@@ -2268,13 +2722,26 @@ async def api_dashboard(
     rating_level = get_profile_rating_level(current_user, current_profile)
     prof_id = current_profile.id if current_profile else None
     
-    movies = session.exec(select(Movie).order_by(Movie.id.desc())).all() if current_user.movies_access else []
-    tv_shows_raw = session.exec(select(TVShow).order_by(TVShow.id.desc())).all() if current_user.tv_access else []    
-    if rating_level > 0:
-        movies = [m for m in movies if is_rating_allowed(m.content_rating, rating_level)]
-        tv_shows_raw = [t for t in tv_shows_raw if is_rating_allowed(t.content_rating, rating_level)]
-        
-    recent_movies = [{"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year} for m in movies[:15]]
+    if current_user.movies_access:
+        m_q = select(Movie)
+        if rating_level == 1:
+            m_q = m_q.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+        elif rating_level >= 2:
+            m_q = m_q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+        raw_movies = session.exec(m_q.order_by(Movie.id.desc()).limit(45)).all()
+        recent_movies = [{"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year} for m in process_movie_versions(raw_movies)[:15]]
+    else:
+        recent_movies = []
+    
+    if current_user.tv_access:
+        t_q = select(TVShow)
+        if rating_level == 1:
+            t_q = t_q.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+        elif rating_level >= 2:
+            t_q = t_q.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+        tv_shows_raw = session.exec(t_q.order_by(TVShow.id.desc()).limit(80)).all()
+    else:
+        tv_shows_raw = []
     
     import os, re
     recent_tv_groups = []
@@ -2313,38 +2780,50 @@ async def api_dashboard(
         watchlist_db = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id)).all()
 
     watchlist = []
-    for w in watchlist_db:
-        if w.media_type == 'movie' and not current_user.movies_access: continue
-        if w.media_type == 'tv' and not current_user.tv_access: continue
-        item_obj = session.get(Movie if w.media_type == 'movie' else TVShow, w.item_id)
-        if item_obj:
-            if rating_level > 0 and not is_rating_allowed(getattr(item_obj, 'content_rating', ''), rating_level):
-                continue
-            item = {
-                "id": item_obj.id,
-                "title": item_obj.title,
-                "poster_filename": item_obj.poster_filename,
-                "year": getattr(item_obj, "year", "")
-            }
-            if w.media_type == 'tv':
-                m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', item_obj.file_path)
-                if m:
-                    item['year'] = f"S{int(m.group(1))} E{int(m.group(2))}"
-            watchlist.append({"item": item, "media_type": w.media_type})
+    if watchlist_db:
+        w_m_ids = [w.item_id for w in watchlist_db if w.media_type == 'movie']
+        w_t_ids = [w.item_id for w in watchlist_db if w.media_type == 'tv']
+        w_movies = {m.id: m for m in session.exec(select(Movie).where(Movie.id.in_(w_m_ids))).all()} if w_m_ids else {}
+        w_tv = {t.id: t for t in session.exec(select(TVShow).where(TVShow.id.in_(w_t_ids))).all()} if w_t_ids else {}
+        for w in watchlist_db:
+            if w.media_type == 'movie' and not current_user.movies_access: continue
+            if w.media_type == 'tv' and not current_user.tv_access: continue
+            item_obj = w_movies.get(w.item_id) if w.media_type == 'movie' else w_tv.get(w.item_id)
+            if item_obj:
+                if rating_level > 0 and not is_rating_allowed(getattr(item_obj, 'content_rating', ''), rating_level):
+                    continue
+                item = {
+                    "id": item_obj.id,
+                    "title": item_obj.title,
+                    "poster_filename": item_obj.poster_filename,
+                    "year": getattr(item_obj, "year", "")
+                }
+                if w.media_type == 'tv':
+                    m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', item_obj.file_path)
+                    if m:
+                        item['year'] = f"S{int(m.group(1))} E{int(m.group(2))}"
+                watchlist.append({"item": item, "media_type": w.media_type})
         
     history = get_recently_watching(session, current_user, prof_id, rating_level=rating_level, is_html=False, limit=15)
 
     import random
     from collections import Counter
+    from sqlmodel import or_
     full_hist_query = select(WatchHistory).where(WatchHistory.user_id == current_user.id)
     if prof_id:
         full_hist_query = full_hist_query.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
     history_db_full = session.exec(full_hist_query.order_by(WatchHistory.last_watched.desc()).limit(100)).all()
+    
+    hist_m_ids = [h.item_id for h in history_db_full if h.media_type == 'movie']
+    hist_t_ids = [h.item_id for h in history_db_full if h.media_type == 'tv']
+    h_movies = {m.id: m for m in session.exec(select(Movie).where(Movie.id.in_(hist_m_ids))).all()} if hist_m_ids else {}
+    h_tv = {t.id: t for t in session.exec(select(TVShow).where(TVShow.id.in_(hist_t_ids))).all()} if hist_t_ids else {}
+
     watched_movie_ids = set()
     watched_tv_titles = set()
     genre_counts = Counter()
     for h in history_db_full:
-        item_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
+        item_obj = h_movies.get(h.item_id) if h.media_type == 'movie' else h_tv.get(h.item_id)
         if item_obj:
             if h.media_type == 'movie': watched_movie_ids.add(h.item_id)
             else: watched_tv_titles.add(item_obj.title.strip().lower())
@@ -2354,34 +2833,47 @@ async def api_dashboard(
     top_genres = [g for g, _ in genre_counts.most_common(3)]
     recommended = []
     if top_genres:
-        candidate_movies = [m for m in movies if m.id not in watched_movie_ids and m.genres and any(g in m.genres for g in top_genres)]
-        
-        # Unique shows
-        seen_titles = set()
-        unique_shows = []
-        for t in tv_shows_raw:
-            if t.title not in seen_titles:
-                seen_titles.add(t.title)
-                unique_shows.append(t)
-                
-        candidate_shows = [s for s in unique_shows if s.title.strip().lower() not in watched_tv_titles and s.genres and any(g in s.genres for g in top_genres)]
-        
-        for m in candidate_movies:
-            recommended.append({"item": {"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year}, "media_type": "movie"})
-        for s in candidate_shows:
-            recommended.append({"item": {"id": s.id, "title": s.title, "poster_filename": s.poster_filename, "year": getattr(s, 'year', '')}, "media_type": "tv"})
+        if current_user.movies_access:
+            m_filters = [Movie.genres.like(f"%{g}%") for g in top_genres]
+            cand_m_q = select(Movie).where(or_(*m_filters))
+            if rating_level == 1:
+                cand_m_q = cand_m_q.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+            elif rating_level >= 2:
+                cand_m_q = cand_m_q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+            if watched_movie_ids:
+                cand_m_q = cand_m_q.where(Movie.id.not_in(list(watched_movie_ids)[:500]))
+            cand_movies = session.exec(cand_m_q.order_by(Movie.rating.desc().nullslast()).limit(20)).all()
+            for m in cand_movies:
+                recommended.append({"item": {"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year}, "media_type": "movie"})
+
+        if current_user.tv_access:
+            tv_filters = [TVShow.genres.like(f"%{g}%") for g in top_genres]
+            cand_tv_q = select(TVShow).where(or_(*tv_filters))
+            if rating_level == 1:
+                cand_tv_q = cand_tv_q.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+            elif rating_level >= 2:
+                cand_tv_q = cand_tv_q.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+            cand_shows_raw = session.exec(cand_tv_q.order_by(TVShow.rating.desc().nullslast()).limit(40)).all()
+            cand_shows = process_tv_shows(cand_shows_raw)
+            for s in cand_shows:
+                if s.title.strip().lower() not in watched_tv_titles:
+                    recommended.append({"item": {"id": s.id, "title": s.title, "poster_filename": s.poster_filename, "year": getattr(s, 'year', '')}, "media_type": "tv"})
             
         random.shuffle(recommended)
         recommended = recommended[:15]
 
-    photos = [p for p in (session.exec(select(Photo).order_by(Photo.date_added.desc())).all() if current_user.photos_access else []) if not (p.file_path and is_recycle_path(p.file_path))]
-    recent_photos = [{
-        "id": p.id,
-        "title": p.title,
-        "poster_filename": p.poster_filename,
-        "album": p.album,
-        "date": (p.date_taken or p.date_added).strftime("%b %d, %Y") if (p.date_taken or p.date_added) else ""
-    } for p in photos[:15]]
+    if current_user.photos_access:
+        photo_q = select(Photo).where(~Photo.file_path.like("%#recycle%")).order_by(Photo.date_added.desc()).limit(15)
+        photos = session.exec(photo_q).all()
+        recent_photos = [{
+            "id": p.id,
+            "title": p.title,
+            "poster_filename": p.poster_filename,
+            "album": p.album,
+            "date": (p.date_taken or p.date_added).strftime("%b %d, %Y") if (p.date_taken or p.date_added) else ""
+        } for p in photos]
+    else:
+        recent_photos = []
 
     return {
         "recent_movies": recent_movies,
@@ -2393,8 +2885,9 @@ async def api_dashboard(
     }
 
 @app.get("/api/movie/{movie_id}")
-async def api_movie(
+def api_movie(
     movie_id: int,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
@@ -2409,38 +2902,8 @@ async def api_movie(
     if rating_level > 0 and not is_rating_allowed(movie.content_rating, rating_level):
         raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
 
-    if not movie.logo_filename:
-        try:
-            tmdb_config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
-            if tmdb_config and tmdb_config.value:
-                m_tmdb_id = movie.tmdb_id
-                if not m_tmdb_id:
-                    m_logo = re.search(r'movie_(\d+)_', movie.poster_filename or '')
-                    if m_logo:
-                        m_tmdb_id = int(m_logo.group(1))
-                if m_tmdb_id:
-                    url_logo = f"https://api.themoviedb.org/3/movie/{m_tmdb_id}?api_key={tmdb_config.value}&append_to_response=images&include_image_language=en,null"
-                    r_logo = requests.get(url_logo, timeout=5)
-                    if r_logo.status_code == 200:
-                        l_data = r_logo.json()
-                        l_list = l_data.get("images", {}).get("logos", [])
-                        if l_list:
-                            en_l = [l for l in l_list if l.get("iso_639_1") == "en"]
-                            best_l = None
-                            if en_l:
-                                png_en = [l for l in en_l if (l.get("file_path") or "").lower().endswith(".png")]
-                                best_l = png_en[0] if png_en else en_l[0]
-                            else:
-                                png_l = [l for l in l_list if (l.get("file_path") or "").lower().endswith(".png")]
-                                best_l = png_l[0] if png_l else l_list[0]
-                            if best_l and best_l.get("file_path"):
-                                l_fn = download_image(best_l["file_path"], "movie", m_tmdb_id, "logo")
-                                if l_fn:
-                                    movie.logo_filename = l_fn
-                                    session.add(movie)
-                                    session.commit()
-        except Exception:
-            session.rollback()
+    if not movie.logo_filename or not movie.cast or '"profile_filename": null' in (movie.cast or ''):
+        background_tasks.add_task(async_enrich_movie, movie.id)
         
     cast_list = []
     if movie.cast and movie.cast.startswith("["):
@@ -2448,6 +2911,10 @@ async def api_movie(
             import json
             cast_list = json.loads(movie.cast)
         except: pass
+
+    # Non-blocking background enrichment of missing logo, cast photos, and collection info
+    if not movie.logo_filename or not movie.cast or '"profile_filename": null' in (movie.cast or '') or (not movie.collection_poster_filename and movie.collection_name):
+        background_tasks.add_task(async_enrich_movie, movie.id)
         
     hist_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == movie.id).where(WatchHistory.media_type == 'movie')
     if prof_id:
@@ -2479,7 +2946,7 @@ async def api_movie(
     }
 
 @app.get("/api/series/{series_id}")
-async def api_series(
+def api_series(
     series_id: int,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
@@ -2506,20 +2973,29 @@ async def api_series(
     # Get all episodes with the same title
     episodes = session.exec(select(TVShow).where(TVShow.title == show.title).order_by(TVShow.file_path.asc())).all()
     
+    # Batch query watch history for all episodes to eliminate N+1 queries
+    ep_ids = [ep.id for ep in episodes]
+    hist_q = select(WatchHistory).where(
+        WatchHistory.user_id == current_user.id,
+        WatchHistory.item_id.in_(ep_ids),
+        WatchHistory.media_type == 'tv'
+    )
+    if prof_id:
+        hist_q = hist_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+    hist_list = session.exec(hist_q).all()
+    hist_by_ep = {h.item_id: h for h in hist_list}
+
     import re, os
     seasons = {}
     for ep in episodes:
         m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', ep.file_path)
-        season_num = int(m.group(1)) if m else 1
-        ep_num = int(m.group(2)) if m else ep.id
+        season_num = int(m.group(1)) if m else (ep.season or 1)
+        ep_num = int(m.group(2)) if m else (ep.episode or ep.id)
         
         if season_num not in seasons:
             seasons[season_num] = []
             
-        hist_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == ep.id).where(WatchHistory.media_type == 'tv')
-        if prof_id:
-            hist_q = hist_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
-        history = session.exec(hist_q).first()
+        history = hist_by_ep.get(ep.id)
         
         seasons[season_num].append({
             "id": ep.id,
@@ -2552,7 +3028,7 @@ async def api_series(
     }
 
 @app.get("/api/search")
-async def api_search(
+def api_search(
     request: Request, q: str = "",
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
@@ -2570,7 +3046,7 @@ async def api_search(
             query = query.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
         elif rating_level >= 2:
             query = query.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
-        raw_movies = session.exec(query).all()
+        raw_movies = session.exec(query.limit(25)).all()
         movies = process_movie_versions(raw_movies)
         for m in movies[:10]:
             results.append({
@@ -2579,12 +3055,14 @@ async def api_search(
             })
             
     if current_user.tv_access:
-        query = select(TVShow).where(TVShow.title.ilike(f"%{q}%"))
+        # Avoid pulling 50,000 episode rows on broad search terms
+        subq = select(func.min(TVShow.id)).where(TVShow.title.ilike(f"%{q}%")).group_by(func.lower(TVShow.title))
+        query = select(TVShow).where(TVShow.id.in_(subq))
         if rating_level == 1:
             query = query.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
         elif rating_level >= 2:
             query = query.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
-        shows = session.exec(query).all()
+        shows = session.exec(query.limit(15)).all()
         processed = process_tv_shows(shows)
         for t in processed[:10]:
             results.append({
@@ -2632,13 +3110,45 @@ async def api_search(
         except Exception:
             pass
             
+    if current_user.movies_access or current_user.tv_access:
+        try:
+            seen_people = set()
+            matching_movies = session.exec(
+                select(Movie).where((Movie.cast.ilike(f"%{q}%")) | (Movie.director.ilike(f"%{q}%"))).limit(10)
+            ).all()
+            for mm in matching_movies:
+                if mm.director and q.lower() in mm.director.lower():
+                    for d in mm.director.split(','):
+                        d_clean = d.strip()
+                        if q.lower() in d_clean.lower() and d_clean.lower() not in seen_people:
+                            seen_people.add(d_clean.lower())
+                            results.append({
+                                "id": d_clean, "title": d_clean, "type": "person", "url": f"/person/{urllib.parse.quote(d_clean)}",
+                                "poster": None, "year": "Director"
+                            })
+                if mm.cast and mm.cast.startswith("["):
+                    try:
+                        cast_arr = json.loads(mm.cast)
+                        for actor in cast_arr:
+                            act_name = actor.get("name", "").strip()
+                            if q.lower() in act_name.lower() and act_name.lower() not in seen_people:
+                                seen_people.add(act_name.lower())
+                                results.append({
+                                    "id": act_name, "title": act_name, "type": "person", "url": f"/person/{urllib.parse.quote(act_name)}",
+                                    "poster": actor.get("profile_filename"), "year": "Actor"
+                                })
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     # Sort results by title roughly
     results.sort(key=lambda x: x["title"].lower())
             
     return {"items": results}
 
 @app.get("/photo/{item_id}", response_class=HTMLResponse)
-async def photo_view(
+def photo_view(
     request: Request,
     item_id: int,
     from_url: Optional[str] = Query(None, alias="from"),
@@ -2695,7 +3205,7 @@ async def photo_view(
     })
 
 @app.get("/photo_file/{item_id}")
-async def get_photo_file(item_id: int, current_user: User = Depends(get_current_user)):
+def get_photo_file(item_id: int, current_user: User = Depends(get_current_user)):
     if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
     if not current_user.photos_access: raise HTTPException(status_code=403, detail="Forbidden")
     
@@ -2707,7 +3217,7 @@ async def get_photo_file(item_id: int, current_user: User = Depends(get_current_
     return FileResponse(file_path)
 
 @app.get("/library/{media_type}", response_class=HTMLResponse)
-async def library_view(
+def library_view(
     request: Request,
     media_type: str,
     current_user: User = Depends(get_current_user),
@@ -2736,109 +3246,103 @@ async def library_view(
 
     if media_type == "movie":
         if not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
-        q_count = select(Movie)
-        if rating_level == 1:
-            q_count = q_count.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
-        elif rating_level >= 2:
-            q_count = q_count.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
-        all_movies = process_movie_versions(session.exec(q_count).all())
-        categories = build_categories_data(all_movies)
-        collections = build_collections_data(all_movies)
-
+        
         if current_view == "categories":
+            subq = select(func.min(Movie.id)).group_by(func.coalesce(Movie.tmdb_id, func.lower(Movie.title)))
+            q_cat = select(Movie).where(Movie.id.in_(subq))
+            if rating_level == 1:
+                q_cat = q_cat.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+            elif rating_level >= 2:
+                q_cat = q_cat.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+            all_movies = session.exec(q_cat).all()
+            categories = build_categories_data(all_movies)
             total_count = len(categories)
         elif current_view == "collections":
+            subq = select(func.min(Movie.id)).group_by(func.coalesce(Movie.tmdb_id, func.lower(Movie.title)))
+            q_col = select(Movie).where(Movie.id.in_(subq))
+            if rating_level == 1:
+                q_col = q_col.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+            elif rating_level >= 2:
+                q_col = q_col.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+            all_movies = session.exec(q_col).all()
+            collections = build_collections_data(all_movies)
             total_count = len(collections)
         elif current_view == "recommended":
             watched_movie_ids, _, _ = get_user_watched_status(session, current_user.id, prof_id)
-            rated = [m for m in all_movies if m.rating is not None]
+            q_rec = select(Movie)
+            if rating_level == 1:
+                q_rec = q_rec.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+            elif rating_level >= 2:
+                q_rec = q_rec.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+            all_rec_movies = session.exec(q_rec.order_by(Movie.id.desc()).limit(100)).all()
+            rated = [m for m in all_rec_movies if m.rating is not None]
             rated.sort(key=lambda m: m.rating or 0, reverse=True)
             top_rated_items = rated[:15]
-
-            recently_added = sorted(all_movies, key=lambda m: m.id or 0, reverse=True)[:15]
-            recently_released = sorted(all_movies, key=get_release_year, reverse=True)[:15]
-
-            full_hist_query = select(WatchHistory).where(WatchHistory.user_id == current_user.id)
-            if prof_id:
-                full_hist_query = full_hist_query.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
-            history_db_full = session.exec(full_hist_query.order_by(WatchHistory.last_watched.desc()).limit(100)).all()
-            genre_counts = Counter()
-            for h in history_db_full:
-                it_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
-                if it_obj and it_obj.genres:
-                    for g in it_obj.genres.split(','):
-                        genre_counts[g.strip()] += 1
-            top_genres = [g for g, _ in genre_counts.most_common(3)]
-            if top_genres:
-                cand = [m for m in all_movies if m.id not in watched_movie_ids and m.genres and any(g in m.genres for g in top_genres)]
-                random.shuffle(cand)
-                recommended_items = cand[:15]
-            else:
-                top_ids = {m.id for m in top_rated_items}
-                recommended_items = [m for m in all_movies if m.id not in top_ids][:15]
-                if not recommended_items:
-                    recommended_items = all_movies[:15]
+            recently_added = sorted(all_rec_movies, key=lambda m: m.id or 0, reverse=True)[:15]
+            recently_released = sorted(all_rec_movies, key=get_release_year, reverse=True)[:15]
+            recommended_items = [m for m in all_rec_movies if m.id not in watched_movie_ids][:15] or all_rec_movies[:15]
             total_count = len(recommended_items)
-        else: # view == "library"
+        else: # view == "library" (fast SQL count without full table deserialization)
+            q_count = select(func.count(func.distinct(func.coalesce(Movie.tmdb_id, Movie.title))))
+            if rating_level == 1:
+                q_count = q_count.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+            elif rating_level >= 2:
+                q_count = q_count.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
             if active_genre:
-                target_g = active_genre.strip().lower()
-                all_movies = [m for m in all_movies if m.genres and target_g in [g.strip().lower() for g in m.genres.split(",")]]
+                q_count = q_count.where(Movie.genres.ilike(f"%{active_genre.strip()}%"))
             elif active_collection:
-                all_movies = [m for m in all_movies if item_matches_collection(m, active_collection)]
-            total_count = len(all_movies)
+                q_count = q_count.where((Movie.collection_name.ilike(f"%{active_collection.strip()}%")) | (Movie.title.ilike(f"%{active_collection.strip()}%")))
+            total_count = session.exec(q_count).one()
 
     elif media_type == "tv":
         if not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
-        q_count = select(TVShow)
-        if rating_level == 1:
-            q_count = q_count.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
-        elif rating_level >= 2:
-            q_count = q_count.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
-        all_shows = process_tv_shows(session.exec(q_count).all())
-        categories = build_categories_data(all_shows)
-        collections = build_collections_data(all_shows)
-
+        
         if current_view == "categories":
+            subq = select(func.min(TVShow.id)).group_by(func.lower(TVShow.title))
+            q_cat = select(TVShow).where(TVShow.id.in_(subq))
+            if rating_level == 1:
+                q_cat = q_cat.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+            elif rating_level >= 2:
+                q_cat = q_cat.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+            all_shows = session.exec(q_cat).all()
+            categories = build_categories_data(all_shows)
             total_count = len(categories)
         elif current_view == "collections":
+            subq = select(func.min(TVShow.id)).group_by(func.lower(TVShow.title))
+            q_col = select(TVShow).where(TVShow.id.in_(subq))
+            if rating_level == 1:
+                q_col = q_col.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+            elif rating_level >= 2:
+                q_col = q_col.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+            all_shows = session.exec(q_col).all()
+            collections = build_collections_data(all_shows)
             total_count = len(collections)
         elif current_view == "recommended":
             _, _, watched_tv_titles = get_user_watched_status(session, current_user.id, prof_id)
-            rated = [s for s in all_shows if s.rating is not None]
+            q_rec = select(TVShow)
+            if rating_level == 1:
+                q_rec = q_rec.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+            elif rating_level >= 2:
+                q_rec = q_rec.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+            rec_shows = process_tv_shows(session.exec(q_rec.order_by(TVShow.id.desc()).limit(150)).all())
+            rated = [s for s in rec_shows if s.rating is not None]
             rated.sort(key=lambda s: s.rating or 0, reverse=True)
             top_rated_items = rated[:15]
-
-            recently_added = sorted(all_shows, key=lambda s: s.id or 0, reverse=True)[:15]
-            recently_released = sorted(all_shows, key=get_release_year, reverse=True)[:15]
-
-            full_hist_query = select(WatchHistory).where(WatchHistory.user_id == current_user.id)
-            if prof_id:
-                full_hist_query = full_hist_query.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
-            history_db_full = session.exec(full_hist_query.order_by(WatchHistory.last_watched.desc()).limit(100)).all()
-            genre_counts = Counter()
-            for h in history_db_full:
-                it_obj = session.get(Movie if h.media_type == 'movie' else TVShow, h.item_id)
-                if it_obj and it_obj.genres:
-                    for g in it_obj.genres.split(','):
-                        genre_counts[g.strip()] += 1
-            top_genres = [g for g, _ in genre_counts.most_common(3)]
-            if top_genres:
-                cand = [s for s in all_shows if s.title.strip().lower() not in watched_tv_titles and s.genres and any(g in s.genres for g in top_genres)]
-                random.shuffle(cand)
-                recommended_items = cand[:15]
-            else:
-                top_ids = {s.id for s in top_rated_items}
-                recommended_items = [s for s in all_shows if s.id not in top_ids][:15]
-                if not recommended_items:
-                    recommended_items = all_shows[:15]
+            recently_added = sorted(rec_shows, key=lambda s: s.id or 0, reverse=True)[:15]
+            recently_released = sorted(rec_shows, key=get_release_year, reverse=True)[:15]
+            recommended_items = [s for s in rec_shows if s.title.strip().lower() not in watched_tv_titles][:15] or rec_shows[:15]
             total_count = len(recommended_items)
-        else: # view == "library"
+        else: # view == "library" (fast SQL count without full table deserialization)
+            q_count = select(func.count(func.distinct(TVShow.title)))
+            if rating_level == 1:
+                q_count = q_count.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+            elif rating_level >= 2:
+                q_count = q_count.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
             if active_genre:
-                target_g = active_genre.strip().lower()
-                all_shows = [s for s in all_shows if s.genres and target_g in [g.strip().lower() for g in s.genres.split(",")]]
+                q_count = q_count.where(TVShow.genres.ilike(f"%{active_genre.strip()}%"))
             elif active_collection:
-                all_shows = [s for s in all_shows if item_matches_collection(s, active_collection)]
-            total_count = len(all_shows)
+                q_count = q_count.where((TVShow.collection_name.ilike(f"%{active_collection.strip()}%")) | (TVShow.title.ilike(f"%{active_collection.strip()}%")))
+            total_count = session.exec(q_count).one()
 
     elif media_type == "photo":
         if not current_user.photos_access: raise HTTPException(status_code=403, detail="Forbidden")
@@ -2896,9 +3400,10 @@ async def library_view(
         "top_rated_items": top_rated_items
     })
 @app.get("/movie/{movie_id}", response_class=HTMLResponse)
-async def movie_view(
+def movie_view(
     request: Request,
     movie_id: int,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
@@ -3002,10 +3507,18 @@ async def movie_view(
 
     user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
 
+    related_movies = get_related_movies(session, movie, rating_level=rating_level, limit=15)
+
+    wl_m_q = select(Watchlist.item_id).where(Watchlist.user_id == current_user.id, Watchlist.media_type == 'movie')
+    if prof_id:
+        wl_m_q = wl_m_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+    user_watchlist_movies = set(session.exec(wl_m_q).all())
+
     return templates.TemplateResponse(request=request, name="movie.html", context={
         "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
         "movie": movie, "cast_list": cast_list, "has_progress": has_progress, "in_watchlist": in_watchlist,
-        "is_watched": is_watched, "movie_versions": movie_versions, "current_version": current_version
+        "is_watched": is_watched, "movie_versions": movie_versions, "current_version": current_version,
+        "related_movies": related_movies, "watched_movie_ids": watched_movie_ids, "user_watchlist_movies": user_watchlist_movies
     })
 
 def get_runtime_str(item, session):
@@ -3175,9 +3688,10 @@ async def stream_movie_trailer(
     return StreamingResponse(generate(), media_type="video/mp4")
 
 @app.get("/series/{title}", response_class=HTMLResponse)
-async def series_view(
+def series_view(
     request: Request,
     title: str,
+    background_tasks: BackgroundTasks,
     ep: Optional[int] = None,
     season: Optional[int] = None,
     current_user: User = Depends(get_current_user),
@@ -3195,36 +3709,16 @@ async def series_view(
     if rating_level > 0 and not is_rating_allowed(shows[0].content_rating, rating_level):
         raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
 
-    if not shows[0].logo_filename:
-        try:
-            tmdb_config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
-            if tmdb_config and tmdb_config.value:
-                m_logo = re.search(r'tv_(\d+)_', shows[0].poster_filename or '')
-                if m_logo:
-                    s_tmdb_id = int(m_logo.group(1))
-                    url_logo = f"https://api.themoviedb.org/3/tv/{s_tmdb_id}?api_key={tmdb_config.value}&append_to_response=images&include_image_language=en,null"
-                    r_logo = requests.get(url_logo, timeout=5)
-                    if r_logo.status_code == 200:
-                        l_data = r_logo.json()
-                        l_list = l_data.get("images", {}).get("logos", [])
-                        if l_list:
-                            en_l = [l for l in l_list if l.get("iso_639_1") == "en"]
-                            best_l = None
-                            if en_l:
-                                png_en = [l for l in en_l if (l.get("file_path") or "").lower().endswith(".png")]
-                                best_l = png_en[0] if png_en else en_l[0]
-                            else:
-                                png_l = [l for l in l_list if (l.get("file_path") or "").lower().endswith(".png")]
-                                best_l = png_l[0] if png_l else l_list[0]
-                            if best_l and best_l.get("file_path"):
-                                l_fn = download_image(best_l["file_path"], "tv", s_tmdb_id, "logo")
-                                if l_fn:
-                                    for s_ep in shows:
-                                        s_ep.logo_filename = l_fn
-                                        session.add(s_ep)
-                                    session.commit()
-        except Exception:
-            session.rollback()
+    # Non-blocking background enrichment of missing logo, cast photos, and season posters
+    needs_tv_enrichment = (
+        not shows[0].logo_filename or
+        not shows[0].cast or
+        shows[0].cast == "[]" or
+        '"profile_filename": null' in (shows[0].cast or '') or
+        any(not e.season_poster_filename for e in shows)
+    )
+    if needs_tv_enrichment:
+        background_tasks.add_task(async_enrich_tv_show, title)
         
     cast_list = []
     if shows[0].cast and shows[0].cast.startswith("["):
@@ -3347,11 +3841,19 @@ async def series_view(
 
     user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
 
+    related_shows = get_related_shows(session, selected_episode, rating_level=rating_level, limit=15)
+
+    wl_t_q = select(Watchlist.item_id).where(Watchlist.user_id == current_user.id, Watchlist.media_type == 'tv')
+    if prof_id:
+        wl_t_q = wl_t_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+    user_watchlist_tv = set(session.exec(wl_t_q).all())
+
     return templates.TemplateResponse(request=request, name="series.html", context={
         "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
         "title": title, "episodes": episodes, "seasons": sorted_seasons, "series": selected_episode, "cast_list": cast_list,
         "has_progress": has_progress, "in_watchlist": in_watchlist, "resume_link": resume_link, "selected_ep_id": selected_episode.id,
-        "selected_ep_dict": selected_ep_dict, "is_series_watched": is_series_watched
+        "selected_ep_dict": selected_ep_dict, "is_series_watched": is_series_watched,
+        "related_shows": related_shows, "watched_tv_titles": watched_tv_titles, "user_watchlist_tv": user_watchlist_tv
     })
 
 def format_seconds_to_duration(seconds: float) -> str:
@@ -3364,10 +3866,300 @@ def format_seconds_to_duration(seconds: float) -> str:
         return f"{hours} hr {minutes} min"
     return f"{minutes} min"
 
+def format_person_dates(birthday: Optional[str], deathday: Optional[str]) -> Optional[str]:
+    if not birthday:
+        return None
+    try:
+        bday = datetime.strptime(birthday.strip(), "%Y-%m-%d").date()
+        ref_date = datetime.strptime(deathday.strip(), "%Y-%m-%d").date() if deathday else datetime.now().date()
+        age = ref_date.year - bday.year - ((ref_date.month, ref_date.day) < (bday.month, bday.day))
+        
+        bday_fmt = bday.strftime("%B %d, %Y")
+        if deathday:
+            dday = datetime.strptime(deathday.strip(), "%Y-%m-%d").date()
+            dday_fmt = dday.strftime("%B %d, %Y")
+            return f"{bday_fmt} - {dday_fmt} ({age} years old)"
+        else:
+            return f"{bday_fmt} ({age} years old)"
+    except Exception:
+        if deathday:
+            return f"{birthday} - {deathday}"
+        return birthday
+
+# ----------------- PERSON DETAIL VIEW -----------------
+
+@app.get("/person/{person_identifier}")
+@app.get("/people/{person_identifier}")
+async def person_view(
+    request: Request,
+    person_identifier: str,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        return RedirectResponse(url="/login", status_code=303)
+    if not current_user.movies_access and not current_user.tv_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    rating_level = get_profile_rating_level(current_user, current_profile)
+    prof_id = current_profile.id if current_profile else None
+
+    person_str = urllib.parse.unquote(person_identifier).strip()
+    if not person_str:
+        raise HTTPException(status_code=404, detail="Person not found")
+
+    tmdb_config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
+    tmdb_key = tmdb_config.value if tmdb_config and tmdb_config.value else os.getenv("TMDB_API_KEY")
+
+    person_data = None
+    combined_credits = None
+    tmdb_person_id = None
+    target_name = person_str
+
+    if tmdb_key and httpx is not None:
+        try:
+            raw_client = httpx.AsyncClient(timeout=10.0)
+            client = SafeHTTPClient(raw_client)
+
+            if person_str.isdigit():
+                tmdb_person_id = int(person_str)
+            else:
+                s_url = f"https://api.themoviedb.org/3/search/person?query={urllib.parse.quote(person_str)}&api_key={tmdb_key}"
+                s_res = await client.get(s_url)
+                if s_res.status_code == 200:
+                    results = s_res.json().get("results", [])
+                    if results:
+                        tmdb_person_id = results[0].get("id")
+                        target_name = results[0].get("name") or person_str
+
+            if tmdb_person_id:
+                p_url = f"https://api.themoviedb.org/3/person/{tmdb_person_id}?api_key={tmdb_key}&append_to_response=combined_credits"
+                p_res = await client.get(p_url)
+                if p_res.status_code == 200:
+                    person_data = p_res.json()
+                    target_name = person_data.get("name") or target_name
+                    combined_credits = person_data.get("combined_credits", {})
+        except Exception:
+            pass
+
+    # Profile picture resolution
+    profile_filename = None
+    if person_data and person_data.get("profile_path") and tmdb_person_id:
+        profile_path = person_data["profile_path"]
+        profile_filename = f"person_{tmdb_person_id}_profile.jpg"
+        target_file = os.path.join(METADATA_DIR, profile_filename)
+        if not os.path.exists(target_file) and tmdb_key:
+            try:
+                img_url = f"https://image.tmdb.org/t/p/w600_and_h900_bestv2{profile_path}"
+                raw_client = httpx.AsyncClient(timeout=10.0)
+                client = SafeHTTPClient(raw_client)
+                img_res = await client.get(img_url)
+                if img_res.status_code == 200:
+                    os.makedirs(METADATA_DIR, exist_ok=True)
+                    with open(target_file, "wb") as f:
+                        f.write(img_res.content)
+            except Exception:
+                pass
+
+    # Fallback to local DB cast profile picture if not found
+    if not profile_filename or not os.path.exists(os.path.join(METADATA_DIR, profile_filename)):
+        cast_match = session.exec(select(Movie.cast).where(Movie.cast.ilike(f"%{target_name}%")).limit(15)).all()
+        for cm in cast_match:
+            if cm and cm.startswith("["):
+                try:
+                    items = json.loads(cm)
+                    for it in items:
+                        if it.get("name", "").strip().lower() == target_name.lower():
+                            if it.get("profile_filename") and os.path.exists(os.path.join(METADATA_DIR, it["profile_filename"])):
+                                profile_filename = it["profile_filename"]
+                                break
+                except Exception:
+                    pass
+            if profile_filename:
+                break
+
+    # Birthdate / Age / Biography
+    birthday = person_data.get("birthday") if person_data else None
+    deathday = person_data.get("deathday") if person_data else None
+    dates_display = format_person_dates(birthday, deathday)
+    place_of_birth = person_data.get("place_of_birth") if person_data else None
+    biography = person_data.get("biography") if person_data else None
+
+    # Collect TMDB IDs & titles from credits
+    tmdb_movie_ids = set()
+    tmdb_movie_titles = set()
+    tmdb_tv_titles = set()
+
+    if combined_credits:
+        for c in combined_credits.get("cast", []) + combined_credits.get("crew", []):
+            m_type = c.get("media_type")
+            if m_type == "movie":
+                if c.get("id"):
+                    tmdb_movie_ids.add(c["id"])
+                if c.get("title"):
+                    tmdb_movie_titles.add(c["title"].strip().lower())
+            elif m_type == "tv":
+                if c.get("name"):
+                    tmdb_tv_titles.add(c["name"].strip().lower())
+
+    watched_movie_ids, _, watched_tv_titles = get_user_watched_status(session, current_user.id, prof_id)
+
+    wl_m_q = select(Watchlist.item_id).where(Watchlist.user_id == current_user.id, Watchlist.media_type == 'movie')
+    if prof_id:
+        wl_m_q = wl_m_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+    user_watchlist_movies = set(session.exec(wl_m_q).all())
+
+    wl_t_q = select(Watchlist.item_id).where(Watchlist.user_id == current_user.id, Watchlist.media_type == 'tv')
+    if prof_id:
+        wl_t_q = wl_t_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+    user_watchlist_tv = set(session.exec(wl_t_q).all())
+
+    from sqlalchemy import or_
+
+    known_for = []
+    seen_movie_titles = set()
+
+    if current_user.movies_access:
+        m_conds = [
+            Movie.cast.ilike(f"%{target_name}%"),
+            Movie.director.ilike(f"%{target_name}%")
+        ]
+        if tmdb_movie_ids:
+            m_conds.append(Movie.tmdb_id.in_(list(tmdb_movie_ids)))
+
+        m_q = select(Movie).where(or_(*m_conds))
+        if rating_level == 1:
+            m_q = m_q.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+        elif rating_level >= 2:
+            m_q = m_q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+
+        matched_movies = session.exec(m_q).all()
+        for m in matched_movies:
+            norm_t = m.title.strip().lower()
+            if norm_t in seen_movie_titles:
+                continue
+            seen_movie_titles.add(norm_t)
+
+            known_for.append({
+                "id": m.id,
+                "media_type": "movie",
+                "title": m.title,
+                "year": m.year,
+                "rating": m.rating or 0.0,
+                "poster_filename": m.poster_filename,
+                "url": f"/movie/{m.id}",
+                "play_url": f"/play/movie/{m.id}",
+                "is_watched": m.id in watched_movie_ids,
+                "in_watchlist": m.id in user_watchlist_movies,
+                "director": m.director or "",
+                "cast": m.cast or ""
+            })
+
+    seen_tv_titles = set()
+    if current_user.tv_access:
+        t_conds = [
+            TVShow.cast.ilike(f"%{target_name}%"),
+            TVShow.director.ilike(f"%{target_name}%")
+        ]
+        if tmdb_tv_titles:
+            t_conds.append(func.lower(TVShow.title).in_(list(tmdb_tv_titles)))
+
+        t_q = select(TVShow).where(or_(*t_conds))
+        if rating_level == 1:
+            t_q = t_q.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+        elif rating_level >= 2:
+            t_q = t_q.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+
+        matched_shows = session.exec(t_q).all()
+        distinct_titles = {t.title for t in matched_shows}
+        if distinct_titles:
+            all_episodes_for_shows = session.exec(
+                select(TVShow).where(TVShow.title.in_(list(distinct_titles)))
+            ).all()
+            processed_shows = process_tv_shows(all_episodes_for_shows)
+        else:
+            processed_shows = []
+
+        for t in processed_shows:
+            norm_t = t.title.strip().lower()
+            if norm_t in seen_tv_titles:
+                continue
+            seen_tv_titles.add(norm_t)
+
+            known_for.append({
+                "id": t.id,
+                "media_type": "tv",
+                "title": t.title,
+                "year": t.year,
+                "rating": t.rating or 0.0,
+                "poster_filename": t.poster_filename or t.season_poster_filename,
+                "url": f"/series/{urllib.parse.quote(t.title)}",
+                "play_url": f"/play/tv/{t.id}",
+                "is_watched": norm_t in watched_tv_titles,
+                "in_watchlist": t.id in user_watchlist_tv,
+                "director": t.director or "",
+                "cast": t.cast or ""
+            })
+
+    # Sort known_for by rating descending
+    known_for.sort(key=lambda x: (x.get("rating") or 0.0, str(x.get("year") or "")), reverse=True)
+
+    # Determine role display
+    roles = []
+    directed = any(target_name.lower() in item.get("director", "").lower() for item in known_for)
+    acted = any(target_name.lower() in item.get("cast", "").lower() for item in known_for)
+
+    if directed:
+        roles.append("Director")
+    if acted:
+        roles.append("Actor")
+
+    if not roles and person_data and person_data.get("known_for_department"):
+        dept = person_data["known_for_department"].strip()
+        dept_map = {
+            "Acting": "Actor",
+            "Directing": "Director",
+            "Writing": "Writer",
+            "Production": "Producer",
+            "Creator": "Creator",
+            "Camera": "Cinematographer",
+            "Sound": "Composer",
+            "Editing": "Editor",
+            "Crew": "Crew"
+        }
+        roles.append(dept_map.get(dept, dept))
+
+    if not roles:
+        roles.append("Actor")
+
+    role_display = ", ".join(roles)
+
+    person = {
+        "id": tmdb_person_id,
+        "name": target_name,
+        "profile_filename": profile_filename,
+        "role_display": role_display,
+        "dates_display": dates_display,
+        "place_of_birth": place_of_birth,
+        "biography": biography
+    }
+
+    user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
+
+    return templates.TemplateResponse(request=request, name="person.html", context={
+        "user": current_user,
+        "current_profile": current_profile,
+        "user_profiles": user_profiles,
+        "person": person,
+        "known_for": known_for
+    })
+
+
 # ----------------- MUSIC ROUTES & DETAIL VIEWS -----------------
 
 @app.get("/stream/music/{track_id}")
-async def stream_music(
+def stream_music(
     track_id: int,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
@@ -3402,7 +4194,7 @@ async def stream_music(
 
 
 @app.get("/album/{album_id}", response_class=HTMLResponse)
-async def album_view(
+def album_view(
     request: Request,
     album_id: int,
     from_url: Optional[str] = Query(None, alias="from"),
@@ -3491,7 +4283,7 @@ async def album_view(
 
 
 @app.get("/artist/{artist_id}", response_class=HTMLResponse)
-async def artist_view(
+def artist_view(
     request: Request,
     artist_id: int,
     from_url: Optional[str] = Query(None, alias="from"),
@@ -3571,7 +4363,7 @@ async def artist_view(
 
 
 @app.get("/playlist/{playlist_id}", response_class=HTMLResponse)
-async def playlist_view(
+def playlist_view(
     request: Request,
     playlist_id: int,
     from_url: Optional[str] = Query(None, alias="from"),
@@ -3664,7 +4456,7 @@ async def playlist_view(
 # ----------------- MUSIC API ROUTES -----------------
 
 @app.get("/api/music/track/{track_id}")
-async def api_track_info(
+def api_track_info(
     track_id: int,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
@@ -3697,7 +4489,7 @@ async def api_track_info(
 
 
 @app.get("/api/music/album/{album_id}/tracks")
-async def api_album_tracks(
+def api_album_tracks(
     album_id: int,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
@@ -3744,7 +4536,7 @@ async def api_album_tracks(
 
 
 @app.get("/api/music/artist/{artist_id}/tracks")
-async def api_artist_tracks(
+def api_artist_tracks(
     artist_id: int,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
@@ -3777,7 +4569,7 @@ async def api_artist_tracks(
 
 
 @app.get("/api/playlists")
-async def api_get_playlists(
+def api_get_playlists(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
 ):
@@ -3824,7 +4616,7 @@ async def api_create_playlist(
 
 
 @app.get("/api/playlists/{playlist_id}")
-async def api_get_playlist(
+def api_get_playlist(
     playlist_id: int,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
@@ -3865,7 +4657,7 @@ async def api_get_playlist(
 
 
 @app.delete("/api/playlists/{playlist_id}")
-async def api_delete_playlist(
+def api_delete_playlist(
     playlist_id: int,
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session)
@@ -3925,7 +4717,7 @@ async def api_add_track_to_playlist(
 
 
 @app.delete("/api/playlists/{playlist_id}/tracks/{track_id}")
-async def api_remove_track_from_playlist(
+def api_remove_track_from_playlist(
     playlist_id: int,
     track_id: int,
     current_user: User = Depends(get_current_user),
@@ -4261,7 +5053,7 @@ async def play_video(
     })
 
 @app.get("/subtitle/{media_type}/{item_id}")
-async def get_subtitle(
+def get_subtitle(
     media_type: str,
     item_id: int,
     track_id: Optional[str] = Query(None),
@@ -4641,7 +5433,7 @@ async def stop_progress(
 from fastapi.responses import StreamingResponse
 
 @app.get("/stream/{media_type}/{item_id}")
-async def stream_video(
+def stream_video(
     media_type: str,
     item_id: int,
     res: str = "original",
@@ -4848,7 +5640,7 @@ async def stream_video(
     return StreamingResponse(generate(), media_type="video/mp4", headers=headers)
 
 @app.get("/stream-info/{media_type}/{item_id}")
-async def get_stream_info(
+def get_stream_info(
     media_type: str,
     item_id: int,
     res: str = "original",
@@ -4991,7 +5783,7 @@ async def get_stream_info(
 # HLS Adaptive Bitrate (ABR) Endpoints
 # -------------------------------------------------------------
 @app.get("/hls/{media_type}/{item_id}/master.m3u8")
-async def get_hls_master(
+def get_hls_master(
     request: Request,
     media_type: str,
     item_id: int,
@@ -5037,7 +5829,7 @@ async def get_hls_master(
     return Response(content=content, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-cache"})
 
 @app.get("/hls/{media_type}/{item_id}/variant_{res}.m3u8")
-async def get_hls_variant(
+def get_hls_variant(
     request: Request,
     media_type: str,
     item_id: int,
@@ -5088,7 +5880,7 @@ async def get_hls_variant(
     return Response(content=content, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-cache"})
 
 @app.get("/hls/{media_type}/{item_id}/segment_{res}_{segment_idx}.ts")
-async def get_hls_segment(
+def get_hls_segment(
     media_type: str,
     item_id: int,
     res: str,
@@ -5144,7 +5936,7 @@ async def get_hls_segment(
     return FileResponse(seg_path, media_type="video/MP2T", headers={"Cache-Control": "public, max-age=86400"})
 
 @app.post("/hls/{media_type}/{item_id}/stop")
-async def stop_hls(
+def stop_hls(
     media_type: str,
     item_id: int,
     current_user: User = Depends(get_current_user)

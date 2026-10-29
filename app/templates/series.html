@@ -71,7 +71,7 @@
                     
                     <div class="info-details">
                         <!-- Row 1: Logo (if present) or Title -->
-                        {% if series.logo_filename %}
+                        {% if series.logo_filename and series.logo_filename != 'none' %}
                         <div class="series-logo-container mb-15">
                             <img src="/metadata/{{ series.logo_filename }}" alt="{{ title }}" class="series-logo">
                         </div>
@@ -83,7 +83,7 @@
                         <div class="info-meta-row flex align-center gap-15 mb-15">
                             {% if series.rating %}
                             <div class="rating-badge flex align-center gap-5">
-                                <i data-lucide="star" fill="var(--accent-primary)" color="var(--accent-primary)" size="18"></i>
+                                <i data-lucide="star" fill="var(--rating-gold)" color="var(--rating-gold)" size="18"></i>
                                 <span>{{ "%.1f"|format(series.rating) }}</span>
                             </div>
                             {% endif %}
@@ -110,7 +110,11 @@
                         
                         {% if series.director %}
                         <div class="metadata-block mb-15">
-                            <div><strong style="color: var(--text-primary);">Creator/Director:</strong> <span style="color: var(--text-secondary);">{{ series.director }}</span></div>
+                            <div><strong style="color: var(--text-primary);">Creator/Director:</strong> 
+                                {% for d in series.director.split(',') %}
+                                <a href="/person/{{ d.strip() | urlencode }}" class="inline-link" style="color: var(--primary);">{{ d.strip() }}</a>{% if not loop.last %}, {% endif %}
+                                {% endfor %}
+                            </div>
                         </div>
                         {% endif %}
                         
@@ -188,7 +192,7 @@
                             <strong style="color: var(--text-primary); display: block; margin-bottom: 15px;">Cast</strong>
                             <div class="cast-row">
                                 {% for actor in cast_list %}
-                                <div class="cast-member">
+                                <a href="/person/{{ actor.name | urlencode }}" class="cast-member" style="text-decoration: none; color: inherit;">
                                     {% if actor.profile_filename %}
                                     <img src="/metadata/{{ actor.profile_filename }}" class="cast-avatar">
                                     {% else %}
@@ -198,7 +202,7 @@
                                     {% if actor.character %}
                                     <div class="cast-character">{{ actor.character }}</div>
                                     {% endif %}
-                                </div>
+                                </a>
                                 {% endfor %}
                             </div>
                         </div>
@@ -277,6 +281,68 @@
                         <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
                     </div>
                 </div>
+
+                {% if related_shows %}
+                <div class="card mt-20">
+                    <h2>Related Titles</h2>
+                    <div class="carousel-container">
+                        <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
+                        <div class="carousel-row">
+                            {% for t in related_shows %}
+                            <div class="media-card">
+                                <div class="poster-container">
+                                    <a href="/series/{{ t.title | urlencode }}">
+                                        {% if t.poster_filename %}
+                                        <img src="/metadata/{{ t.poster_filename }}" class="poster">
+                                        {% else %}
+                                        <div class="poster-placeholder"></div>
+                                        {% endif %}
+                                    </a>
+                                    <a href="/play/tv/{{ t.id }}" class="icon-btn hover-play">
+                                        <i data-lucide="play" fill="currentColor"></i>
+                                    </a>
+                                    <button class="icon-btn three-dots-btn" onclick="toggleMenu(event, 'menu-rel-tv-{{ t.id }}')">
+                                        <i data-lucide="more-vertical" fill="white"></i>
+                                    </button>
+                                    {% if t.title.strip().lower() in watched_tv_titles %}
+                                    <div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>
+                                    {% endif %}
+                                    <div class="dropdown-menu" id="menu-rel-tv-{{ t.id }}">
+                                        {% if t.title.strip().lower() in watched_tv_titles %}
+                                        <form action="/history/mark_unwatched/tv/{{ t.id }}?scope=series" method="post">
+                                            <button type="submit">Mark Series as Unwatched</button>
+                                        </form>
+                                        {% else %}
+                                        <form action="/history/mark_watched/tv/{{ t.id }}?scope=series" method="post">
+                                            <button type="submit">Mark Series as Watched</button>
+                                        </form>
+                                        {% endif %}
+                                        {% if t.id in user_watchlist_tv %}
+                                        <form action="/watchlist/remove_by_item/tv/{{ t.id }}" method="post">
+                                            <button type="submit">Remove from Watchlist</button>
+                                        </form>
+                                        {% else %}
+                                        <form action="/watchlist/add/tv/{{ t.id }}" method="post">
+                                            <button type="submit">Add to Watchlist</button>
+                                        </form>
+                                        {% endif %}
+                                        {% if user.watch_together_access %}
+                                        <button type="button" onclick="openWatchTogether('tv', {{ t.id }})">Watch Together</button>
+                                        {% endif %}
+                                        {% if user.is_admin %}
+                                        <button type="button" class="fix-match-btn" data-media-type="tv" data-item-id="{{ t.id }}" data-title="{{ t.title }}" data-year="{{ t.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                                <div class="media-title"><a href="/series/{{ t.title | urlencode }}">{{ t.title }}</a></div>
+                                {% if t.year %}<div class="media-year">{{ t.year | safe }}</div>{% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
+                    </div>
+                </div>
+                {% endif %}
             </div>
         </div>
 

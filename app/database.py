@@ -33,6 +33,18 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor.execute("PRAGMA busy_timeout=60000")
     except Exception:
         pass
+    try:
+        cursor.execute("PRAGMA cache_size = -64000")
+    except Exception:
+        pass
+    try:
+        cursor.execute("PRAGMA temp_store = MEMORY")
+    except Exception:
+        pass
+    try:
+        cursor.execute("PRAGMA mmap_size = 268435456")
+    except Exception:
+        pass
     cursor.close()
 
 def create_db_and_tables():
@@ -368,6 +380,42 @@ def create_db_and_tables():
             session.commit()
         except Exception:
             session.rollback()
+
+        # Database index migrations for high performance on large libraries
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS ix_movie_title ON movie (title)",
+            "CREATE INDEX IF NOT EXISTS ix_movie_year ON movie (year)",
+            "CREATE INDEX IF NOT EXISTS ix_movie_rating ON movie (rating)",
+            "CREATE INDEX IF NOT EXISTS ix_movie_content_rating ON movie (content_rating)",
+            "CREATE INDEX IF NOT EXISTS ix_movie_tmdb_id ON movie (tmdb_id)",
+            "CREATE INDEX IF NOT EXISTS ix_movie_collection_id ON movie (collection_id)",
+            "CREATE INDEX IF NOT EXISTS ix_tvshow_title ON tvshow (title)",
+            "CREATE INDEX IF NOT EXISTS ix_tvshow_year ON tvshow (year)",
+            "CREATE INDEX IF NOT EXISTS ix_tvshow_rating ON tvshow (rating)",
+            "CREATE INDEX IF NOT EXISTS ix_tvshow_content_rating ON tvshow (content_rating)",
+            "CREATE INDEX IF NOT EXISTS ix_tvshow_season ON tvshow (season)",
+            "CREATE INDEX IF NOT EXISTS ix_tvshow_episode ON tvshow (episode)",
+            "CREATE INDEX IF NOT EXISTS ix_photo_title ON photo (title)",
+            "CREATE INDEX IF NOT EXISTS ix_photo_date_added ON photo (date_added)",
+            "CREATE INDEX IF NOT EXISTS ix_photo_date_taken ON photo (date_taken)",
+            "CREATE INDEX IF NOT EXISTS ix_photo_album ON photo (album)",
+            "CREATE INDEX IF NOT EXISTS ix_watchlist_user_id ON watchlist (user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_watchlist_media_type ON watchlist (media_type)",
+            "CREATE INDEX IF NOT EXISTS ix_watchlist_item_id ON watchlist (item_id)",
+            "CREATE INDEX IF NOT EXISTS ix_watchhistory_user_id ON watchhistory (user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_watchhistory_media_type ON watchhistory (media_type)",
+            "CREATE INDEX IF NOT EXISTS ix_watchhistory_item_id ON watchhistory (item_id)",
+            "CREATE INDEX IF NOT EXISTS ix_watchhistory_progress ON watchhistory (progress)",
+            "CREATE INDEX IF NOT EXISTS ix_watchhistory_last_watched ON watchhistory (last_watched)",
+            "CREATE INDEX IF NOT EXISTS ix_album_year ON album (year)",
+            "CREATE INDEX IF NOT EXISTS ix_track_year ON track (year)",
+        ]
+        for idx_sql in indexes:
+            try:
+                session.exec(text(idx_sql))
+                session.commit()
+            except Exception:
+                session.rollback()
 
 def get_session():
     with Session(engine) as session:

@@ -114,7 +114,7 @@
                             <div class="player-thumb-wrap" id="playerThumbWrap">
                                 <img id="playerCoverImg" src="" alt="Album Art" class="player-cover-img" style="display: none;">
                                 <div id="playerCoverPlaceholder" class="player-cover-placeholder">
-                                    <i data-lucide="disc"></i>
+                                    <i data-lucide="disc-3"></i>
                                 </div>
                             </div>
                             <div class="player-track-info">
@@ -487,7 +487,7 @@
                     <div class="queue-item ${isCurrent ? 'active' : ''}" data-index="${idx}">
                         <div class="queue-item-left">
                             <div class="queue-thumb">
-                                ${t.cover_url ? `<img src="${t.cover_url}" alt="">` : `<i data-lucide="disc"></i>`}
+                                ${t.cover_url ? `<img src="${t.cover_url}" alt="">` : `<i data-lucide="disc-3"></i>`}
                             </div>
                             <div class="queue-info">
                                 <span class="queue-title">${this.escapeHtml(t.title || 'Unknown')}</span>

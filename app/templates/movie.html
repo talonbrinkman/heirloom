@@ -71,7 +71,7 @@
                     
                     <div class="info-details">
                         <!-- Row 1: Title (or Logo if present) -->
-                        {% if movie.logo_filename %}
+                        {% if movie.logo_filename and movie.logo_filename != 'none' %}
                         <div class="series-logo-container mb-15">
                             <img src="/metadata/{{ movie.logo_filename }}" alt="{{ movie.title }}" class="series-logo">
                         </div>
@@ -83,7 +83,7 @@
                         <div class="info-meta-row flex align-center gap-15 mb-15">
                             {% if movie.rating %}
                             <div class="rating-badge flex align-center gap-5">
-                                <i data-lucide="star" fill="var(--accent-primary)" color="var(--accent-primary)" size="18"></i>
+                                <i data-lucide="star" fill="var(--rating-gold)" color="var(--rating-gold)" size="18"></i>
                                 <span>{{ "%.1f"|format(movie.rating) }}</span>
                             </div>
                             {% endif %}
@@ -103,7 +103,11 @@
                         
                         <div class="metadata-block">
                             {% if movie.director %}
-                            <div class="mb-10"><strong style="color: var(--text-primary);">Director:</strong> <span style="color: var(--text-secondary);">{{ movie.director }}</span></div>
+                            <div class="mb-10"><strong style="color: var(--text-primary);">Director:</strong> 
+                                {% for d in movie.director.split(',') %}
+                                <a href="/person/{{ d.strip() | urlencode }}" class="inline-link" style="color: var(--primary);">{{ d.strip() }}</a>{% if not loop.last %}, {% endif %}
+                                {% endfor %}
+                            </div>
                             {% endif %}
                             {% if movie.collection_name %}
                             <div class="mb-10"><strong style="color: var(--text-primary);">Part of:</strong> <a href="/library/movie?view=library&collection={{ movie.collection_name | urlencode }}" class="inline-link" style="color: var(--primary);">{{ movie.collection_name }}</a></div>
@@ -199,7 +203,7 @@
                             <strong style="color: var(--text-primary); display: block; margin-bottom: 15px;">Cast</strong>
                             <div class="cast-row">
                                 {% for actor in cast_list %}
-                                <div class="cast-member">
+                                <a href="/person/{{ actor.name | urlencode }}" class="cast-member" style="text-decoration: none; color: inherit;">
                                     {% if actor.profile_filename %}
                                     <img src="/metadata/{{ actor.profile_filename }}" class="cast-avatar">
                                     {% else %}
@@ -209,13 +213,80 @@
                                     {% if actor.character %}
                                     <div class="cast-character">{{ actor.character }}</div>
                                     {% endif %}
-                                </div>
+                                </a>
                                 {% endfor %}
                             </div>
                         </div>
                         {% endif %}
                     </div>
                 </div>
+
+                {% if related_movies %}
+                <div class="card mt-20">
+                    <h2>Related Titles</h2>
+                    <div class="carousel-container">
+                        <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
+                        <div class="carousel-row">
+                            {% for m in related_movies %}
+                            <div class="media-card">
+                                <div class="poster-container">
+                                    <a href="/movie/{{ m.id }}">
+                                        {% if m.poster_filename %}
+                                        <img src="/metadata/{{ m.poster_filename }}" class="poster">
+                                        {% else %}
+                                        <div class="poster-placeholder"></div>
+                                        {% endif %}
+                                    </a>
+                                    <a href="/play/movie/{{ m.id }}" class="icon-btn hover-play">
+                                        <i data-lucide="play" fill="currentColor"></i>
+                                    </a>
+                                    <button class="icon-btn three-dots-btn" onclick="toggleMenu(event, 'menu-rel-movie-{{ m.id }}')">
+                                        <i data-lucide="more-vertical" fill="white"></i>
+                                    </button>
+                                    {% if m.id in watched_movie_ids %}
+                                    <div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>
+                                    {% endif %}
+                                    <div class="dropdown-menu" id="menu-rel-movie-{{ m.id }}">
+                                        {% if m.id in watched_movie_ids %}
+                                        <form action="/history/mark_unwatched/movie/{{ m.id }}" method="post">
+                                            <button type="submit">Mark as Unwatched</button>
+                                        </form>
+                                        {% else %}
+                                        <form action="/history/mark_watched/movie/{{ m.id }}" method="post">
+                                            <button type="submit">Mark as Watched</button>
+                                        </form>
+                                        {% endif %}
+                                        {% if m.id in user_watchlist_movies %}
+                                        <form action="/watchlist/remove_by_item/movie/{{ m.id }}" method="post">
+                                            <button type="submit">Remove from Watchlist</button>
+                                        </form>
+                                        {% else %}
+                                        <form action="/watchlist/add/movie/{{ m.id }}" method="post">
+                                            <button type="submit">Add to Watchlist</button>
+                                        </form>
+                                        {% endif %}
+                                        {% if user.watch_together_access %}
+                                        <button type="button" onclick="openWatchTogether('movie', {{ m.id }})">Watch Together</button>
+                                        {% endif %}
+                                        {% if user.downloads_access %}
+                                        <form action="/download/movie/{{ m.id }}" method="get">
+                                            <button type="submit">Download</button>
+                                        </form>
+                                        {% endif %}
+                                        {% if user.is_admin %}
+                                        <button type="button" class="fix-match-btn" data-media-type="movie" data-item-id="{{ m.id }}" data-title="{{ m.title }}" data-year="{{ m.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                                <div class="media-title"><a href="/movie/{{ m.id }}">{{ m.title }}</a></div>
+                                {% if m.year %}<div class="media-year">{{ m.year }}</div>{% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
+                    </div>
+                </div>
+                {% endif %}
             </div>
         </div>
         <script src="/static/lucide.min.js"></script>
@@ -494,6 +565,39 @@
                 }
             }
         }
+
+        function scrollCarousel(btn, direction) {
+            const row = btn.parentElement.querySelector('.carousel-row');
+            const scrollAmount = row.clientWidth * 0.8;
+            row.scrollBy({ left: direction * scrollAmount, behavior: 'smooth' });
+            setTimeout(() => { if (window.lucide) lucide.createIcons(); }, 300);
+        }
+
+        function updateCarouselArrows() {
+            document.querySelectorAll('.carousel-container').forEach(container => {
+                const row = container.querySelector('.carousel-row');
+                const leftBtn = container.querySelector('.carousel-arrow.left');
+                const rightBtn = container.querySelector('.carousel-arrow.right');
+                
+                if (!row || !leftBtn || !rightBtn) return;
+                
+                if (row.scrollWidth > row.clientWidth) {
+                    leftBtn.style.display = row.scrollLeft > 0 ? 'flex' : 'none';
+                    rightBtn.style.display = Math.ceil(row.scrollLeft + row.clientWidth) >= row.scrollWidth ? 'none' : 'flex';
+                } else {
+                    leftBtn.style.display = 'none';
+                    rightBtn.style.display = 'none';
+                }
+            });
+        }
+
+        window.addEventListener('resize', updateCarouselArrows);
+        document.addEventListener('DOMContentLoaded', () => {
+            updateCarouselArrows();
+            document.querySelectorAll('.carousel-row').forEach(row => {
+                row.addEventListener('scroll', updateCarouselArrows);
+            });
+        });
 
         document.addEventListener('click', () => {
             document.querySelectorAll('.dropdown-menu.show').forEach(m => m.classList.remove('show'));

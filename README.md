@@ -26,6 +26,8 @@ By leveraging a lightweight, API-first architecture using Python and FastAPI, He
 - Adaptive Bitrate (ABR) & HLS Streaming
 - Hardware-Accelerated Transcoding
 - Multi-Version Coexistence & Instant Restart
+- Related Titles & Smart Media Discovery
+- Actor & Director Filmography Hubs ("Person" Pages)
 - Instant "Fix Match" Resolution
 - Music Library & Persistent Audio Player
 - Cross-Platform REST API
@@ -126,12 +128,13 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 - **Multi-Version Coexistence & Instant Restart**: Seamlessly organize multiple file editions (e.g., 4K Remux, 1080p SDR, 720p) of the same title under a unified media card. Switch editions with one click, retain watch progress across versions, and restart media anytime from the beginning with the dedicated "Restart" button.
 - **Music Library, Persistent Audio Player & Clean Metadata**: High-fidelity audio playback (FLAC, MP3, ALAC, AAC, OGG, WAV) featuring file-first ID3 tag and Vorbis comment extraction (title, artist, album, year, genre, track & disc numbers, bitrate), automatic multi-disc album merging, featured-artist normalization without library fragmentation, automated silence and filler track filtering, embedded cover art extraction with local folder fallback, artist discographies, playlists, queue management (play next, add to queue, queue drawer), seamless persistent bottom player bar that follows you across page navigations, MediaSession API integration (OS media keys, lock screen controls), and out-of-the-box TheAudioDB artist bio and album art enrichment (using the built-in free tier key `123` with zero configuration required).
 - **Curated Collections & Franchise Universes**: Automatic multi-title grouping for direct film series and sprawling cinematic universes (e.g., Marvel Cinematic Universe, Star Wars Saga, Wizarding World, Middle-earth, 007). Features seamless TMDB `belongs_to_collection` synchronization with official high-resolution collection posters and backdrops, release year spans, automatic prefix clustering fallback for independent sagas, a dedicated universal "Collections" subnavigation view, and one-click collection navigation directly from movie details.
+- **Related Titles & Smart Media Discovery**: Seamlessly discover similar content directly from any movie or TV series detail page underneath the main info layout and season episode carousel. Heirloom evaluates franchise collections, shared genres, directors, and cast members with weighted similarity scoring to present up to 15 relevant recommendations matching your active profile rating, complete with instant hover-play, watchlist management, and full media actions.
+- **Actor & Director Filmography Hubs ("Person" Pages)**: Explore dedicated talent hubs for actors, directors, writers, and crew directly by clicking any cast card or director name on movie and TV series detail pages, or searching for talent in global search. Features high-resolution headshots, occupations, birthdates with current or at-death age calculation, biographies, and a "Known For" carousel featuring all matching movies and TV shows in your local library (with release years, total season counts, and rating stars).
 - **Real-Time HDR to SDR Tone Mapping**: Enjoy vibrant, color-accurate playback of 4K HDR10, HLG, and Dolby Vision content on standard dynamic range (SDR) displays without washed-out, grayish colors. Uses perceptual color space transformation across hardware and CPU transcode pipelines with industry-standard tone mapping algorithms (Hable Filmic, Mobius Highlight-Preserving, Reinhard Shadow-Preserving, Linear, Gamma, Clip, or Disabled / Passthrough). Features instant auto-saving algorithm configuration in **Settings -> Transcoding & Processing** as well as an in-player control (`Auto`, `On`, `Off / Passthrough`) in the playback settings menu for flexible per-stream playback.
 
 ## 🔮 Upcoming Improvements
 
 - **Smart TV & Native Client Ecosystem**: Dedicated native client applications for Apple TV, Android TV / Google TV, Roku, and Fire TV.
-- **Actor & Director Filmography Hubs**: Dedicated talent pages linking all matching movies and series across your local library.
 - **Mobile Offline Sync**: Transcode and download media to phones and tablets for offline airplane and travel playback.
 
 

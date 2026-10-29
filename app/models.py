@@ -35,25 +35,25 @@ class Profile(SQLModel, table=True):
 
 class Movie(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    title: str
+    title: str = Field(index=True)
     file_path: str = Field(unique=True)
-    year: Optional[str] = None
+    year: Optional[str] = Field(default=None, index=True)
     plot: Optional[str] = None
     poster_filename: Optional[str] = None
     backdrop_filename: Optional[str] = None
     cast: Optional[str] = None
     director: Optional[str] = None
-    rating: Optional[float] = None
+    rating: Optional[float] = Field(default=None, index=True)
     genres: Optional[str] = None
     runtime: Optional[int] = None
-    content_rating: Optional[str] = None
+    content_rating: Optional[str] = Field(default=None, index=True)
     intro_start: Optional[float] = None
     intro_end: Optional[float] = None
     credits_start: Optional[float] = None
     credits_end: Optional[float] = None
     trailer_key: Optional[str] = None
-    tmdb_id: Optional[int] = None
-    collection_id: Optional[int] = None
+    tmdb_id: Optional[int] = Field(default=None, index=True)
+    collection_id: Optional[int] = Field(default=None, index=True)
     collection_name: Optional[str] = None
     collection_poster_filename: Optional[str] = None
     collection_backdrop_filename: Optional[str] = None
@@ -61,21 +61,21 @@ class Movie(SQLModel, table=True):
 
 class TVShow(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    title: str
+    title: str = Field(index=True)
     file_path: str = Field(unique=True)
-    year: Optional[str] = None
+    year: Optional[str] = Field(default=None, index=True)
     plot: Optional[str] = None
     poster_filename: Optional[str] = None
     backdrop_filename: Optional[str] = None
     cast: Optional[str] = None
     director: Optional[str] = None
-    rating: Optional[float] = None
+    rating: Optional[float] = Field(default=None, index=True)
     genres: Optional[str] = None
     runtime: Optional[int] = None
-    season: Optional[int] = None
-    episode: Optional[int] = None
+    season: Optional[int] = Field(default=None, index=True)
+    episode: Optional[int] = Field(default=None, index=True)
     season_poster_filename: Optional[str] = None
-    content_rating: Optional[str] = None
+    content_rating: Optional[str] = Field(default=None, index=True)
     intro_start: Optional[float] = None
     intro_end: Optional[float] = None
     credits_start: Optional[float] = None
@@ -85,11 +85,11 @@ class TVShow(SQLModel, table=True):
 
 class Photo(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    title: str
+    title: str = Field(index=True)
     file_path: str = Field(unique=True)
-    date_added: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    date_taken: Optional[datetime] = None
-    album: Optional[str] = None
+    date_added: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    date_taken: Optional[datetime] = Field(default=None, index=True)
+    album: Optional[str] = Field(default=None, index=True)
     poster_filename: Optional[str] = None
 
 class Artist(SQLModel, table=True):
@@ -165,21 +165,21 @@ class InviteCode(SQLModel, table=True):
 
 class Watchlist(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    user_id: int = Field(foreign_key="user.id")
+    user_id: int = Field(foreign_key="user.id", index=True)
     profile_id: Optional[int] = Field(default=None, foreign_key="profile.id", index=True)
-    media_type: str 
-    item_id: int
+    media_type: str = Field(index=True) 
+    item_id: int = Field(index=True)
 
 class WatchHistory(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    user_id: int = Field(foreign_key="user.id")
+    user_id: int = Field(foreign_key="user.id", index=True)
     profile_id: Optional[int] = Field(default=None, foreign_key="profile.id", index=True)
-    media_type: str 
-    item_id: int
-    progress: float = Field(default=0.0) # Percentage from 0 to 100
+    media_type: str = Field(index=True) 
+    item_id: int = Field(index=True)
+    progress: float = Field(default=0.0, index=True) # Percentage from 0 to 100
     current_time: Optional[float] = Field(default=0.0)
     duration: Optional[float] = Field(default=0.0)
-    last_watched: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_watched: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
 
 class VolumePath(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

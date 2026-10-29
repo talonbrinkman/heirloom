@@ -35,6 +35,9 @@
 
     --accent-transparent: rgba(229, 9, 20, 0.2);
 
+    /* Rating Gold */
+    --rating-gold: #f5c518;
+
     /* Status */
     --success: #4caf50;
     --failure: #e50914;
@@ -329,13 +332,13 @@ button svg,
 
 /* Sizes */
 .btn-sm {
-    padding: 5px 10px;
-    font-size: 13px;
+    padding: calc(var(--padding) / 2) var(--padding);
+    font-size: 0.75em;
 }
 
 .btn-sm svg {
-    width: 14px;
-    height: 14px;
+    height: 100%;
+    aspect-ratio: 1;
 }
 
 .btn-block {
@@ -700,7 +703,6 @@ input[type="checkbox"]:checked {
 
 /* Card = poster + title + year */
 .media-card {
-    min-width: 120px;
     text-align: center;
 }
 
@@ -726,8 +728,8 @@ input[type="checkbox"]:checked {
 .poster-container {
     position: relative;
     display: inline-block;
-    width: 120px;
-    height: 180px;
+    width: 150px;
+    height: 210px;
     overflow: hidden;
     border-radius: var(--radius);
     transition: transform 0.2s ease-in-out;
@@ -801,18 +803,17 @@ input[type="checkbox"]:checked {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 3px;
-    font-size: 0.78em;
-    color: #f5c518;
+    font-size: 0.75em;
+    color: var(--rating-gold);
     font-weight: 600;
-    margin: 3px auto 0 auto;
 }
 
 .media-rating svg,
 .media-rating i {
     width: 12px;
     height: 12px;
-    fill: #f5c518;
+    fill: var(--rating-gold);
+    color: var(--rating-gold);
 }
 
 /* Watch progress bar along bottom of poster */
@@ -1005,7 +1006,6 @@ button.three-dots-btn {
     flex-direction: column;
     background: var(--surface);
     border-radius: var(--radius);
-    box-shadow: 0 4px 8px var(--overlay);
     overflow: hidden;
     z-index: 9999;
 }
@@ -1360,7 +1360,7 @@ button.three-dots-btn {
 
 body.has-backdrop {
     background:
-        linear-gradient(to right, rgba(20, 20, 20, 0.8) 20%, rgba(20, 20, 20, 0.5) 50%, rgba(20, 20, 20, 0.8) 100%),
+        linear-gradient(to right, rgba(20, 20, 20, 0.85) 20%, rgba(20, 20, 20, 0.75) 50%, rgba(20, 20, 20, 0.85) 100%),
         var(--backdrop-url) no-repeat top right fixed;
     background-size: cover;
     backdrop-filter: blur(5px);
@@ -1408,14 +1408,14 @@ body.has-backdrop {
     height: auto;
     max-width: 300px;
     object-fit: contain;
-    object-position: left center;
+    object-position: left bottom;
     display: block;
 }
 
 .info-meta-row {
     display: flex;
     align-items: center;
-    gap: 15px;
+    gap: var(--gap);
     flex-wrap: wrap;
     color: var(--text-muted);
     font-size: 0.95em;
@@ -1484,8 +1484,21 @@ body.has-backdrop {
     gap: var(--gap);
 }
 
-.info-actions .play-btn{
+.info-actions form {
+    margin: 0;
+    padding: 0;
+    display: inline-flex;
+    display: contents;
+    flex-shrink: 0;
+}
+
+.info-actions .play-btn {
     aspect-ratio: 1;
+    width: 2.4em;
+    height: 2.4em;
+    padding: var(--padding);
+    box-sizing: border-box;
+    flex-shrink: 0;
 }
 
 .content-rating {
@@ -1540,6 +1553,12 @@ body.has-backdrop {
     gap: var(--gap);
     text-shadow: 0 0 var(--padding) black;
     flex-shrink: 0;
+    cursor: pointer;
+    transition: transform 0.2s ease;
+}
+
+.cast-member:hover {
+    transform: scale(1.05);
 }
 
 .cast-avatar {
@@ -2923,8 +2942,7 @@ video::-webkit-media-text-track-display,
         display: grid;
         grid-template-columns: 44px 1fr 44px;
         align-items: center;
-        padding: 10px var(--padding, 10px);
-        margin-bottom: 16px;
+        padding: var(--padding);
         position: relative;
         box-sizing: border-box;
         width: 100%;
@@ -3369,7 +3387,7 @@ video::-webkit-media-text-track-display,
         width: 100%;
         max-width: 100%;
         max-height: 120px;
-        object-position: left center;
+        object-position: center bottom;
     }
 
     .info-meta-row {
@@ -3424,14 +3442,30 @@ video::-webkit-media-text-track-display,
         display: none;
     }
 
-    .info-actions > *,
+    .info-actions > * {
+        flex-shrink: 0;
+    }
+
     .info-actions form {
+        margin: 0;
+        padding: 0;
+        display: inline-flex;
+        display: contents;
         flex-shrink: 0;
     }
 
     .info-details .play-btn {
         padding: var(--padding) calc(var(--padding) * 2);
         font-size: 1rem;
+    }
+
+    .info-actions .play-btn {
+        aspect-ratio: 1;
+        width: 2.4em;
+        height: 2.4em;
+        padding: var(--padding);
+        box-sizing: border-box;
+        flex-shrink: 0;
     }
 
     .cast-row {
@@ -3441,8 +3475,8 @@ video::-webkit-media-text-track-display,
     }
 
     .cast-member {
-        width: 200px;
-        min-width: 200px;
+        width: 150px;
+        min-width: 150px;
     }
 
     .cast-name {
