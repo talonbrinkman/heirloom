@@ -202,16 +202,17 @@ form {
     width: 170px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--gap);
     flex-shrink: 0;
     overflow-y: auto;
+    font-size: 1rem;
 }
 
 .sidebar-link {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 8px 12px;
+    gap: var(--gap);
+    padding: var(--padding) calc(var(--padding) * 2);
     color: var(--text-muted);
     border-radius: var(--radius);
     transition: color 0.2s;
@@ -221,8 +222,8 @@ form {
 }
 
 .sidebar-link svg {
-    height: 100%;
-    aspect-ratio: 1;
+    width: 1.25em;
+    height: 1.25em;
 }
 
 .sidebar-link:hover {
@@ -750,6 +751,7 @@ input[type="checkbox"]:checked {
     width: 100%;
     height: 100%;
     object-fit: cover;
+    image-orientation: from-image;
     border-radius: var(--radius);
     box-shadow: 0 4px 8px var(--overlay);
 }
@@ -932,6 +934,7 @@ button.three-dots-btn {
 
 /* Series page: episodes */
 .episode-card .media-year {
+    font-size: 1rem;
     color: var(--text);
     padding: 0 5px;
     white-space: normal;
@@ -941,6 +944,16 @@ button.three-dots-btn {
     text-align: center;
     max-width: 120px;
     line-height: 1.25;
+    margin: 5px auto 0 auto;
+}
+
+.episode-card .media-year a {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+    color: inherit;
+    text-decoration: none;
 }
 
 .episode-card .media-year .media-year-line {
@@ -948,12 +961,20 @@ button.three-dots-btn {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    font-size: 0.85em;
-    color: #fff;
+    font-size: 0.8em;
+    font-weight: normal;
+    color: var(--text-muted);
+}
+
+.episode-card .media-year .media-year-line:first-child {
+    font-size: 0.9em;
+    font-weight: bold;
+    color: var(--text);
 }
 
 .episode-card .media-year .media-year-line:not(:first-child) {
-    font-size: 0.78em;
+    font-size: 0.8em;
+    font-weight: normal;
     color: var(--text-muted);
 }
 
@@ -1339,7 +1360,7 @@ button.three-dots-btn {
 
 body.has-backdrop {
     background:
-        linear-gradient(to right, rgba(20, 20, 20, 1) 20%, rgba(20, 20, 20, 0.7) 50%, rgba(20, 20, 20, 0) 100%),
+        linear-gradient(to right, rgba(20, 20, 20, 0.8) 20%, rgba(20, 20, 20, 0.5) 50%, rgba(20, 20, 20, 0.8) 100%),
         var(--backdrop-url) no-repeat top right fixed;
     background-size: cover;
     backdrop-filter: blur(5px);
@@ -1370,9 +1391,40 @@ body.has-backdrop {
 
 .info-details {
     flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
-    padding-top: 20px;
+}
+
+.series-logo-container {
+    width: 100%;
+    display: flex;
+    align-items: center;
+}
+
+.series-logo {
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    max-width: 300px;
+    object-fit: contain;
+    object-position: left center;
+    display: block;
+}
+
+.info-meta-row {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    flex-wrap: wrap;
+    color: var(--text-muted);
+    font-size: 0.95em;
+}
+
+.content-rating-badge {
+    font-size: 0.85em;
+    font-weight: bold;
+    color: var(--text-muted);
 }
 
 .info-details span {
@@ -1399,6 +1451,11 @@ body.has-backdrop {
     color: var(--text-muted);
 }
 
+.rating-badge {
+    font-size: 1.25em;
+    font-weight: 500;
+}
+
 .info-year {
     font-size: 1.2em;
     color: var(--text-muted);
@@ -1413,15 +1470,29 @@ body.has-backdrop {
     max-width: 800px;
 }
 
-.rating-badge strong {
-    font-size: 1.5em;
+.info-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--gap);
+    flex-wrap: wrap;
+    width: 100%;
+}
+
+.info-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--gap);
+}
+
+.info-actions .play-btn{
+    aspect-ratio: 1;
 }
 
 .content-rating {
     margin-left: 5px;
     padding: 2px 6px;
     border: 1px solid var(--surface-hover);
-    border-radius: 4px;
+    border-radius: var(--radius);
     font-size: 0.85em;
     font-weight: bold;
     color: var(--text-muted);
@@ -1468,6 +1539,7 @@ body.has-backdrop {
     padding: var(--padding);
     gap: var(--gap);
     text-shadow: 0 0 var(--padding) black;
+    flex-shrink: 0;
 }
 
 .cast-avatar {
@@ -3153,41 +3225,28 @@ video::-webkit-media-text-track-display,
     /* Sidebar Navigation as horizontal pill-bar */
     .sidebar {
         width: 100%;
-        margin-right: 0;
-        margin-bottom: 18px;
         flex-direction: row;
         overflow-x: auto;
-        gap: 8px;
-        padding: 2px 2px 8px 2px;
+        gap: var(--gap);
         -webkit-overflow-scrolling: touch;
+        font-size: 0.75em;
+        padding: var(--padding);
     }
-
-    .sidebar-link {
-        padding: 8px 14px;
-        font-size: 13px;
-        background: rgba(255, 255, 255, 0.04);
-        border-radius: var(--radius);
-        white-space: nowrap;
-        flex-shrink: 0;
-    }
-
+    
     .sidebar-link.active {
         background: var(--accent);
-        border-color: var(--accent);
-        color: #ffffff;
+        color: var(--text);
     }
 
     .sidebar-link svg,
     .sidebar-link i {
-        min-width: 18px;
-        min-height: 18px;
-        width: 18px;
-        height: 18px;
+        width: 1.25em;
+        height: 1.25em;
     }
 
     /* Cards & Grids */
     .card {
-        padding: 16px 12px;
+        padding: var(--padding);
         margin-bottom: 16px;
         border-radius: var(--radius);
     }
@@ -3306,6 +3365,18 @@ video::-webkit-media-text-track-display,
         text-align: left;
     }
 
+    .series-logo {
+        width: 100%;
+        max-width: 100%;
+        max-height: 120px;
+        object-position: left center;
+    }
+
+    .info-meta-row {
+        gap: 10px;
+        font-size: 0.85em;
+    }
+
     .info-title {
         font-size: 1.6em;
         text-align: left;
@@ -3318,11 +3389,44 @@ video::-webkit-media-text-track-display,
         gap: 8px;
     }
 
-    .info-details .flex.gap-15.mb-20 {
+    .info-controls {
         display: flex;
-        flex-wrap: wrap;
+        flex-direction: column;
+        align-items: stretch;
+        width: 100%;
         gap: 10px;
+        margin-bottom: 20px;
+    }
+
+    .info-controls > .play-btn,
+    .info-controls > a.play-btn,
+    .info-controls > button.play-btn {
+        width: 100% !important;
+        box-sizing: border-box;
+        justify-content: center;
+        text-align: center;
+        display: flex;
+    }
+
+    .info-actions {
+        display: flex;
         align-items: center;
+        gap: 10px;
+        width: 100%;
+        overflow-x: auto;
+        padding-bottom: 6px;
+        box-sizing: border-box;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .info-actions::-webkit-scrollbar {
+        display: none;
+    }
+
+    .info-actions > *,
+    .info-actions form {
+        flex-shrink: 0;
     }
 
     .info-details .play-btn {
@@ -3337,8 +3441,8 @@ video::-webkit-media-text-track-display,
     }
 
     .cast-member {
-        width: 100px;
-        min-width: 100px;
+        width: 200px;
+        min-width: 200px;
     }
 
     .cast-name {
@@ -4015,6 +4119,21 @@ body.is-mobile .skip-marker-btn {
 
     .media-year {
         font-size: 0.72rem;
+    }
+
+    .episode-card .media-year {
+        font-size: 1rem;
+        max-width: 100%;
+    }
+
+    .episode-card .media-year .media-year-line:first-child {
+        font-size: 0.78rem;
+        font-weight: bold;
+    }
+
+    .episode-card .media-year .media-year-line:not(:first-child) {
+        font-size: 0.72rem;
+        font-weight: normal;
     }
 
     .season-tab {
@@ -5029,6 +5148,8 @@ body.has-active-player .main-content {
     scrollbar-width: none;
     -ms-overflow-style: none;
     -webkit-overflow-scrolling: touch;
+    font-size: 0.75em;
+    font-weight: 700;
 }
 
 .subnav-bar::-webkit-scrollbar,
@@ -5044,9 +5165,8 @@ body.has-active-player .main-content {
 
 .subnav-tab,
 .music-tab {
-    padding: calc(var(--padding) / 2) var(--padding);
+    padding: var(--padding) calc(var(--padding) * 2);
     border-radius: var(--radius);
-    font-size: 0.75rem;
     color: var(--text-muted);
     text-decoration: none;
     background: transparent;
@@ -5054,6 +5174,10 @@ body.has-active-player .main-content {
     display: inline-flex;
     align-items: center;
     gap: var(--gap);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+    border: none;
 }
 
 .subnav-tab:hover,

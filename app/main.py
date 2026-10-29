@@ -22,7 +22,7 @@ from collections import defaultdict, Counter
 from datetime import datetime, timezone, timedelta
 from .database import create_db_and_tables, get_session, engine
 from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile, Artist, Album, Track, Playlist, PlaylistTrack
-from .scanner import scan_media_library, scanner_manager, is_recycle_name, is_recycle_path, async_download_image, async_fetch_additional_details, SafeHTTPClient, httpx, find_local_trailer, extract_tmdb_trailer_key
+from .scanner import scan_media_library, scanner_manager, is_recycle_name, is_recycle_path, download_image, async_download_image, async_fetch_additional_details, SafeHTTPClient, httpx, find_local_trailer, extract_tmdb_trailer_key
 from .watcher import start_watcher, stop_watcher, scanner_debouncer
 from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time, sanitize_vtt_content, get_video_transcode_pipeline, parse_burn_sub_index
 from .hls_manager import hls_manager
@@ -195,6 +195,8 @@ def on_startup():
             ("tvshow", "backdrop_filename", "VARCHAR"),
             ("tvshow", "cast", "VARCHAR"),
             ("tvshow", "director", "VARCHAR"),
+            ("tvshow", "logo_filename", "VARCHAR"),
+            ("movie", "logo_filename", "VARCHAR"),
             ("user", "photos_access", "BOOLEAN DEFAULT 1"),
             ("user", "downloads_access", "BOOLEAN DEFAULT 1"),
             ("user", "watch_together_access", "BOOLEAN DEFAULT 1"),
@@ -263,6 +265,40 @@ def on_startup():
             print(f"[Startup] Note during music artist/album consolidation: {e}")
             
     import threading
+    def fix_sideways_photo_thumbnails():
+        try:
+            from PIL import Image
+            from .scanner import METADATA_DIR, _generate_photo_thumbnail
+            with Session(engine) as s:
+                photos = s.exec(select(Photo)).all()
+            for p in photos:
+                if not p.file_path or not os.path.exists(p.file_path):
+                    continue
+                ext = os.path.splitext(p.file_path)[1].lower()
+                if ext in (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"):
+                    continue
+                p_hash = hashlib.md5(p.file_path.encode("utf-8")).hexdigest()[:16]
+                t_path = os.path.join(METADATA_DIR, f"photo_{p_hash}_poster.jpg")
+                if not os.path.exists(t_path):
+                    _generate_photo_thumbnail(p.file_path, t_path, False)
+                    continue
+                try:
+                    with Image.open(p.file_path) as src_im:
+                        ex = src_im.getexif()
+                        orient = ex.get(0x0112)
+                        if orient and orient in (2, 3, 4, 5, 6, 7, 8):
+                            with Image.open(t_path) as th_im:
+                                src_is_portrait = (src_im.height > src_im.width) if orient not in (5, 6, 7, 8) else (src_im.width > src_im.height)
+                                th_is_portrait = (th_im.height > th_im.width)
+                                if src_is_portrait != th_is_portrait:
+                                    _generate_photo_thumbnail(p.file_path, t_path, False)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[Startup] Note checking photo thumbnails: {e}")
+
+    threading.Thread(target=fix_sideways_photo_thumbnails, daemon=True).start()
+
     def initial_scan():
         with Session(engine) as scan_session:
             scan_media_library(scan_session)
@@ -1922,6 +1958,12 @@ async def api_library(
 
         if sort == "title_asc": processed.sort(key=lambda x: x.title.lower())
         elif sort == "title_desc": processed.sort(key=lambda x: x.title.lower(), reverse=True)
+        elif sort in ("rating_desc", "rating"):
+            processed.sort(key=lambda x: x.title.lower())
+            processed.sort(key=lambda x: (float(x.rating) if isinstance(getattr(x, 'rating', None), (int, float)) else -1.0), reverse=True)
+        elif sort == "rating_asc":
+            processed.sort(key=lambda x: x.title.lower())
+            processed.sort(key=lambda x: (float(x.rating) if isinstance(getattr(x, 'rating', None), (int, float)) else 999.0))
         elif sort == "year_desc": processed.sort(key=lambda x: str(x.year) if x.year else "", reverse=True)
         elif sort == "year_asc": processed.sort(key=lambda x: str(x.year) if x.year else "")
         elif sort == "date_desc": processed.sort(key=lambda x: x.id, reverse=True)
@@ -1949,6 +1991,12 @@ async def api_library(
         
         if sort == "title_asc": processed.sort(key=lambda x: x.title.lower())
         elif sort == "title_desc": processed.sort(key=lambda x: x.title.lower(), reverse=True)
+        elif sort in ("rating_desc", "rating"):
+            processed.sort(key=lambda x: x.title.lower())
+            processed.sort(key=lambda x: (float(x.rating) if isinstance(getattr(x, 'rating', None), (int, float)) else -1.0), reverse=True)
+        elif sort == "rating_asc":
+            processed.sort(key=lambda x: x.title.lower())
+            processed.sort(key=lambda x: (float(x.rating) if isinstance(getattr(x, 'rating', None), (int, float)) else 999.0))
         elif sort == "year_desc": processed.sort(key=lambda x: str(x.year) if x.year else "", reverse=True)
         elif sort == "year_asc": processed.sort(key=lambda x: str(x.year) if x.year else "")
         elif sort == "date_desc": processed.sort(key=lambda x: x.id, reverse=True)
@@ -2360,6 +2408,39 @@ async def api_movie(
     if not movie: raise HTTPException(status_code=404, detail="Movie not found")
     if rating_level > 0 and not is_rating_allowed(movie.content_rating, rating_level):
         raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
+
+    if not movie.logo_filename:
+        try:
+            tmdb_config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
+            if tmdb_config and tmdb_config.value:
+                m_tmdb_id = movie.tmdb_id
+                if not m_tmdb_id:
+                    m_logo = re.search(r'movie_(\d+)_', movie.poster_filename or '')
+                    if m_logo:
+                        m_tmdb_id = int(m_logo.group(1))
+                if m_tmdb_id:
+                    url_logo = f"https://api.themoviedb.org/3/movie/{m_tmdb_id}?api_key={tmdb_config.value}&append_to_response=images&include_image_language=en,null"
+                    r_logo = requests.get(url_logo, timeout=5)
+                    if r_logo.status_code == 200:
+                        l_data = r_logo.json()
+                        l_list = l_data.get("images", {}).get("logos", [])
+                        if l_list:
+                            en_l = [l for l in l_list if l.get("iso_639_1") == "en"]
+                            best_l = None
+                            if en_l:
+                                png_en = [l for l in en_l if (l.get("file_path") or "").lower().endswith(".png")]
+                                best_l = png_en[0] if png_en else en_l[0]
+                            else:
+                                png_l = [l for l in l_list if (l.get("file_path") or "").lower().endswith(".png")]
+                                best_l = png_l[0] if png_l else l_list[0]
+                            if best_l and best_l.get("file_path"):
+                                l_fn = download_image(best_l["file_path"], "movie", m_tmdb_id, "logo")
+                                if l_fn:
+                                    movie.logo_filename = l_fn
+                                    session.add(movie)
+                                    session.commit()
+        except Exception:
+            session.rollback()
         
     cast_list = []
     if movie.cast and movie.cast.startswith("["):
@@ -2575,11 +2656,15 @@ async def photo_view(
     is_video = ext in (".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm")
     
     if photo.album:
-        prev_photo = session.exec(select(Photo).where(Photo.album == photo.album, Photo.id < item_id).order_by(Photo.id.desc())).first()
-        next_photo = session.exec(select(Photo).where(Photo.album == photo.album, Photo.id > item_id).order_by(Photo.id.asc())).first()
+        album_photos = session.exec(select(Photo).where(Photo.album == photo.album)).all()
     else:
-        prev_photo = session.exec(select(Photo).where(Photo.album == None, Photo.id < item_id).order_by(Photo.id.desc())).first()
-        next_photo = session.exec(select(Photo).where(Photo.album == None, Photo.id > item_id).order_by(Photo.id.asc())).first()
+        album_photos = session.exec(select(Photo).where(Photo.album == None)).all()
+    album_photos = [p for p in album_photos if not (p.file_path and is_recycle_path(p.file_path))]
+    album_photos.sort(key=lambda x: (x.title.lower(), x.id))
+
+    idx = next((i for i, p in enumerate(album_photos) if p.id == item_id), -1)
+    prev_photo = album_photos[idx - 1] if idx > 0 else None
+    next_photo = album_photos[idx + 1] if 0 <= idx < len(album_photos) - 1 else None
     user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
 
     close_url = None
@@ -3109,6 +3194,37 @@ async def series_view(
         raise HTTPException(status_code=404, detail="Series not found")
     if rating_level > 0 and not is_rating_allowed(shows[0].content_rating, rating_level):
         raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
+
+    if not shows[0].logo_filename:
+        try:
+            tmdb_config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
+            if tmdb_config and tmdb_config.value:
+                m_logo = re.search(r'tv_(\d+)_', shows[0].poster_filename or '')
+                if m_logo:
+                    s_tmdb_id = int(m_logo.group(1))
+                    url_logo = f"https://api.themoviedb.org/3/tv/{s_tmdb_id}?api_key={tmdb_config.value}&append_to_response=images&include_image_language=en,null"
+                    r_logo = requests.get(url_logo, timeout=5)
+                    if r_logo.status_code == 200:
+                        l_data = r_logo.json()
+                        l_list = l_data.get("images", {}).get("logos", [])
+                        if l_list:
+                            en_l = [l for l in l_list if l.get("iso_639_1") == "en"]
+                            best_l = None
+                            if en_l:
+                                png_en = [l for l in en_l if (l.get("file_path") or "").lower().endswith(".png")]
+                                best_l = png_en[0] if png_en else en_l[0]
+                            else:
+                                png_l = [l for l in l_list if (l.get("file_path") or "").lower().endswith(".png")]
+                                best_l = png_l[0] if png_l else l_list[0]
+                            if best_l and best_l.get("file_path"):
+                                l_fn = download_image(best_l["file_path"], "tv", s_tmdb_id, "logo")
+                                if l_fn:
+                                    for s_ep in shows:
+                                        s_ep.logo_filename = l_fn
+                                        session.add(s_ep)
+                                    session.commit()
+        except Exception:
+            session.rollback()
         
     cast_list = []
     if shows[0].cast and shows[0].cast.startswith("["):
@@ -6259,7 +6375,7 @@ async def fix_media_match(
 
             poster_filename = await async_download_image(client, m_data.get("poster_path"), "movie", tmdb_id, "poster")
             backdrop_filename = await async_download_image(client, m_data.get("backdrop_path"), "movie", tmdb_id, "backdrop")
-            cast, director, content_rating, genres_str, trailer_key, col_id, col_name, col_poster, col_backdrop = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_key)
+            cast, director, content_rating, genres_str, trailer_key, col_id, col_name, col_poster, col_backdrop, logo_filename = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_key)
 
             movie.title = m_data.get("title") or movie.title
             movie.year = (m_data.get("release_date") or "")[:4] or movie.year
@@ -6272,6 +6388,8 @@ async def fix_media_match(
                 movie.collection_poster_filename = col_poster
             if col_backdrop:
                 movie.collection_backdrop_filename = col_backdrop
+            if logo_filename:
+                movie.logo_filename = logo_filename
             if trailer_key:
                 movie.trailer_key = trailer_key
             if poster_filename:
@@ -6305,7 +6423,7 @@ async def fix_media_match(
 
             poster_filename = await async_download_image(client, s_data.get("poster_path"), "tv", tmdb_id, "poster")
             backdrop_filename = await async_download_image(client, s_data.get("backdrop_path"), "tv", tmdb_id, "backdrop")
-            cast, director, content_rating, genres_str, _, _, _, _, _ = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_key)
+            cast, director, content_rating, genres_str, _, _, _, _, _, logo_filename = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_key)
 
             new_title = s_data.get("name") or old_title
             new_year = (s_data.get("first_air_date") or "")[:4] or show.year
@@ -6339,6 +6457,8 @@ async def fix_media_match(
                     ep.cast = cast
                 if director:
                     ep.director = director
+                if logo_filename:
+                    ep.logo_filename = logo_filename
                 if content_rating:
                     ep.content_rating = content_rating
                 if genres_str:

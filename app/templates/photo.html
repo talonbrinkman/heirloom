@@ -96,11 +96,11 @@
     </div>
     
     {% set from_query = ('?from=' + close_url|urlencode) if close_url else '' %}
-    {% if next_photo_id %}
-    <a href="/photo/{{ next_photo_id }}{{ from_query }}" class="photo-arrow left-arrow"><i data-lucide="chevron-left"></i></a>
-    {% endif %}
     {% if prev_photo_id %}
-    <a href="/photo/{{ prev_photo_id }}{{ from_query }}" class="photo-arrow right-arrow"><i data-lucide="chevron-right"></i></a>
+    <a href="/photo/{{ prev_photo_id }}{{ from_query }}" class="photo-arrow left-arrow" title="Previous"><i data-lucide="chevron-left"></i></a>
+    {% endif %}
+    {% if next_photo_id %}
+    <a href="/photo/{{ next_photo_id }}{{ from_query }}" class="photo-arrow right-arrow" title="Next"><i data-lucide="chevron-right"></i></a>
     {% endif %}
 
     {% if is_video %}

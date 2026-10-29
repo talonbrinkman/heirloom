@@ -338,7 +338,8 @@ def download_image(image_path: Optional[str], prefix: str, tmdb_id: int, img_typ
     if not image_path:
         return None
     os.makedirs(METADATA_DIR, exist_ok=True)
-    filename = f"{prefix}_{tmdb_id}_{img_type}.jpg"
+    ext = ".png" if (img_type == "logo" or image_path.lower().endswith(".png")) else ".jpg"
+    filename = f"{prefix}_{tmdb_id}_{img_type}{ext}"
     filepath = os.path.join(METADATA_DIR, filename)
     
     if not os.path.exists(filepath):
@@ -349,6 +350,12 @@ def download_image(image_path: Optional[str], prefix: str, tmdb_id: int, img_typ
             if response.status_code == 200:
                 with open(filepath, 'wb') as f:
                     f.write(response.content)
+                if os.path.exists("config/metadata") and os.path.abspath("config/metadata") != os.path.abspath(METADATA_DIR):
+                    try:
+                        with open(os.path.join("config/metadata", filename), 'wb') as f:
+                            f.write(response.content)
+                    except Exception:
+                        pass
         except Exception:
             return None
     return filename
@@ -357,16 +364,16 @@ def fetch_additional_details(tmdb_id: int, media_type: str, api_key: str):
     """Synchronous TMDB additional details fetcher (legacy/fallback)."""
     try:
         if media_type == "movie":
-            url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}&append_to_response=credits,release_dates"
+            url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}&append_to_response=credits,release_dates,images&include_image_language=en,null"
         else:
-            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}&append_to_response=credits,content_ratings"
+            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}&append_to_response=credits,content_ratings,images&include_image_language=en,null"
             
         res = requests.get(url, timeout=10)
         if res.status_code == 200:
             data = res.json()
             credits_data = data.get("credits", {})
             cast_list = []
-            for c in credits_data.get("cast", [])[:5]:
+            for c in credits_data.get("cast", [])[:15]:
                 profile_filename = None
                 if c.get("profile_path"):
                     profile_filename = download_image(c["profile_path"], "person", c["id"], "profile")
@@ -402,10 +409,26 @@ def fetch_additional_details(tmdb_id: int, media_type: str, api_key: str):
                             content_rating = result.get("rating")
                             break
                             
-            return cast_str, dir_str, content_rating, genres_str
+            logo_filename = None
+            images = data.get("images", {})
+            logos = images.get("logos", []) if isinstance(images, dict) else []
+            if logos:
+                en_logos = [l for l in logos if l.get("iso_639_1") == "en"]
+                selected_logo = None
+                if en_logos:
+                    png_en = [l for l in en_logos if (l.get("file_path") or "").lower().endswith(".png")]
+                    selected_logo = png_en[0] if png_en else en_logos[0]
+                else:
+                    png_logos = [l for l in logos if (l.get("file_path") or "").lower().endswith(".png")]
+                    selected_logo = png_logos[0] if png_logos else logos[0]
+                if selected_logo and selected_logo.get("file_path"):
+                    prefix = "tv" if media_type == "tv" else "movie"
+                    logo_filename = download_image(selected_logo["file_path"], prefix, tmdb_id, "logo")
+
+            return cast_str, dir_str, content_rating, genres_str, logo_filename
     except Exception:
         pass
-    return None, None, None, None
+    return None, None, None, None, None
 
 def extract_chapter_markers(file_path: str):
     """Synchronous chapter marker extraction (used by on-demand playback probe)."""
@@ -453,7 +476,8 @@ async def async_download_image(client: Any, image_path: Optional[str], prefix: s
     if not image_path:
         return None
     os.makedirs(METADATA_DIR, exist_ok=True)
-    filename = f"{prefix}_{tmdb_id}_{img_type}.jpg"
+    ext = ".png" if (img_type == "logo" or image_path.lower().endswith(".png")) else ".jpg"
+    filename = f"{prefix}_{tmdb_id}_{img_type}{ext}"
     filepath = os.path.join(METADATA_DIR, filename)
     
     if not os.path.exists(filepath):
@@ -465,6 +489,12 @@ async def async_download_image(client: Any, image_path: Optional[str], prefix: s
                 def _write_file():
                     with open(filepath, 'wb') as f:
                         f.write(res.content)
+                    if os.path.exists("config/metadata") and os.path.abspath("config/metadata") != os.path.abspath(METADATA_DIR):
+                        try:
+                            with open(os.path.join("config/metadata", filename), 'wb') as f:
+                                f.write(res.content)
+                        except Exception:
+                            pass
                 await asyncio.to_thread(_write_file)
         except Exception:
             return None
@@ -565,12 +595,12 @@ def extract_tmdb_trailer_key(videos: list) -> Optional[str]:
     return yt_trailers[0].get("key")
 
 async def async_fetch_additional_details(client: Any, tmdb_id: int, media_type: str, api_key: str):
-    """Asynchronously fetches credits, ratings, genres, and trailers from TMDB."""
+    """Asynchronously fetches credits, ratings, genres, trailers, and logos from TMDB."""
     try:
         if media_type == "movie":
-            url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}&append_to_response=credits,release_dates,videos"
+            url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}&append_to_response=credits,release_dates,videos,images&include_image_language=en,null"
         else:
-            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}&append_to_response=credits,content_ratings,videos"
+            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}&append_to_response=credits,content_ratings,videos,images&include_image_language=en,null"
             
         res = await client.get(url, timeout=10.0)
         if res.status_code == 200:
@@ -578,7 +608,7 @@ async def async_fetch_additional_details(client: Any, tmdb_id: int, media_type: 
             credits_data = data.get("credits", {})
             cast_list = []
             
-            cast_items = credits_data.get("cast", [])[:5]
+            cast_items = credits_data.get("cast", [])[:15]
             for c in cast_items:
                 profile_filename = None
                 if c.get("profile_path"):
@@ -631,11 +661,27 @@ async def async_fetch_additional_details(client: Any, tmdb_id: int, media_type: 
                         collection_poster = await async_download_image(client, col_data.get("poster_path"), "collection", collection_id, "poster")
                     if col_data.get("backdrop_path"):
                         collection_backdrop = await async_download_image(client, col_data.get("backdrop_path"), "collection", collection_id, "backdrop")
+
+            logo_filename = None
+            images = data.get("images", {})
+            logos = images.get("logos", []) if isinstance(images, dict) else []
+            if logos:
+                en_logos = [l for l in logos if l.get("iso_639_1") == "en"]
+                selected_logo = None
+                if en_logos:
+                    png_en = [l for l in en_logos if (l.get("file_path") or "").lower().endswith(".png")]
+                    selected_logo = png_en[0] if png_en else en_logos[0]
+                else:
+                    png_logos = [l for l in logos if (l.get("file_path") or "").lower().endswith(".png")]
+                    selected_logo = png_logos[0] if png_logos else logos[0]
+                if selected_logo and selected_logo.get("file_path"):
+                    prefix = "tv" if media_type == "tv" else "movie"
+                    logo_filename = await async_download_image(client, selected_logo["file_path"], prefix, tmdb_id, "logo")
                             
-            return cast_str, dir_str, content_rating, genres_str, trailer_key, collection_id, collection_name, collection_poster, collection_backdrop
+            return cast_str, dir_str, content_rating, genres_str, trailer_key, collection_id, collection_name, collection_poster, collection_backdrop, logo_filename
     except Exception:
         pass
-    return None, None, None, None, None, None, None, None, None
+    return None, None, None, None, None, None, None, None, None, None
 
 async def async_extract_chapter_markers(file_path: str):
     """Non-blocking chapter marker extraction using asyncio.create_subprocess_exec with polite process priority."""
@@ -687,7 +733,7 @@ async def async_extract_chapter_markers(file_path: str):
         return None, None, None, None
 
 def _generate_photo_thumbnail(full_path: str, thumb_path: str, is_video: bool) -> bool:
-    """Thread-offloaded thumbnail generator for photos and home videos with low-overhead draft scaling."""
+    """Thread-offloaded thumbnail generator for photos and home videos with low-overhead draft scaling and EXIF transposition."""
     try:
         os.makedirs(METADATA_DIR, exist_ok=True)
         if is_video:
@@ -701,14 +747,18 @@ def _generate_photo_thumbnail(full_path: str, thumb_path: str, is_video: bool) -
             ]
             subprocess.run(ffmpeg_cmd, capture_output=True, check=True, timeout=10, **_get_subprocess_priority_kwargs())
         else:
-            from PIL import Image
+            from PIL import Image, ImageOps
             with Image.open(full_path) as img:
                 # Fast DCT downsampling for JPEG/WEBP images before full bitmap decode
                 if hasattr(img, "draft"):
                     try:
-                        img.draft("RGB", (400, 400))
+                        img.draft("RGB", (800, 800))
                     except Exception:
                         pass
+                try:
+                    img = ImageOps.exif_transpose(img)
+                except Exception:
+                    pass
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
                 img.thumbnail((400, 400))
@@ -1537,6 +1587,29 @@ class ScannerManager:
                             new_dt = extracted
                             date_backfill_count += 1
                     
+                    # Ensure thumbnail exists and is upright if original has EXIF orientation
+                    if os.path.exists(p_fpath):
+                        ext_lower = os.path.splitext(p_fpath)[1].lower()
+                        is_vid = ext_lower in (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm")
+                        p_hash = hashlib.md5(p_fpath.encode("utf-8")).hexdigest()[:16]
+                        t_path = os.path.join(METADATA_DIR, f"photo_{p_hash}_poster.jpg")
+                        if not os.path.exists(t_path):
+                            _generate_photo_thumbnail(p_fpath, t_path, is_vid)
+                        elif not is_vid:
+                            try:
+                                from PIL import Image
+                                with Image.open(p_fpath) as src_im:
+                                    ex = src_im.getexif()
+                                    orient = ex.get(0x0112)
+                                    if orient and orient in (2, 3, 4, 5, 6, 7, 8):
+                                        with Image.open(t_path) as th_im:
+                                            src_is_portrait = (src_im.height > src_im.width) if orient not in (5, 6, 7, 8) else (src_im.width > src_im.height)
+                                            th_is_portrait = (th_im.height > th_im.width)
+                                            if src_is_portrait != th_is_portrait:
+                                                _generate_photo_thumbnail(p_fpath, t_path, is_vid)
+                            except Exception:
+                                pass
+
                     if target_album is not None or new_dt is not None:
                         updates.append((p_id, target_album, new_dt))
             return del_p, updates
@@ -1758,7 +1831,7 @@ class ScannerManager:
                             search_title = data.get("title", search_title)
                             year = data.get("release_date", "")[:4]
                             
-                            cast, director, content_rating, genres_str, trailer_key, col_id, col_name, col_poster, col_backdrop = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_api_key)
+                            cast, director, content_rating, genres_str, trailer_key, col_id, col_name, col_poster, col_backdrop, logo_filename = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_api_key)
                     except Exception as e:
                         print(f"[Scanner] Movie TMDB lookup failed for {search_title}: {e}")
 
@@ -1771,7 +1844,8 @@ class ScannerManager:
                     trailer_key=trailer_key, tmdb_id=tmdb_id,
                     collection_id=col_id, collection_name=col_name,
                     collection_poster_filename=col_poster,
-                    collection_backdrop_filename=col_backdrop
+                    collection_backdrop_filename=col_backdrop,
+                    logo_filename=logo_filename
                 ))
 
                 with self._lock:
@@ -1822,7 +1896,7 @@ class ScannerManager:
                         if self._abort_event.is_set() or not self.check_scan_necessary():
                             break
                         try:
-                            _, _, _, _, _, col_id, col_name, col_poster, col_backdrop = await async_fetch_additional_details(client, m_tmdb_id, "movie", tmdb_api_key)
+                            _, _, _, _, _, col_id, col_name, col_poster, col_backdrop, _ = await async_fetch_additional_details(client, m_tmdb_id, "movie", tmdb_api_key)
                             def _save_col(mid=mid, col_id=col_id, col_name=col_name, col_poster=col_poster, col_backdrop=col_backdrop):
                                 with Session(engine) as session:
                                     m_rec = session.get(Movie, mid)
@@ -1904,7 +1978,7 @@ class ScannerManager:
                             if not year:
                                 year = data.get("first_air_date", "")[:4]
                                 
-                            cast, director, content_rating, genres_str, _, _, _, _, _ = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_api_key)
+                            cast, director, content_rating, genres_str, _, _, _, _, _, logo_filename = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_api_key)
                             
                             if season is not None:
                                 s_res = await client.get(
@@ -1924,7 +1998,8 @@ class ScannerManager:
                     backdrop_filename=backdrop_filename, cast=cast, director=director, rating=rating,
                     season=season, episode=episode, season_poster_filename=season_poster_filename,
                     content_rating=content_rating, genres=genres_str,
-                    intro_start=None, intro_end=None, credits_start=None, credits_end=None
+                    intro_start=None, intro_end=None, credits_start=None, credits_end=None,
+                    logo_filename=logo_filename
                 ))
 
                 with self._lock:
@@ -1958,6 +2033,37 @@ class ScannerManager:
                         print(f"[Scanner] Error committing final TV batch: {e}")
                 batch_shows.clear()
                 await asyncio.sleep(0.15)
+
+            # 4B-2. Enrich existing TV shows with missing logo_filename if TMDB API key is available
+            if tmdb_api_key and not self._abort_event.is_set():
+                def _get_unenriched_shows():
+                    with Session(engine) as session:
+                        return session.exec(
+                            select(TVShow.title, TVShow.poster_filename).where(
+                                TVShow.logo_filename == None,
+                                TVShow.poster_filename != None
+                            ).distinct()
+                        ).all()
+                unenriched_shows = await asyncio.to_thread(_get_unenriched_shows)
+                for s_title, s_poster in unenriched_shows:
+                    if self._abort_event.is_set() or not self.check_scan_necessary():
+                        break
+                    m = re.search(r'tv_(\d+)_', s_poster or '')
+                    if m:
+                        s_tmdb_id = int(m.group(1))
+                        try:
+                            _, _, _, _, _, _, _, _, _, l_filename = await async_fetch_additional_details(client, s_tmdb_id, "tv", tmdb_api_key)
+                            if l_filename:
+                                def _save_show_logo(title=s_title, l_fn=l_filename):
+                                    with Session(engine) as session:
+                                        eps = session.exec(select(TVShow).where(TVShow.title == title)).all()
+                                        for ep in eps:
+                                            ep.logo_filename = l_fn
+                                            session.add(ep)
+                                        session.commit()
+                                await asyncio.to_thread(_save_show_logo)
+                        except Exception as e:
+                            print(f"[Scanner] Failed enriching TV logo for {s_title}: {e}")
 
             # 4C. Scan Photos & Home Videos
             batch_photos = []

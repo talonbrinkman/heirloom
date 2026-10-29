@@ -128,6 +128,8 @@ def create_db_and_tables():
             ("movie", "collection_poster_filename", "VARCHAR"),
             ("movie", "collection_backdrop_filename", "VARCHAR"),
             ("tvshow", "collection_name", "VARCHAR"),
+            ("tvshow", "logo_filename", "VARCHAR"),
+            ("movie", "logo_filename", "VARCHAR"),
         ]
         for tbl, col, dt in col_migrations:
             try:

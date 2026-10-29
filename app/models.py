@@ -57,6 +57,7 @@ class Movie(SQLModel, table=True):
     collection_name: Optional[str] = None
     collection_poster_filename: Optional[str] = None
     collection_backdrop_filename: Optional[str] = None
+    logo_filename: Optional[str] = None
 
 class TVShow(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -80,6 +81,7 @@ class TVShow(SQLModel, table=True):
     credits_start: Optional[float] = None
     credits_end: Optional[float] = None
     collection_name: Optional[str] = None
+    logo_filename: Optional[str] = None
 
 class Photo(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

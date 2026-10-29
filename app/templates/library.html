@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Heirloom</title>
     <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <script src="/static/fix-match.js"></script>
 </head>
 
@@ -97,29 +98,29 @@
 
             <a href="/" class="mobile-menu-link">
                 <i data-lucide="home"></i>
-                <span>Dashboard</span>
+                <span>Home</span>
             </a>
 
             {% if has_movies and user.movies_access %}
-            <a href="/library/movie" class="mobile-menu-link {% if media_type == 'movie' %}active{% endif %}">
+            <a href="/library/movie" class="mobile-menu-link">
                 <i data-lucide="film"></i>
                 <span>Movies</span>
             </a>
             {% endif %}
             {% if has_tv and user.tv_access %}
-            <a href="/library/tv" class="mobile-menu-link {% if media_type == 'tv' %}active{% endif %}">
+            <a href="/library/tv" class="mobile-menu-link">
                 <i data-lucide="tv"></i>
                 <span>TV Shows</span>
             </a>
             {% endif %}
             {% if has_photos and user.photos_access %}
-            <a href="/library/photo" class="mobile-menu-link {% if media_type == 'photo' %}active{% endif %}">
+            <a href="/library/photo" class="mobile-menu-link">
                 <i data-lucide="image"></i>
                 <span>Photos</span>
             </a>
             {% endif %}
             {% if has_music and user.music_access %}
-            <a href="/library/music" class="mobile-menu-link {% if media_type == 'music' %}active{% endif %}">
+            <a href="/library/music" class="mobile-menu-link">
                 <i data-lucide="music"></i>
                 <span>Music</span>
             </a>
@@ -130,7 +131,7 @@
             {% if user.is_admin and (current_profile is none or current_profile.is_primary) %}
             <a href="/server-dashboard" class="mobile-menu-link">
                 <i data-lucide="gauge"></i>
-                <span>Server Dashboard</span>
+                <span>Server</span>
                 <span id="mobileServerActivityBadge" class="mobile-menu-badge" style="display: none;">
                     <span id="mobileServerActivityText">Scanning...</span>
                 </span>
@@ -463,7 +464,7 @@
                 {% else %}
                 <!-- Library View (default) -->
                 <div class="flex justify-between align-center mb-15">
-                    <div class="flex align-center" style="gap: 12px; flex-wrap: wrap;">
+                    <div class="flex align-center" style="gap: 12px; flex-wrap: wrap; font-size: 0.75em;">
                         <h2 class="m-0">
                             {% if media_type == 'movie' %}Movies ({{ total_count }})
                             {% elif media_type == 'photo' %}
@@ -508,6 +509,10 @@
                         <div class="dropdown-menu" id="sortMenu" style="top: 110%; right: 0; min-width: 180px;">
                             <button onclick="setSort('title_asc', 'Title (A-Z)')">Title (A-Z)</button>
                             <button onclick="setSort('title_desc', 'Title (Z-A)')">Title (Z-A)</button>
+                            {% if media_type in ['movie', 'tv'] %}
+                            <button onclick="setSort('rating_desc', 'Rating (Highest)')">Rating (Highest)</button>
+                            <button onclick="setSort('rating_asc', 'Rating (Lowest)')">Rating (Lowest)</button>
+                            {% endif %}
                             <button onclick="setSort('year_desc', 'Year (Newest)')">Year (Newest)</button>
                             <button onclick="setSort('year_asc', 'Year (Oldest)')">Year (Oldest)</button>
                             <button onclick="setSort('date_desc', 'Recently Added')">Recently Added</button>
@@ -893,6 +898,9 @@
             const sortLabels = {
                 'title_asc': 'Title (A-Z)',
                 'title_desc': 'Title (Z-A)',
+                'rating_desc': 'Rating (Highest)',
+                'rating_asc': 'Rating (Lowest)',
+                'rating': 'Rating (Highest)',
                 'year_desc': 'Year (Newest)',
                 'year_asc': 'Year (Oldest)',
                 'date_desc': 'Recently Added',
@@ -944,25 +952,38 @@
                 const res = await fetch('/api/inbox');
                 const data = await res.json();
                 const items = data.invites;
+                const resets = data.reset_requests || [];
                 const badge = document.getElementById('inboxBadge');
                 const container = document.getElementById('inboxItems');
                 if (!badge || !container) return;
 
+                const totalCount = items.length + resets.length;
                 const mobileBadge = document.getElementById('mobileInboxBadge');
                 const mobileContainer = document.getElementById('mobileInboxItems');
 
-                if (items.length > 0) {
+                if (totalCount > 0) {
                     badge.style.display = 'block';
                     if (mobileBadge) {
                         mobileBadge.style.display = 'inline-block';
-                        mobileBadge.textContent = items.length;
+                        mobileBadge.textContent = totalCount;
                     }
-                    const html = items.map(inv => `
+                    let html = '';
+                    html += items.map(inv => `
                     <div class="inbox-item">
                         <div><strong>${inv.sender}</strong> invited you to watch <em>${inv.title}</em></div>
                         <div class="inbox-actions">
-                            <button class="btn btn-sm" onclick="respondInvite(${inv.id}, 'accept')">Accept</button>
-                            <button class="btn btn-sm btn-secondary" onclick="respondInvite(${inv.id}, 'decline')">Decline</button>
+                            <button class="btn btn-sm" style="text-align: center;" onclick="respondInvite(${inv.id}, 'accept')">Accept</button>
+                            <button class="btn btn-sm btn-secondary" style="text-align: center;" onclick="respondInvite(${inv.id}, 'decline')">Decline</button>
+                        </div>
+                    </div>
+                `).join('');
+                    html += resets.map(pr => `
+                    <div class="inbox-item">
+                        <div><strong>${pr.username}</strong> is requesting a password reset</div>
+                        <small>Requested ${pr.created_at}</small>
+                        <div class="inbox-actions">
+                            <button class="btn btn-sm" onclick="respondReset(${pr.id}, 'approve')">Approve</button>
+                            <button class="btn btn-sm btn-secondary" onclick="respondReset(${pr.id}, 'deny')">Deny</button>
                         </div>
                     </div>
                 `).join('');
@@ -971,11 +992,20 @@
                 } else {
                     badge.style.display = 'none';
                     if (mobileBadge) mobileBadge.style.display = 'none';
-                    container.innerHTML = '<div class="empty-state">No new invitations</div>';
-                    if (mobileContainer) mobileContainer.innerHTML = '<div class="empty-state">No new invitations</div>';
+                    container.innerHTML = '<div class="empty-state">No new notifications</div>';
+                    if (mobileContainer) mobileContainer.innerHTML = '<div class="empty-state">No new notifications</div>';
                 }
             } catch (err) {
                 console.error("Error loading inbox:", err);
+            }
+        }
+
+        async function respondReset(id, action) {
+            try {
+                await fetch(`/password_reset/${action}/${id}`, { method: 'POST' });
+                loadInbox();
+            } catch (err) {
+                console.error(err);
             }
         }
 

@@ -70,22 +70,38 @@
                     {% endif %}
                     
                     <div class="info-details">
-                        <div class="flex align-center gap-15 mb-10">
-                            <h1 class="info-title m-0">{{ movie.title }}</h1>
+                        <!-- Row 1: Title (or Logo if present) -->
+                        {% if movie.logo_filename %}
+                        <div class="series-logo-container mb-15">
+                            <img src="/metadata/{{ movie.logo_filename }}" alt="{{ movie.title }}" class="series-logo">
+                        </div>
+                        {% else %}
+                        <h1 class="info-title m-0 mb-15">{{ movie.title }}</h1>
+                        {% endif %}
+
+                        <!-- Row 2: (Rating, Release Date, Genre, Rating) -->
+                        <div class="info-meta-row flex align-center gap-15 mb-15">
                             {% if movie.rating %}
-                            <div class="rating-badge flex align-center gap-10">
-                                <i data-lucide="star" fill="var(--accent-primary)" color="var(--accent-primary)" size="24"></i>
-                                <strong style="font-size: 1.5em;">{{ "%.1f"|format(movie.rating) }}</strong>
-                                {% if movie.content_rating %}
-                                <span style="border: 1px solid var(--border-color); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; font-weight: bold; color: var(--text-secondary); margin-left: 5px;">{{ movie.content_rating }}</span>
-                                {% endif %}
+                            <div class="rating-badge flex align-center gap-5">
+                                <i data-lucide="star" fill="var(--accent-primary)" color="var(--accent-primary)" size="18"></i>
+                                <span>{{ "%.1f"|format(movie.rating) }}</span>
                             </div>
                             {% endif %}
+                            {% if movie.year %}
+                            <span class="meta-year">{{ movie.year }}</span>
+                            {% endif %}
+                            {% if movie.genres %}
+                            <span class="meta-genres">{{ movie.genres }}</span>
+                            {% endif %}
+                            {% if movie.content_rating %}
+                            <span class="content-rating-badge">{{ movie.content_rating }}</span>
+                            {% endif %}
                         </div>
-                        <div class="info-year">{{ movie.year }}</div>
-                        <div class="info-plot">{{ movie.plot or "No description available." }}</div>
+
+                        <!-- Row 4: Description -->
+                        <div class="info-plot mb-15">{{ movie.plot or "No description available." }}</div>
                         
-                        <div class="metadata-block mt-20 mb-20">
+                        <div class="metadata-block">
                             {% if movie.director %}
                             <div class="mb-10"><strong style="color: var(--text-primary);">Director:</strong> <span style="color: var(--text-secondary);">{{ movie.director }}</span></div>
                             {% endif %}
@@ -94,11 +110,11 @@
                             {% endif %}
                         </div>
                         
-                        <div class="flex align-center gap-15 mb-20">
+                        <div class="info-controls">
                             {% if movie_versions and movie_versions|length > 1 %}
                             <button type="button" class="play-btn m-0" id="moviePlayBtn" onclick="toggleMenu(event, 'movie-version-menu')" title="{% if has_progress %}Resume{% else %}Play{% endif %}">
                                 <i data-lucide="play" fill="currentColor"></i>
-                                <span>{% if has_progress %}Resume{% else %}Play{% endif %}</span>
+                                {% if has_progress %}Resume{% else %}Play{% endif %}
                             </button>
                             <div class="dropdown-menu" id="movie-version-menu">
                                 {% for v in movie_versions %}
@@ -114,7 +130,7 @@
                             {% else %}
                             <a href="/play/movie/{{ movie.id }}" class="play-btn m-0">
                                 <i data-lucide="play" fill="currentColor"></i>
-                                <span>{% if has_progress %}Resume{% else %}Play{% endif %}</span>
+                                {% if has_progress %}Resume{% else %}Play{% endif %}
                             </a>
                             {% endif %}
 
@@ -125,7 +141,8 @@
                             </a>
                             {% endif %}
                             
-                            {% if is_watched %}
+                            <div class="info-actions">
+                                {% if is_watched %}
                             <form action="/history/mark_unwatched/movie/{{ movie.id }}" method="post" title="Mark as Unwatched" class="m-0 flex">
                                 <button type="submit" class="play-btn m-0" style="background: var(--accent);">
                                     <i data-lucide="check" fill="none"></i>
@@ -174,6 +191,7 @@
                                 <i data-lucide="wrench"></i>
                             </button>
                             {% endif %}
+                            </div>
                         </div>
                         
                         {% if cast_list %}
