@@ -1559,7 +1559,7 @@
             if (progressHoverTooltip) {
                 const containerWidth = rect.width;
                 const tooltipWidth = (trickplayReady && trickplayThumb && trickplayThumb.style.display !== 'none') ? 160 : 60;
-                const halfWidth = tooltipWidth / 2;
+                const halfWidth = tooltipWidth * 0.5;
                 const mouseX = pct * containerWidth;
                 const clampedX = Math.max(halfWidth + 4, Math.min(containerWidth - halfWidth - 4, mouseX));
                 progressHoverTooltip.style.left = `${clampedX}px`;
@@ -2650,7 +2650,7 @@
                 if (data.action === 'pong') {
                     const requestEnd = Date.now();
                     const rtt = requestEnd - data.client_time;
-                    const oneWayLatency = rtt / 2;
+                    const oneWayLatency = rtt * 0.5;
 
                     latencyHistory.push(oneWayLatency);
                     if (latencyHistory.length > MAX_HISTORY) latencyHistory.shift();

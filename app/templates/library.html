@@ -247,6 +247,18 @@
                         <i data-lucide="layers"></i> Collections
                     </a>
                 </div>
+                {% elif media_type == 'photo' %}
+                <div class="subnav-bar">
+                    <a href="/library/photo?view=recommended" class="subnav-tab {% if current_view == 'recommended' %}active{% endif %}">
+                        <i data-lucide="sparkles"></i> Recommended
+                    </a>
+                    <a href="/library/photo?view=library" class="subnav-tab {% if current_view == 'library' %}active{% endif %}">
+                        <i data-lucide="layout-grid"></i> Library
+                    </a>
+                    <a href="/library/photo?view=timeline" class="subnav-tab {% if current_view == 'timeline' %}active{% endif %}">
+                        <i data-lucide="calendar"></i> Timeline
+                    </a>
+                </div>
                 {% endif %}
 
                 {% if current_view == 'categories' %}
@@ -301,6 +313,98 @@
                 </div>
                 {% else %}
                 <p class="text-muted" style="margin-top: 20px;">No collections found for this library.</p>
+                {% endif %}
+
+                {% elif media_type == 'photo' and current_view == 'recommended' %}
+                <!-- <div class="flex justify-between align-center mb-15">
+                    <h2 class="m-0">Recommended Photos</h2>
+                </div> -->
+                {% if photo_recommended_sections %}
+                    {% for sec in photo_recommended_sections %}
+                    {% set sec_idx = loop.index0 %}
+                    <div style="margin-bottom: 35px;">
+                        <h3 style="margin: 0 0 15px 0; font-size: 1.15rem; font-weight: 600;">{{ sec.title }}</h3>
+                        <div class="carousel-container">
+                            <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
+                            <div class="carousel-row">
+                                {% for p in sec.photos %}
+                                <div class="media-card photo-card">
+                                    <div class="poster-container photo-poster-container">
+                                        <a href="/photo/{{ p.id }}?from=/library/photo?view=recommended">
+                                            {% if p.poster_filename %}
+                                            <img src="/metadata/{{ p.poster_filename }}" class="poster" loading="lazy">
+                                            {% else %}
+                                            <div class="poster-placeholder"><i data-lucide="image"></i></div>
+                                            {% endif %}
+                                        </a>
+                                        <button class="icon-btn three-dots-btn" onclick="toggleMenu(event, 'menu-rec-photo-{{ sec_idx }}-{{ loop.index0 }}')">
+                                            <i data-lucide="more-vertical" fill="white"></i>
+                                        </button>
+                                        <div class="dropdown-menu" id="menu-rec-photo-{{ sec_idx }}-{{ loop.index0 }}">
+                                            {% if user.downloads_access %}
+                                            <form action="/photo_file/{{ p.id }}" method="get">
+                                                <button type="submit">Download</button>
+                                            </form>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                    <div class="media-title"><a href="/photo/{{ p.id }}?from=/library/photo?view=recommended">{{ p.title }}</a></div>
+                                    {% set p_date = p.date_taken or p.date_added %}
+                                    {% if p_date %}
+                                    <div class="media-year">{{ p_date.strftime('%b %d, %Y') }}</div>
+                                    {% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                            <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
+                        </div>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                <div style="text-align: center; padding: 60px 20px; color: var(--text-muted);">
+                    <i data-lucide="image" style="width: 48px; height: 48px; stroke-width: 1.5; margin-bottom: 12px; opacity: 0.6;"></i>
+                    <p style="margin: 0; font-size: 0.95rem;">No photos available to recommend.</p>
+                </div>
+                {% endif %}
+
+                {% elif media_type == 'photo' and current_view == 'timeline' %}
+                <div class="timeline-container" id="timelineContainer">
+                    <div class="timeline-header flex justify-between align-center mb-15">
+                        <h2 class="m-0">Photo Timeline</h2>
+                        <div class="text-muted" id="timelineTotalCount" style="font-size: 0.95rem;"></div>
+                    </div>
+
+                    <!-- Month and year groups dynamically loaded -->
+                    <div id="timelineGroups"></div>
+
+                    <!-- Sentinel for infinite scroll -->
+                    <div id="timelineSentinel" style="height: 50px; display: flex; align-items: center; justify-content: center; margin: 25px 0;">
+                        <div id="timelineLoader" class="spinner" style="display: none;"></div>
+                    </div>
+                </div>
+
+                <!-- Date-based vertical scroll bar on the right -->
+                {% if timeline_years and timeline_years|length > 0 %}
+                <div class="timeline-scrubber" id="timelineScrubber">
+                    <div class="timeline-scrubber-track">
+                        {% for yr in timeline_years %}
+                        <div class="timeline-scrubber-year-group" id="scrubber-year-group-{{ yr }}">
+                            <button type="button" class="timeline-scrubber-year" data-year="{{ yr }}" onclick="toggleScrubberYear('{{ yr }}')">
+                                <span class="scrubber-label">{{ yr }}</span>
+                            </button>
+                            {% if timeline_structure and yr in timeline_structure %}
+                            <div class="timeline-scrubber-months" id="scrubber-months-{{ yr }}" style="display: none;">
+                                {% for m in timeline_structure[yr] %}
+                                <button type="button" class="timeline-scrubber-month" data-year="{{ yr }}" data-month-key="{{ m.key }}" data-month-num="{{ m.month }}" onclick="jumpToMonth('{{ yr }}', '{{ m.key }}', {{ m.month }})">
+                                    <span class="month-full">{{ m.name }}</span><span class="month-short">{{ m.short }}</span>
+                                </button>
+                                {% endfor %}
+                            </div>
+                            {% endif %}
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
                 {% endif %}
 
                 {% elif current_view == 'recommended' %}
@@ -852,7 +956,7 @@
                                 ${watchedBadgeHtml}
                                 <div class="dropdown-menu" id="menu-item-${globalIndex}">
                                     ${watchToggleForm}
-                                    ${watchTogetherAccess ? `
+                                    ${(watchTogetherAccess && mediaType !== 'photo') ? `
                                     <button type="button" onclick="openWatchTogether('${mediaType}', ${m.id})">Watch Together</button>
                                     ` : ''}
                                     ${downloadsAccess ? `
@@ -974,6 +1078,313 @@
                 alert('Error creating playlist.');
             }
         }
+    
+        // Timeline Dynamic Loading and Date Scrubber
+        {% if media_type == 'photo' and current_view == 'timeline' %}
+        let timelinePage = 1;
+        let timelineHasMore = true;
+        let timelineLoading = false;
+        let isScrollingToYear = false;
+        let scrollLockTimeout = null;
+
+        const timelineGroupsContainer = document.getElementById('timelineGroups');
+        const timelineSentinel = document.getElementById('timelineSentinel');
+        const timelineLoader = document.getElementById('timelineLoader');
+
+        function appendTimelineItem(item) {
+            if (!item || !timelineGroupsContainer) return;
+
+            // Avoid duplicate cards if requests overlap
+            if (item.id && document.getElementById(`pcard-${item.id}`)) {
+                return;
+            }
+
+            const dayKey = item.day_key || 'undated';
+            let groupEl = document.getElementById(`tgroup-${dayKey}`);
+
+            if (!groupEl) {
+                groupEl = document.createElement('div');
+                groupEl.className = 'timeline-group';
+                groupEl.id = `tgroup-${dayKey}`;
+                groupEl.dataset.year = item.year || '';
+                groupEl.dataset.month = item.month || '';
+                groupEl.dataset.monthKey = item.month_key || '';
+                groupEl.dataset.day = dayKey;
+
+                groupEl.innerHTML = `
+                    <div class="timeline-group-header">
+                        <h3 class="timeline-group-title">${item.day_title || dayKey}</h3>
+                    </div>
+                    <div class="timeline-grid" id="grid-${dayKey}"></div>
+                `;
+
+                // Insert into container sorted descending by dayKey
+                const existingGroups = timelineGroupsContainer.querySelectorAll('.timeline-group');
+                let inserted = false;
+                for (const existing of existingGroups) {
+                    const existingDay = existing.dataset.day || '';
+                    if (dayKey > existingDay) {
+                        timelineGroupsContainer.insertBefore(groupEl, existing);
+                        inserted = true;
+                        break;
+                    }
+                }
+                if (!inserted) {
+                    timelineGroupsContainer.appendChild(groupEl);
+                }
+            }
+
+            const gridEl = document.getElementById(`grid-${dayKey}`);
+            if (gridEl) {
+                const card = document.createElement('div');
+                card.className = 'timeline-card';
+                card.id = `pcard-${item.id}`;
+                const imgHtml = item.poster_filename
+                    ? `<img src="/metadata/${item.poster_filename}" class="timeline-thumb" loading="lazy" alt="${item.title}">`
+                    : `<div class="timeline-thumb-placeholder"><i data-lucide="image"></i></div>`;
+
+                card.innerHTML = `
+                    <a href="${item.url}" title="${item.title} (${item.date_display})">${imgHtml}</a>
+                `;
+                gridEl.appendChild(card);
+            }
+        }
+
+        function scrollToElement(targetEl) {
+            if (!targetEl) return;
+            const scrollContainer = document.querySelector('.main-content');
+            if (scrollContainer) {
+                const containerRect = scrollContainer.getBoundingClientRect();
+                const targetRect = targetEl.getBoundingClientRect();
+                const currentScroll = scrollContainer.scrollTop;
+                const targetScroll = currentScroll + (targetRect.top - containerRect.top) - 15;
+                scrollContainer.scrollTo({
+                    top: Math.max(0, targetScroll),
+                    behavior: 'smooth'
+                });
+            } else {
+                targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        }
+
+        async function fetchTimeline(page = 1, append = true) {
+            if (timelineLoading || (!timelineHasMore && append)) return;
+            timelineLoading = true;
+            if (timelineLoader) timelineLoader.style.display = 'inline-block';
+
+            try {
+                const res = await fetch(`/api/photos/timeline?page=${page}&limit=60`);
+                if (!res.ok) throw new Error("Failed to load timeline");
+                const data = await res.json();
+
+                timelineHasMore = data.has_more;
+                const countEl = document.getElementById('timelineTotalCount');
+                if (countEl && data.total !== undefined) {
+                    countEl.textContent = `${data.total.toLocaleString()} Photos`;
+                }
+
+                if (!append) {
+                    timelineGroupsContainer.innerHTML = '';
+                }
+
+                if (data.items.length === 0 && !append) {
+                    timelineGroupsContainer.innerHTML = `
+                        <div style="text-align: center; padding: 60px 20px; color: var(--text-muted);">
+                            <i data-lucide="image" style="width: 48px; height: 48px; stroke-width: 1.5; margin-bottom: 12px; opacity: 0.6;"></i>
+                            <p style="margin: 0;">No photos found in your library.</p>
+                        </div>
+                    `;
+                    if (window.lucide) lucide.createIcons();
+                    return;
+                }
+
+                data.items.forEach(appendTimelineItem);
+
+                if (window.lucide) lucide.createIcons();
+                updateActiveScrubberYear();
+
+            } catch (err) {
+                console.error("Error loading timeline:", err);
+            } finally {
+                timelineLoading = false;
+                if (timelineLoader) timelineLoader.style.display = 'none';
+            }
+        }
+
+        if (timelineSentinel) {
+            const tObserver = new IntersectionObserver((entries) => {
+                if (entries[0].isIntersecting && timelineHasMore && !timelineLoading) {
+                    timelinePage++;
+                    fetchTimeline(timelinePage, true);
+                }
+            }, { rootMargin: '350px' });
+            tObserver.observe(timelineSentinel);
+        }
+
+        function setActiveScrubberYear(yr) {
+            const yrStr = String(yr);
+            document.querySelectorAll('.timeline-scrubber-year').forEach(btn => {
+                btn.classList.toggle('active', String(btn.dataset.year) === yrStr);
+            });
+        }
+
+        function setActiveScrubberMonth(monthKey) {
+            document.querySelectorAll('.timeline-scrubber-month').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.monthKey === monthKey);
+            });
+        }
+
+        function updateActiveScrubberYear() {
+            if (isScrollingToYear) return;
+            const scrollContainer = document.querySelector('.main-content');
+            const groups = document.querySelectorAll('.timeline-group');
+            if (!groups.length) return;
+
+            let currentGroup = null;
+            const containerTop = scrollContainer ? scrollContainer.getBoundingClientRect().top : 0;
+            for (let g of groups) {
+                const rect = g.getBoundingClientRect();
+                if (rect.top - containerTop <= 100) {
+                    currentGroup = g;
+                } else {
+                    break;
+                }
+            }
+            if (!currentGroup && groups.length > 0) currentGroup = groups[0];
+
+            if (currentGroup && currentGroup.dataset.year) {
+                const yr = String(currentGroup.dataset.year);
+                setActiveScrubberYear(yr);
+
+                if (currentGroup.dataset.monthKey) {
+                    setActiveScrubberMonth(currentGroup.dataset.monthKey);
+                }
+            }
+        }
+
+        const mainContentEl = document.querySelector('.main-content');
+        if (mainContentEl) {
+            mainContentEl.addEventListener('scroll', () => {
+                requestAnimationFrame(updateActiveScrubberYear);
+            }, { passive: true });
+        }
+        window.addEventListener('scroll', () => {
+            requestAnimationFrame(updateActiveScrubberYear);
+        }, true);
+
+        async function toggleScrubberYear(yr) {
+            const yrStr = String(yr);
+            const monthsContainer = document.getElementById(`scrubber-months-${yrStr}`);
+            const isCurrentlyOpen = monthsContainer && (monthsContainer.style.display === 'flex' || monthsContainer.style.display === 'block');
+
+            // Close other years' month dropdowns
+            document.querySelectorAll('.timeline-scrubber-months').forEach(el => {
+                if (el.id !== `scrubber-months-${yrStr}`) {
+                    el.style.display = 'none';
+                }
+            });
+
+            // Toggle this year's months
+            if (monthsContainer) {
+                monthsContainer.style.display = isCurrentlyOpen ? 'none' : 'flex';
+            }
+
+            await jumpToYear(yrStr);
+        }
+
+        async function jumpToYear(yr) {
+            const yrStr = String(yr);
+            setActiveScrubberYear(yrStr);
+
+            isScrollingToYear = true;
+            clearTimeout(scrollLockTimeout);
+            scrollLockTimeout = setTimeout(() => {
+                isScrollingToYear = false;
+                updateActiveScrubberYear();
+            }, 1000);
+
+            let targetGroup = document.querySelector(`.timeline-group[data-year="${yrStr}"]`);
+            if (targetGroup) {
+                scrollToElement(targetGroup);
+                return;
+            }
+
+            if (timelineLoader) timelineLoader.style.display = 'inline-block';
+            try {
+                const res = await fetch(`/api/photos/timeline?year=${yrStr}&limit=120`);
+                if (!res.ok) throw new Error("Failed to jump");
+                const data = await res.json();
+                if (data.items && data.items.length > 0) {
+                    data.items.forEach(appendTimelineItem);
+                    if (window.lucide) lucide.createIcons();
+
+                    targetGroup = document.querySelector(`.timeline-group[data-year="${yrStr}"]`);
+                    if (targetGroup) {
+                        scrollToElement(targetGroup);
+                    }
+                }
+            } catch (e) {
+                console.error(e);
+            } finally {
+                if (timelineLoader) timelineLoader.style.display = 'none';
+            }
+        }
+
+        async function jumpToMonth(yr, monthKey, monthNum) {
+            const yrStr = String(yr);
+            setActiveScrubberYear(yrStr);
+            setActiveScrubberMonth(monthKey);
+
+            // Ensure this year's months container is open
+            const monthsContainer = document.getElementById(`scrubber-months-${yrStr}`);
+            if (monthsContainer) {
+                monthsContainer.style.display = 'flex';
+            }
+
+            isScrollingToYear = true;
+            clearTimeout(scrollLockTimeout);
+            scrollLockTimeout = setTimeout(() => {
+                isScrollingToYear = false;
+                updateActiveScrubberYear();
+            }, 1000);
+
+            let targetGroup = document.querySelector(`.timeline-group[data-month-key="${monthKey}"]`);
+            if (targetGroup) {
+                scrollToElement(targetGroup);
+                return;
+            }
+
+            if (timelineLoader) timelineLoader.style.display = 'inline-block';
+            try {
+                const res = await fetch(`/api/photos/timeline?year=${yrStr}&month=${monthNum}&limit=120`);
+                if (!res.ok) throw new Error("Failed to jump");
+                const data = await res.json();
+                if (data.items && data.items.length > 0) {
+                    data.items.forEach(appendTimelineItem);
+                    if (window.lucide) lucide.createIcons();
+
+                    targetGroup = document.querySelector(`.timeline-group[data-month-key="${monthKey}"]`);
+                    if (targetGroup) {
+                        scrollToElement(targetGroup);
+                    }
+                }
+            } catch (e) {
+                console.error(e);
+            } finally {
+                if (timelineLoader) timelineLoader.style.display = 'none';
+            }
+        }
+
+        fetchTimeline(1, false);
+        {% endif %}
+
+        {% if media_type == 'photo' %}
+        try {
+            localStorage.setItem('photo_view_pref', '{{ current_view }}');
+            document.cookie = "photo_view_pref={{ current_view }}; path=/; max-age=31536000; SameSite=Lax";
+        } catch (e) {}
+        {% endif %}
+
     </script>
     <script src="/static/lucide.min.js"></script>
     <script src="/static/audio-player.js"></script>

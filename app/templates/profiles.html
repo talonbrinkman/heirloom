@@ -492,7 +492,7 @@
         const subEl = document.getElementById('ratingLevelSubtext');
         const slider = document.getElementById('profileRatingSlider');
         if (slider) {
-            const pct = (num / 2) * 100;
+            const pct = (num * 0.5) * 100;
             slider.style.background = `linear-gradient(to right, var(--accent) 0%, var(--accent) ${pct}%, rgba(255, 255, 255, 0.2) ${pct}%, rgba(255, 255, 255, 0.2) 100%)`;
         }
         if (!nameEl || !subEl) return;

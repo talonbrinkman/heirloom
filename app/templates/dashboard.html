@@ -601,7 +601,7 @@
                         {% for p in recent_photos %}
                         <div class="media-card photo-card">
                             <div class="poster-container photo-poster-container">
-                                <a href="/photo/{{ p.id }}?from=/">
+                                <a href="/photo/{{ p.id }}?from=/&context=recent">
                                     {% if p.poster_filename %}
                                     <img src="/metadata/{{ p.poster_filename }}" class="poster">
                                     {% else %}

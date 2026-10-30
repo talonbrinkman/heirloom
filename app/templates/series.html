@@ -354,7 +354,7 @@
                 if (selectedEpEl && carouselRow && selectedEpEl.offsetParent !== null) {
                     const rowRect = carouselRow.getBoundingClientRect();
                     const epRect = selectedEpEl.getBoundingClientRect();
-                    const offset = (epRect.left - rowRect.left) + carouselRow.scrollLeft - (carouselRow.clientWidth / 2) + (selectedEpEl.clientWidth / 2);
+                    const offset = (epRect.left - rowRect.left) + carouselRow.scrollLeft - (carouselRow.clientWidth * 0.5) + (selectedEpEl.clientWidth * 0.5);
                     carouselRow.scrollTo({ left: Math.max(0, offset), behavior: smooth ? 'smooth' : 'auto' });
                     setTimeout(updateCarouselArrows, 150);
                 }

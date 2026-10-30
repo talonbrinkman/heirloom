@@ -21,6 +21,8 @@
             max-width: 100%;
             max-height: 100%;
             object-fit: contain;
+            user-select: none;
+            -webkit-user-drag: none;
         }
         .photo-header {
             position: absolute;
@@ -33,6 +35,10 @@
             justify-content: space-between;
             background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent);
             z-index: 10;
+            pointer-events: none;
+        }
+        .photo-header > * {
+            pointer-events: auto;
         }
         .photo-title {
             color: #fff;
@@ -61,16 +67,22 @@
             color: #fff;
             background: rgba(255,255,255,0.2);
             border-radius: 50%;
-            width: 40px;
-            height: 40px;
+            width: 44px;
+            height: 44px;
             display: flex;
             align-items: center;
             justify-content: center;
             text-decoration: none;
-            transition: background 0.2s;
+            transition: background 0.2s, transform 0.15s ease-out;
             z-index: 10;
+            border: none;
+            cursor: pointer;
+            outline: none;
         }
-        .photo-arrow:hover { background: rgba(255,255,255,0.4); }
+        .photo-arrow:hover { 
+            background: rgba(255,255,255,0.4); 
+            transform: translateY(-50%) scale(1.08);
+        }
         .left-arrow { left: 20px; }
         .right-arrow { right: 20px; }
     </style>
@@ -78,54 +90,126 @@
 <body class="photo-body">
     <div class="photo-header">
         <div>
-            <h1 class="photo-title">{{ photo.title }}</h1>
+            <h1 class="photo-title" id="photoTitle">{{ photo.title }}</h1>
             {% set display_date = photo.date_taken or photo.date_added %}
-            {% if display_date %}
-            <div style="color: rgba(255, 255, 255, 0.7); font-size: 0.9em; margin-top: 4px; display: flex; align-items: center; gap: 5px;">
+            <div id="photoDateContainer" style="color: rgba(255, 255, 255, 0.7); font-size: 0.9em; margin-top: 4px; display: {% if display_date %}flex{% else %}none{% endif %}; align-items: center; gap: 5px;">
                 <i data-lucide="calendar" style="width: 14px; height: 14px;"></i>
-                <span>{{ display_date.strftime('%B %d, %Y') }}</span>
+                <span id="photoDate">{{ display_date.strftime('%B %d, %Y') if display_date else '' }}</span>
             </div>
-            {% endif %}
         </div>
         <div class="flex gap-15">
             {% if user.downloads_access %}
-            <a href="/photo_file/{{ photo.id }}" download class="close-btn" title="Download"><i data-lucide="download"></i></a>
+            <a href="/photo_file/{{ photo.id }}" download class="close-btn" id="photoDownloadBtn" title="Download"><i data-lucide="download"></i></a>
             {% endif %}
             <a href="{{ close_url }}" class="close-btn" title="Close" id="photoCloseBtn"><i data-lucide="x"></i></a>
         </div>
     </div>
     
-    {% set query_items = [] %}
-    {% if effective_sort %}
-        {% set _ = query_items.append('sort=' + effective_sort|urlencode) %}
-    {% endif %}
-    {% if effective_album %}
-        {% set _ = query_items.append('album=' + effective_album|urlencode) %}
-    {% endif %}
-    {% if close_url %}
-        {% set _ = query_items.append('from=' + close_url|urlencode) %}
-    {% endif %}
-    {% set nav_query = ('?' + query_items|join('&')) if query_items else '' %}
-    {% if prev_photo_id %}
-    <a href="/photo/{{ prev_photo_id }}{{ nav_query }}" class="photo-arrow left-arrow" title="Previous"><i data-lucide="chevron-left"></i></a>
-    {% endif %}
-    {% if next_photo_id %}
-    <a href="/photo/{{ next_photo_id }}{{ nav_query }}" class="photo-arrow right-arrow" title="Next"><i data-lucide="chevron-right"></i></a>
-    {% endif %}
+    <button type="button" class="photo-arrow left-arrow" id="prevPhotoBtn" onclick="navPhoto(-1)" title="Previous" style="display: {% if prev_photo_id %}flex{% else %}none{% endif %};">
+        <i data-lucide="chevron-left"></i>
+    </button>
+    <button type="button" class="photo-arrow right-arrow" id="nextPhotoBtn" onclick="navPhoto(1)" title="Next" style="display: {% if next_photo_id %}flex{% else %}none{% endif %};">
+        <i data-lucide="chevron-right"></i>
+    </button>
 
-    {% if is_video %}
-    <video class="photo-content" controls autoplay>
-        <source src="/photo_file/{{ photo.id }}">
-        Your browser does not support the video tag.
-    </video>
-    {% else %}
-    <img src="/photo_file/{{ photo.id }}" class="photo-content" alt="{{ photo.title }}">
-    {% endif %}
+    <div id="photoMediaContainer" style="display: contents;">
+        {% if is_video %}
+        <video class="photo-content" controls autoplay>
+            <source src="/photo_file/{{ photo.id }}">
+            Your browser does not support the video tag.
+        </video>
+        {% else %}
+        <img src="/photo_file/{{ photo.id }}" class="photo-content" alt="{{ photo.title }}">
+        {% endif %}
+    </div>
 
     <script src="/static/lucide.min.js"></script>
     <script>lucide.createIcons();</script>
 
 <script>
+    const photos = {{ photos_json | safe }};
+    let currentIndex = photos.findIndex(p => p.id === {{ photo.id }});
+    if (currentIndex === -1 && photos.length > 0) currentIndex = 0;
+
+    function navPhoto(delta) {
+        if (!photos || photos.length === 0) return;
+        const newIndex = currentIndex + delta;
+        if (newIndex >= 0 && newIndex < photos.length) {
+            updatePhotoUI(newIndex);
+        }
+    }
+
+    function updatePhotoUI(index) {
+        if (index < 0 || index >= photos.length) return;
+        currentIndex = index;
+        const p = photos[currentIndex];
+
+        // Update document title
+        document.title = "Photo Viewer - " + p.title;
+
+        // Update header info
+        const titleEl = document.getElementById('photoTitle');
+        if (titleEl) titleEl.textContent = p.title;
+
+        const dateContainer = document.getElementById('photoDateContainer');
+        const dateEl = document.getElementById('photoDate');
+        if (p.date_str) {
+            if (dateEl) dateEl.textContent = p.date_str;
+            if (dateContainer) dateContainer.style.display = 'flex';
+        } else {
+            if (dateContainer) dateContainer.style.display = 'none';
+        }
+
+        const downloadBtn = document.getElementById('photoDownloadBtn');
+        if (downloadBtn) downloadBtn.href = '/photo_file/' + p.id;
+
+        // In-place swap media element
+        const container = document.getElementById('photoMediaContainer');
+        if (container) {
+            if (p.is_video) {
+                container.innerHTML = `
+                    <video class="photo-content" controls autoplay>
+                        <source src="/photo_file/${p.id}">
+                        Your browser does not support the video tag.
+                    </video>
+                `;
+            } else {
+                container.innerHTML = `
+                    <img src="/photo_file/${p.id}" class="photo-content" alt="${p.title}">
+                `;
+            }
+        }
+
+        // Update arrow button visibility
+        const prevBtn = document.getElementById('prevPhotoBtn');
+        const nextBtn = document.getElementById('nextPhotoBtn');
+        if (prevBtn) prevBtn.style.display = (currentIndex > 0) ? 'flex' : 'none';
+        if (nextBtn) nextBtn.style.display = (currentIndex < photos.length - 1) ? 'flex' : 'none';
+
+        // Update browser URL in-place without page reload
+        try {
+            const url = new URL(window.location.href);
+            url.pathname = '/photo/' + p.id;
+            history.replaceState(null, '', url.toString());
+        } catch (e) {}
+
+        preloadAdjacent(currentIndex);
+        if (window.lucide) lucide.createIcons();
+    }
+
+    function preloadAdjacent(idx) {
+        [-1, 1].forEach(offset => {
+            const target = photos[idx + offset];
+            if (target && !target.is_video) {
+                const img = new Image();
+                img.src = '/photo_file/' + target.id;
+            }
+        });
+    }
+
+    // Preload next/prev on initial load
+    preloadAdjacent(currentIndex);
+
     async function loadInbox() {
         try {
             const res = await fetch('/api/inbox');
@@ -218,15 +302,9 @@
                 window.location.href = closeBtn.href;
             }
         } else if (e.key === 'ArrowLeft') {
-            const leftArrow = document.querySelector('.left-arrow');
-            if (leftArrow && leftArrow.href) {
-                window.location.href = leftArrow.href;
-            }
+            navPhoto(-1);
         } else if (e.key === 'ArrowRight') {
-            const rightArrow = document.querySelector('.right-arrow');
-            if (rightArrow && rightArrow.href) {
-                window.location.href = rightArrow.href;
-            }
+            navPhoto(1);
         }
     });
 

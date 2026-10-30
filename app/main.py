@@ -3180,6 +3180,68 @@ def sort_photos_list(photos: list[Photo], sort: str) -> list[Photo]:
     
     return photos
 
+@app.get("/api/photos/timeline")
+def api_photos_timeline(
+    page: int = Query(1, ge=1),
+    limit: int = Query(60, ge=1, le=200),
+    year: Optional[int] = Query(None),
+    month: Optional[int] = Query(None),
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    if not current_user.photos_access: raise HTTPException(status_code=403, detail="Forbidden")
+    
+    query = select(Photo).where(~Photo.file_path.like("%#recycle%"))
+    
+    if year:
+        query = query.where(func.strftime('%Y', func.coalesce(Photo.date_taken, Photo.date_added)) == str(year))
+    if month:
+        mo_str = f"{int(month):02d}"
+        query = query.where(func.strftime('%m', func.coalesce(Photo.date_taken, Photo.date_added)) == mo_str)
+        
+    query = query.order_by(
+        func.coalesce(Photo.date_taken, Photo.date_added).desc(),
+        Photo.id.desc()
+    )
+    
+    total_q = select(func.count(Photo.id)).where(~Photo.file_path.like("%#recycle%"))
+    if year:
+        total_q = total_q.where(func.strftime('%Y', func.coalesce(Photo.date_taken, Photo.date_added)) == str(year))
+    if month:
+        mo_str = f"{int(month):02d}"
+        total_q = total_q.where(func.strftime('%m', func.coalesce(Photo.date_taken, Photo.date_added)) == mo_str)
+    total = session.exec(total_q).one()
+    
+    items = session.exec(query.offset((page - 1) * limit).limit(limit)).all()
+    has_more = ((page - 1) * limit + len(items)) < total
+    
+    result = []
+    for p in items:
+        dt = p.date_taken or p.date_added
+        day_title = f"{dt.strftime('%A, %B')} {dt.day}, {dt.year}" if dt else "Undated"
+        day_key = dt.strftime("%Y-%m-%d") if dt else "undated"
+        month_key = dt.strftime("%Y-%m") if dt else "undated"
+        result.append({
+            "id": p.id,
+            "title": p.title,
+            "poster_filename": p.poster_filename,
+            "year": dt.year if dt else None,
+            "month": dt.month if dt else None,
+            "month_key": month_key,
+            "day_key": day_key,
+            "day_title": day_title,
+            "date_display": dt.strftime("%b %d, %Y") if dt else "",
+            "url": f"/photo/{p.id}?from=/library/photo?view=timeline"
+        })
+        
+    return {
+        "items": result,
+        "page": page,
+        "has_more": has_more,
+        "total": total
+    }
+
 @app.get("/photo/{item_id}", response_class=HTMLResponse)
 def photo_view(
     request: Request,
@@ -3187,6 +3249,7 @@ def photo_view(
     from_url: Optional[str] = Query(None, alias="from"),
     sort: Optional[str] = Query(None),
     album: Optional[str] = Query(None),
+    context: Optional[str] = Query(None),
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
@@ -3214,7 +3277,6 @@ def photo_view(
             from_params = urllib.parse.parse_qs(p.query)
 
     effective_sort = sort or from_params.get("sort", [None])[0] or "title_asc"
-    
     search_query = from_params.get("search", [None])[0] or from_params.get("q", [None])[0]
 
     explicit_album = album
@@ -3226,13 +3288,35 @@ def photo_view(
         is_root_feed = True
 
     is_dashboard = bool(parsed_from and parsed_from.path in ("/", "/dashboard"))
+    is_recent_context = (context == "recent") or (from_params.get("context", [None])[0] == "recent") or is_dashboard
 
-    if is_dashboard:
+    skip_sort = False
+    is_timeline = bool(parsed_from and ("view=timeline" in (parsed_from.query or "")))
+    if is_timeline:
         feed_photos = session.exec(
-            select(Photo).order_by(func.coalesce(Photo.date_taken, Photo.date_added).desc()).limit(30)
+            select(Photo)
+            .where(~Photo.file_path.like("%#recycle%"))
+            .order_by(
+                func.coalesce(Photo.date_taken, Photo.date_added).desc(),
+                Photo.id.desc()
+            )
+            .limit(200)
         ).all()
         if photo.id not in [p.id for p in feed_photos]:
-            feed_photos = session.exec(select(Photo).where(Photo.album == photo.album)).all() if photo.album else session.exec(select(Photo).where(Photo.album == None)).all()
+            feed_photos = [photo] + feed_photos
+        skip_sort = True
+    elif is_recent_context:
+        # Match the exact dashboard "Recently Added Photos" feed order (newest import first)
+        feed_photos = session.exec(
+            select(Photo).where(~Photo.file_path.like("%#recycle%")).order_by(Photo.id.desc()).limit(60)
+        ).all()
+        if photo.id not in [p.id for p in feed_photos]:
+            feed_photos = session.exec(
+                select(Photo).where(~Photo.file_path.like("%#recycle%")).order_by(Photo.id.desc()).limit(200)
+            ).all()
+            if photo.id not in [p.id for p in feed_photos]:
+                feed_photos = [photo] + feed_photos
+        skip_sort = True
     elif search_query:
         feed_photos = session.exec(
             select(Photo).where(Photo.title.ilike(f"%{search_query}%"))
@@ -3262,7 +3346,8 @@ def photo_view(
         else:
             feed_photos = session.exec(select(Photo).where(Photo.album == None)).all()
 
-    feed_photos = sort_photos_list(feed_photos, effective_sort)
+    if not skip_sort:
+        feed_photos = sort_photos_list(feed_photos, effective_sort)
 
     idx = next((i for i, p in enumerate(feed_photos) if p.id == item_id), -1)
     prev_photo = feed_photos[idx - 1] if idx > 0 else None
@@ -3297,6 +3382,20 @@ def photo_view(
                 flat["sort"] = effective_sort
                 close_url = p_close.path + "?" + urllib.parse.urlencode(flat)
 
+    # Build lightweight client-side playlist for instant zero-reload photo browsing
+    import json
+    photos_data = []
+    for p in feed_photos:
+        p_ext = os.path.splitext(p.file_path)[1].lower() if p.file_path else ""
+        p_is_vid = p_ext in (".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm")
+        p_date = p.date_taken or p.date_added
+        photos_data.append({
+            "id": p.id,
+            "title": p.title,
+            "date_str": p_date.strftime("%B %d, %Y") if p_date else "",
+            "is_video": p_is_vid
+        })
+
     return templates.TemplateResponse(request=request, name="photo.html", context={
         "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
         "photo": photo, "is_video": is_video,
@@ -3304,7 +3403,8 @@ def photo_view(
         "next_photo_id": next_photo.id if next_photo else None,
         "effective_sort": effective_sort,
         "effective_album": explicit_album if explicit_album is not None else (photo.album if not is_root_feed else None),
-        "close_url": close_url
+        "close_url": close_url,
+        "photos_json": json.dumps(photos_data)
     })
 
 @app.get("/photo_file/{item_id}")
@@ -3318,6 +3418,69 @@ def get_photo_file(item_id: int, current_user: User = Depends(get_current_user))
         file_path = photo.file_path
     
     return FileResponse(file_path)
+
+def get_photo_recommended_sections(session: Session):
+    sections = []
+    
+    # 1. Recently Added Photos (matching dashboard)
+    recent_photos = session.exec(
+        select(Photo)
+        .where(~Photo.file_path.like("%#recycle%"))
+        .order_by(Photo.id.desc())
+        .limit(25)
+    ).all()
+    if recent_photos:
+        sections.append({
+            "title": "Recently Added Photos",
+            "photos": recent_photos
+        })
+        
+    all_photos = session.exec(
+        select(Photo)
+        .where(~Photo.file_path.like("%#recycle%"))
+        .order_by(func.coalesce(Photo.date_taken, Photo.date_added).desc())
+    ).all()
+    
+    from collections import defaultdict
+    by_year = defaultdict(list)
+    by_decade = defaultdict(list)
+    
+    for p in all_photos:
+        dt = p.date_taken or p.date_added
+        if dt:
+            by_year[dt.year].append(p)
+            by_decade[(dt.year // 10) * 10].append(p)
+            
+    # Sort years by photo count descending, then by year descending
+    popular_years = sorted(
+        by_year.keys(),
+        key=lambda yr: (len(by_year[yr]), yr),
+        reverse=True
+    )
+    
+    added_years = set()
+    for yr in popular_years:
+        if len(by_year[yr]) >= 2:
+            sections.append({
+                "title": f"Photos from {yr}",
+                "photos": by_year[yr][:25]
+            })
+            added_years.add(yr)
+            if len(added_years) >= 3:
+                break
+                
+    for decade in sorted(by_decade.keys(), reverse=True):
+        plist = by_decade[decade]
+        years_in_decade = { (p.date_taken or p.date_added).year for p in plist if (p.date_taken or p.date_added) }
+        if len(years_in_decade) > 1 or (years_in_decade and not years_in_decade.issubset(added_years)):
+            sections.append({
+                "title": f"Photos from the {decade}s",
+                "photos": plist[:25]
+            })
+            if len(sections) >= 5:
+                break
+                
+    return sections
 
 @app.get("/library/{media_type}", response_class=HTMLResponse)
 def library_view(
@@ -3335,9 +3498,20 @@ def library_view(
     if media_type in avail_vols and not avail_vols[media_type]:
         return RedirectResponse(url="/", status_code=303)
 
+    photo_recommended_sections = []
+    timeline_years = []
+    timeline_structure = {}
     album_breadcrumbs = []
     clean_album = None
-    current_view = request.query_params.get("view", "library")
+    explicit_view = request.query_params.get("view")
+    if explicit_view:
+        current_view = explicit_view
+    elif media_type == "photo":
+        current_view = request.cookies.get("photo_view_pref", "recommended")
+        if current_view not in ("recommended", "library", "timeline"):
+            current_view = "recommended"
+    else:
+        current_view = "library" 
     active_genre = request.query_params.get("genre")
     active_collection = request.query_params.get("collection")
     categories = []
@@ -3449,28 +3623,59 @@ def library_view(
 
     elif media_type == "photo":
         if not current_user.photos_access: raise HTTPException(status_code=403, detail="Forbidden")
-        raw_album = request.query_params.get("album")
-        if raw_album:
-            clean_album = raw_album.strip().strip("/").replace("\\", "/")
-            if clean_album:
-                parts = clean_album.split("/")
-                accum = []
-                for p in parts:
-                    accum.append(p)
-                    album_breadcrumbs.append({
-                        "name": p,
-                        "path": "/".join(accum)
+        if current_view == "recommended":
+            photo_recommended_sections = get_photo_recommended_sections(session)
+            total_count = sum(len(s["photos"]) for s in photo_recommended_sections)
+        elif current_view == "timeline":
+            import calendar
+            raw_pairs = session.exec(
+                select(
+                    func.strftime('%Y', func.coalesce(Photo.date_taken, Photo.date_added)),
+                    func.strftime('%m', func.coalesce(Photo.date_taken, Photo.date_added))
+                )
+                .where(~Photo.file_path.like("%#recycle%"))
+                .distinct()
+            ).all()
+            timeline_structure = {}
+            for yr_s, mo_s in raw_pairs:
+                if yr_s and mo_s and yr_s.isdigit() and mo_s.isdigit():
+                    yr = int(yr_s)
+                    mo = int(mo_s)
+                    if yr not in timeline_structure:
+                        timeline_structure[yr] = []
+                    timeline_structure[yr].append({
+                        "month": mo,
+                        "name": calendar.month_name[mo],
+                        "short": calendar.month_abbr[mo],
+                        "key": f"{yr_s}-{mo_s}"
                     })
-                total_count = session.exec(
-                    select(func.count(Photo.id)).where(
-                        (Photo.album == clean_album) | (Photo.album.like(f"{clean_album}/%"))
-                    )
-                ).one()
-            else:
-                clean_album = None
-                total_count = session.exec(select(func.count(Photo.id))).one()
+            timeline_years = sorted(timeline_structure.keys(), reverse=True)
+            for yr in timeline_structure:
+                timeline_structure[yr].sort(key=lambda m: m["month"], reverse=True)
+            total_count = session.exec(select(func.count(Photo.id)).where(~Photo.file_path.like("%#recycle%"))).one()
         else:
-            total_count = session.exec(select(func.count(Photo.id))).one()
+            raw_album = request.query_params.get("album")
+            if raw_album:
+                clean_album = raw_album.strip().strip("/").replace("\\", "/")
+                if clean_album:
+                    parts = clean_album.split("/")
+                    accum = []
+                    for p in parts:
+                        accum.append(p)
+                        album_breadcrumbs.append({
+                            "name": p,
+                            "path": "/".join(accum)
+                        })
+                    total_count = session.exec(
+                        select(func.count(Photo.id)).where(
+                            (Photo.album == clean_album) | (Photo.album.like(f"{clean_album}/%"))
+                        )
+                    ).one()
+                else:
+                    clean_album = None
+                    total_count = session.exec(select(func.count(Photo.id))).one()
+            else:
+                total_count = session.exec(select(func.count(Photo.id))).one()
     elif media_type == "music":
         if not current_user.music_access: raise HTTPException(status_code=403, detail="Forbidden")
         view_type = request.query_params.get("view", "albums")
@@ -3487,7 +3692,7 @@ def library_view(
         
     user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
 
-    return templates.TemplateResponse(request=request, name="library.html", context={
+    response = templates.TemplateResponse(request=request, name="library.html", context={
         "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
         "media_type": media_type, "total_count": total_count, "album": clean_album, "album_breadcrumbs": album_breadcrumbs,
         "has_movies": avail_vols["movie"], "has_tv": avail_vols["tv"], "has_photos": avail_vols["photo"], "has_music": avail_vols["music"],
@@ -3500,8 +3705,14 @@ def library_view(
         "recommended_items": recommended_items,
         "recently_added": recently_added,
         "recently_released": recently_released,
-        "top_rated_items": top_rated_items
+        "top_rated_items": top_rated_items,
+        "photo_recommended_sections": photo_recommended_sections,
+        "timeline_years": timeline_years,
+        "timeline_structure": timeline_structure
     })
+    if media_type == "photo":
+        response.set_cookie("photo_view_pref", current_view, max_age=31536000, path="/", samesite="lax")
+    return response
 @app.get("/movie/{movie_id}", response_class=HTMLResponse)
 def movie_view(
     request: Request,
