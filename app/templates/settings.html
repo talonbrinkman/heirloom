@@ -161,6 +161,36 @@
             });
         }
 
+        let autopauseSaveTimer = null;
+        function autoSaveAutoPauseSettings() {
+            const form = document.getElementById("autopauseSettingsForm");
+            if (!form) return;
+            const formData = new FormData(form);
+            const statusEl = document.getElementById("autopauseSaveStatus");
+
+            fetch(form.action, {
+                method: "POST",
+                body: formData
+            })
+            .then(res => {
+                if (res.ok) {
+                    if (statusEl) {
+                        statusEl.style.display = "inline-flex";
+                        if (window.lucide) lucide.createIcons();
+                        clearTimeout(autopauseSaveTimer);
+                        autopauseSaveTimer = setTimeout(() => {
+                            statusEl.style.display = "none";
+                        }, 2500);
+                    }
+                } else {
+                    console.error("Failed to save auto-pause settings");
+                }
+            })
+            .catch(err => {
+                console.error("Error saving auto-pause settings:", err);
+            });
+        }
+
         let languageSaveTimer = null;
         function autoSaveLanguageSettings() {
             const form = document.getElementById("languageSettingsForm");
@@ -617,6 +647,30 @@
             </form>
         </div>
 
+        <div class="card">
+            <div class="card-header flex align-center justify-between">
+                <h2 class="m-0">Playback & Auto-Pause{% if current_profile and not current_profile.is_primary %} ({{ current_profile.name }}){% endif %}</h2>
+                <span id="autopauseSaveStatus" style="display: none; color: #4ade80; font-size: 0.9em; font-weight: 500;" class="align-center gap-5">
+                    <i data-lucide="check" style="width: 16px; height: 16px;"></i> Saved
+                </span>
+            </div>
+            <p style="color: var(--text-secondary); font-size: 0.9em;" class="mb-15">
+                Automatically pause consecutive TV show playback when inactive to prevent runaway overnight streaming on TVs and mobile devices.
+            </p>
+            <form id="autopauseSettingsForm" action="/settings/autopause" method="post" class="m-0">
+                <div style="max-width: 360px;">
+                    <label for="autoPauseEpisodes" style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 0.9rem;">"Are You Still Watching?" Prompt</label>
+                    <select name="auto_pause_episodes" id="autoPauseEpisodes" class="select-input w-100 m-0" onchange="autoSaveAutoPauseSettings()">
+                        <option value="2" {% if auto_pause_episodes == 2 %}selected{% endif %}>After 2 episodes</option>
+                        <option value="3" {% if auto_pause_episodes == 3 or auto_pause_episodes is none %}selected{% endif %}>After 3 episodes (Recommended)</option>
+                        <option value="4" {% if auto_pause_episodes == 4 %}selected{% endif %}>After 4 episodes</option>
+                        <option value="5" {% if auto_pause_episodes == 5 %}selected{% endif %}>After 5 episodes</option>
+                        <option value="0" {% if auto_pause_episodes == 0 %}selected{% endif %}>Never (Continuous Playback)</option>
+                    </select>
+                </div>
+            </form>
+        </div>
+
         {% if is_admin %}
         <div class="card">
             <div class="card-header">
@@ -944,7 +998,7 @@
                     <p style="color: #ccc; font-size: 0.9em;" class="mb-10">Automatically maps high dynamic range colors (BT.2020 PQ / HLG / HDR10) into standard dynamic range (BT.709 SDR) when transcoding to eliminate washed-out, grayish colors on non-HDR displays.</p>
                     <select name="hdr_tonemapping" id="hdr_tonemapping" class="select-input w-100 m-0" onchange="autoSaveTranscodeSettings()">
                         <option value="disabled" {% if hdr_tonemapping == 'disabled' %}selected{% endif %}>Disabled (Passthrough / No Tone Mapping)</option>
-                        <option value="hable" {% if hdr_tonemapping == 'hable' or hdr_tonemapping == 'true' or not hdr_tonemapping %}selected{% endif %}>Hable (Filmic - Recommended / Plex Default)</option>
+                        <option value="hable" {% if hdr_tonemapping == 'hable' or hdr_tonemapping == 'true' or not hdr_tonemapping %}selected{% endif %}>Hable (Filmic - Recommended/Default)</option>
                         <option value="mobius" {% if hdr_tonemapping == 'mobius' %}selected{% endif %}>Mobius (Preserves Saturated Highlights)</option>
                         <option value="reinhard" {% if hdr_tonemapping == 'reinhard' %}selected{% endif %}>Reinhard (Preserves Shadow Details)</option>
                         <option value="linear" {% if hdr_tonemapping == 'linear' %}selected{% endif %}>Linear (Perceptually Linear Stretch)</option>
@@ -962,7 +1016,7 @@
             </form>
         </div>
         <div style="text-align: center; color: #888; font-size: 0.8em; margin-top: 10px;">
-            <strong>v1.7.3</strong>
+            <strong>v1.8.6</strong>
         </div>
     </div>
 

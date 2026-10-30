@@ -18,6 +18,7 @@ class User(SQLModel, table=True):
     rewind_seconds: int = Field(default=0)
     default_audio_lang: str = Field(default="eng")
     default_subtitle_lang: str = Field(default="eng")
+    auto_pause_episodes: int = Field(default=3)
     can_manage_profiles: bool = Field(default=True)
     session_token: Optional[str] = Field(default=None, index=True)
 
@@ -35,6 +36,7 @@ class Profile(SQLModel, table=True):
     rewind_seconds: int = Field(default=0)
     default_audio_lang: Optional[str] = Field(default="eng")
     default_subtitle_lang: Optional[str] = Field(default="eng")
+    auto_pause_episodes: Optional[int] = Field(default=3)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class Movie(SQLModel, table=True):

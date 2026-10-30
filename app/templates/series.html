@@ -348,6 +348,18 @@
             const episodesData = {{ episodes | tojson }};
             const defaultSeriesPlot = {{ (series.plot or "") | tojson }};
 
+            function scrollToSelectedEpisode(smooth = true) {
+                const selectedEpEl = document.querySelector('.selected-episode');
+                const carouselRow = document.getElementById('episodesGrid');
+                if (selectedEpEl && carouselRow && selectedEpEl.offsetParent !== null) {
+                    const rowRect = carouselRow.getBoundingClientRect();
+                    const epRect = selectedEpEl.getBoundingClientRect();
+                    const offset = (epRect.left - rowRect.left) + carouselRow.scrollLeft - (carouselRow.clientWidth / 2) + (selectedEpEl.clientWidth / 2);
+                    carouselRow.scrollTo({ left: Math.max(0, offset), behavior: smooth ? 'smooth' : 'auto' });
+                    setTimeout(updateCarouselArrows, 150);
+                }
+            }
+
             function selectEpisode(epId) {
                 const ep = episodesData.find(e => e.id === epId);
                 if (!ep) return;
@@ -442,6 +454,19 @@
                 }
 
                 filterEpisodes();
+
+                // If selected episode is visible in this season, center it; otherwise scroll to the beginning
+                const selectedEpEl = document.querySelector('.selected-episode');
+                const carouselRow = document.getElementById('episodesGrid');
+                if (selectedEpEl && carouselRow) {
+                    const cardSeason = parseInt(selectedEpEl.getAttribute('data-season'));
+                    if (cardSeason === season) {
+                        scrollToSelectedEpisode(true);
+                    } else {
+                        carouselRow.scrollTo({ left: 0, behavior: 'smooth' });
+                        setTimeout(updateCarouselArrows, 150);
+                    }
+                }
             }
 
             function filterEpisodes() {
@@ -486,17 +511,13 @@
                     }
                 }
 
-                // If a specific episode was explicitly requested via URL (?ep=), horizontally center it in the carousel without scrolling the window
-                if (urlParams.has('ep')) {
-                    const selectedEpEl = document.querySelector('.selected-episode');
-                    const carouselRow = document.getElementById('episodesGrid');
-                    if (selectedEpEl && carouselRow) {
-                        setTimeout(() => {
-                            const offset = selectedEpEl.offsetLeft - (carouselRow.clientWidth / 2) + (selectedEpEl.clientWidth / 2);
-                            carouselRow.scrollTo({ left: Math.max(0, offset), behavior: 'smooth' });
-                        }, 150);
-                    }
-                }
+                // Scroll to the currently selected episode when the user opens series in the episodes carousel
+                setTimeout(() => {
+                    scrollToSelectedEpisode(true);
+                }, 150);
+                setTimeout(() => {
+                    scrollToSelectedEpisode(false);
+                }, 400);
             };
 
             function scrollCarousel(btn, direction) {

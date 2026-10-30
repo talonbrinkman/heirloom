@@ -3156,11 +3156,37 @@ def api_search(
             
     return {"items": results}
 
+def sort_photos_list(photos: list[Photo], sort: str) -> list[Photo]:
+    photos = [p for p in photos if not (p.file_path and is_recycle_path(p.file_path))]
+    
+    def get_photo_date(p: Photo):
+        return p.date_taken or p.date_added or datetime.min
+
+    def get_photo_added(p: Photo):
+        return p.date_added or p.date_taken or datetime.min
+
+    if sort == "title_desc":
+        photos.sort(key=lambda p: (p.title.lower() if p.title else "", p.id), reverse=True)
+    elif sort == "year_desc":
+        photos.sort(key=lambda p: (get_photo_date(p), p.title.lower() if p.title else "", p.id), reverse=True)
+    elif sort == "year_asc":
+        photos.sort(key=lambda p: (get_photo_date(p), p.title.lower() if p.title else "", p.id))
+    elif sort == "date_desc":
+        photos.sort(key=lambda p: (get_photo_added(p), p.title.lower() if p.title else "", p.id), reverse=True)
+    elif sort == "date_asc":
+        photos.sort(key=lambda p: (get_photo_added(p), p.title.lower() if p.title else "", p.id))
+    else:  # default 'title_asc'
+        photos.sort(key=lambda p: (p.title.lower() if p.title else "", p.id))
+    
+    return photos
+
 @app.get("/photo/{item_id}", response_class=HTMLResponse)
 def photo_view(
     request: Request,
     item_id: int,
     from_url: Optional[str] = Query(None, alias="from"),
+    sort: Optional[str] = Query(None),
+    album: Optional[str] = Query(None),
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
@@ -3174,42 +3200,110 @@ def photo_view(
     ext = os.path.splitext(photo.file_path)[1].lower()
     is_video = ext in (".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm")
     
-    if photo.album:
-        album_photos = session.exec(select(Photo).where(Photo.album == photo.album)).all()
-    else:
-        album_photos = session.exec(select(Photo).where(Photo.album == None)).all()
-    album_photos = [p for p in album_photos if not (p.file_path and is_recycle_path(p.file_path))]
-    album_photos.sort(key=lambda x: (x.title.lower(), x.id))
+    # Parse from_url or referer to recover originating view, folder, and sort
+    parsed_from = None
+    from_params = {}
+    if from_url:
+        parsed_from = urllib.parse.urlparse(from_url)
+        from_params = urllib.parse.parse_qs(parsed_from.query)
+    elif request.headers.get("referer"):
+        ref = request.headers.get("referer")
+        p = urllib.parse.urlparse(ref)
+        if (not p.netloc or p.netloc == request.url.netloc) and not p.path.startswith("/photo/"):
+            parsed_from = p
+            from_params = urllib.parse.parse_qs(p.query)
 
-    idx = next((i for i, p in enumerate(album_photos) if p.id == item_id), -1)
-    prev_photo = album_photos[idx - 1] if idx > 0 else None
-    next_photo = album_photos[idx + 1] if 0 <= idx < len(album_photos) - 1 else None
+    effective_sort = sort or from_params.get("sort", [None])[0] or "title_asc"
+    
+    search_query = from_params.get("search", [None])[0] or from_params.get("q", [None])[0]
+
+    explicit_album = album
+    if explicit_album is None and "album" in from_params:
+        explicit_album = from_params["album"][0]
+
+    is_root_feed = False
+    if parsed_from and parsed_from.path.rstrip("/") == "/library/photo" and "album" not in from_params and not album:
+        is_root_feed = True
+
+    is_dashboard = bool(parsed_from and parsed_from.path in ("/", "/dashboard"))
+
+    if is_dashboard:
+        feed_photos = session.exec(
+            select(Photo).order_by(func.coalesce(Photo.date_taken, Photo.date_added).desc()).limit(30)
+        ).all()
+        if photo.id not in [p.id for p in feed_photos]:
+            feed_photos = session.exec(select(Photo).where(Photo.album == photo.album)).all() if photo.album else session.exec(select(Photo).where(Photo.album == None)).all()
+    elif search_query:
+        feed_photos = session.exec(
+            select(Photo).where(Photo.title.ilike(f"%{search_query}%"))
+        ).all()
+        if photo.id not in [p.id for p in feed_photos]:
+            feed_photos = session.exec(select(Photo).where(Photo.album == photo.album)).all() if photo.album else session.exec(select(Photo).where(Photo.album == None)).all()
+    elif explicit_album is not None and explicit_album != "":
+        clean_album = explicit_album.strip().replace(chr(92), "/").strip("/")
+        feed_photos = session.exec(
+            select(Photo).where(Photo.album == clean_album)
+        ).all()
+        if photo.id not in [p.id for p in feed_photos]:
+            feed_photos = session.exec(
+                select(Photo).where(Photo.album == photo.album)
+            ).all() if photo.album else [photo]
+    elif is_root_feed:
+        feed_photos = session.exec(
+            select(Photo).where(Photo.album == None)
+        ).all()
+        if photo.id not in [p.id for p in feed_photos]:
+            feed_photos = session.exec(
+                select(Photo).where(Photo.album == photo.album)
+            ).all() if photo.album else [photo]
+    else:
+        if photo.album:
+            feed_photos = session.exec(select(Photo).where(Photo.album == photo.album)).all()
+        else:
+            feed_photos = session.exec(select(Photo).where(Photo.album == None)).all()
+
+    feed_photos = sort_photos_list(feed_photos, effective_sort)
+
+    idx = next((i for i, p in enumerate(feed_photos) if p.id == item_id), -1)
+    prev_photo = feed_photos[idx - 1] if idx > 0 else None
+    next_photo = feed_photos[idx + 1] if 0 <= idx < len(feed_photos) - 1 else None
     user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
 
     close_url = None
     if from_url:
-        parsed_from = urllib.parse.urlparse(from_url)
-        if not parsed_from.netloc or parsed_from.netloc == request.url.netloc:
-            close_url = parsed_from.path + ("?" + parsed_from.query if parsed_from.query else "")
+        p_from = urllib.parse.urlparse(from_url)
+        if not p_from.netloc or p_from.netloc == request.url.netloc:
+            close_url = p_from.path + ("?" + p_from.query if p_from.query else "")
+
+    if not close_url and parsed_from:
+        close_url = parsed_from.path + ("?" + parsed_from.query if parsed_from.query else "")
 
     if not close_url:
-        referer = request.headers.get("referer")
-        if referer:
-            parsed = urllib.parse.urlparse(referer)
-            if (not parsed.netloc or parsed.netloc == request.url.netloc) and not parsed.path.startswith("/photo/"):
-                close_url = parsed.path + ("?" + parsed.query if parsed.query else "")
-
-    if not close_url:
-        if photo.album:
-            close_url = f"/library/photo?album={urllib.parse.quote(photo.album)}"
-        else:
-            close_url = "/library/photo"
+        params = {}
+        if effective_sort and effective_sort != "title_asc":
+            params["sort"] = effective_sort
+        if explicit_album:
+            params["album"] = explicit_album
+        elif photo.album:
+            params["album"] = photo.album
+        q_str = ("?" + urllib.parse.urlencode(params)) if params else ""
+        close_url = f"/library/photo{q_str}"
+    else:
+        p_close = urllib.parse.urlparse(close_url)
+        if p_close.path.rstrip("/") == "/library/photo":
+            c_params = urllib.parse.parse_qs(p_close.query)
+            if "sort" not in c_params and effective_sort:
+                flat = {k: v[0] for k, v in c_params.items()}
+                flat["sort"] = effective_sort
+                close_url = p_close.path + "?" + urllib.parse.urlencode(flat)
 
     return templates.TemplateResponse(request=request, name="photo.html", context={
         "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
         "photo": photo, "is_video": is_video,
         "prev_photo_id": prev_photo.id if prev_photo else None,
         "next_photo_id": next_photo.id if next_photo else None,
+        "effective_sort": effective_sort,
+        "effective_album": explicit_album if explicit_album is not None else (photo.album if not is_root_feed else None),
         "close_url": close_url
     })
 
@@ -5107,7 +5201,8 @@ async def play_video(
         "is_apple": is_apple,
         "audio_tracks": audio_tracks, "is_restart": bool(restart),
         "default_audio_lang": (current_profile.default_audio_lang if (current_profile and current_profile.default_audio_lang) else (current_user.default_audio_lang if current_user else "eng")) or "eng",
-        "default_subtitle_lang": (current_profile.default_subtitle_lang if (current_profile and current_profile.default_subtitle_lang) else (current_user.default_subtitle_lang if current_user else "eng")) or "eng"
+        "default_subtitle_lang": (current_profile.default_subtitle_lang if (current_profile and current_profile.default_subtitle_lang) else (current_user.default_subtitle_lang if current_user else "eng")) or "eng",
+        "auto_pause_episodes": (current_profile.auto_pause_episodes if (current_profile and getattr(current_profile, 'auto_pause_episodes', None) is not None) else (getattr(current_user, 'auto_pause_episodes', 3) if current_user else 3))
     })
 
 @app.get("/subtitle/{media_type}/{item_id}")
@@ -7244,13 +7339,17 @@ async def view_settings(
     rewind_seconds = current_profile.rewind_seconds if (current_profile and current_profile.rewind_seconds is not None) else (current_user.rewind_seconds or 0)
     default_audio_lang = (current_profile.default_audio_lang if (current_profile and current_profile.default_audio_lang) else (current_user.default_audio_lang or "eng")) or "eng"
     default_subtitle_lang = (current_profile.default_subtitle_lang if (current_profile and current_profile.default_subtitle_lang) else (current_user.default_subtitle_lang or "eng")) or "eng"
+    auto_pause_episodes = current_profile.auto_pause_episodes if (current_profile and getattr(current_profile, 'auto_pause_episodes', None) is not None) else (getattr(current_user, 'auto_pause_episodes', 3) if current_user else 3)
+    if auto_pause_episodes is None:
+        auto_pause_episodes = 3
     
     return templates.TemplateResponse(request=request, name="settings.html", context={
         "user": current_user, "current_profile": current_profile,
         "is_admin": is_admin, "can_change_password": can_change_password,
         "invites": invites, "users": users, "volume_paths": volume_paths, "mounted_volumes": mounted_volumes,
         "host_url": host_url, "remote_url": remote_url, "tmdb_key": tmdb_key, "theaudiodb_key": theaudiodb_key,
-        "hw_accel_profile": hw_accel_profile, "hdr_tonemapping": hdr_tonemapping, "rewind_seconds": rewind_seconds, "default_audio_lang": default_audio_lang, "default_subtitle_lang": default_subtitle_lang, "available_languages": AVAILABLE_LANGUAGES
+        "hw_accel_profile": hw_accel_profile, "hdr_tonemapping": hdr_tonemapping, "rewind_seconds": rewind_seconds, "default_audio_lang": default_audio_lang, "default_subtitle_lang": default_subtitle_lang, "available_languages": AVAILABLE_LANGUAGES,
+        "auto_pause_episodes": auto_pause_episodes
     })
 
 @app.post("/settings/transcoding")
@@ -7324,6 +7423,24 @@ async def save_rewind_settings(
         session.add(current_user)
     session.commit()
     return RedirectResponse(url="/settings?rewind_success=1", status_code=303)
+
+@app.post("/settings/autopause")
+async def save_autopause_settings(
+    auto_pause_episodes: int = Form(3),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    val = max(0, min(10, auto_pause_episodes))
+    if current_profile:
+        current_profile.auto_pause_episodes = val
+        session.add(current_profile)
+    if current_profile is None or current_profile.is_primary:
+        current_user.auto_pause_episodes = val
+        session.add(current_user)
+    session.commit()
+    return JSONResponse({"status": "ok", "auto_pause_episodes": val})
 
 @app.post("/settings/language")
 async def save_language_settings(

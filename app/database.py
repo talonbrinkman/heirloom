@@ -318,6 +318,20 @@ def create_db_and_tables():
         except Exception:
             session.rollback()
 
+        try:
+            session.exec(text("ALTER TABLE user ADD COLUMN auto_pause_episodes INTEGER DEFAULT 3"))
+            session.exec(text("UPDATE user SET auto_pause_episodes = 3 WHERE auto_pause_episodes IS NULL"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
+            session.exec(text("ALTER TABLE profile ADD COLUMN auto_pause_episodes INTEGER DEFAULT 3"))
+            session.exec(text("UPDATE profile SET auto_pause_episodes = 3 WHERE auto_pause_episodes IS NULL"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
         # InviteCode permissions migration
         for col, dt, default in [
             ("movies_access", "BOOLEAN", 0),

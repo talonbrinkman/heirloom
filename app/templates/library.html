@@ -716,6 +716,9 @@
             localStorage.setItem(`sort_pref_{{ media_type }}`, value);
             document.getElementById('currentSortText').textContent = text;
             document.getElementById('sortMenu').classList.remove('show');
+            const url = new URL(window.location.href);
+            url.searchParams.set('sort', value);
+            history.replaceState({}, '', url.toString());
             currentPage = 1;
             hasMore = true;
             fetchMedia(currentPage, false);
@@ -865,9 +868,16 @@
                             `;
                     }
 
-                    const targetUrl = ((mediaType === 'photo' && !isAlbum) || mediaType === 'music')
-                        ? `${m.url}?from=${encodeURIComponent(window.location.pathname + window.location.search)}`
-                        : m.url;
+                    let targetUrl = m.url;
+                    if (mediaType === 'photo' && !isAlbum) {
+                        const qParams = new URLSearchParams();
+                        if (currentSort) qParams.set('sort', currentSort);
+                        if (album) qParams.set('album', album);
+                        qParams.set('from', window.location.pathname + window.location.search);
+                        targetUrl = `${m.url}?${qParams.toString()}`;
+                    } else if (mediaType === 'music') {
+                        targetUrl = `${m.url}?from=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+                    }
 
                     card.innerHTML = `
                             <div class="${posterClass}">
@@ -919,6 +929,16 @@
                 'date_desc': 'Recently Added',
                 'date_asc': 'Oldest Added'
             };
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.has('sort')) {
+                currentSort = urlParams.get('sort');
+                localStorage.setItem(`sort_pref_{{ media_type }}`, currentSort);
+            } else {
+                const url = new URL(window.location.href);
+                url.searchParams.set('sort', currentSort);
+                history.replaceState({}, '', url.toString());
+            }
+
             const textElem = document.getElementById('currentSortText');
             if (textElem) textElem.textContent = sortLabels[currentSort] || 'Title (A-Z)';
 

@@ -409,25 +409,22 @@ a.play-btn {
 
 .play-btn span,
 button.play-btn span,
-a.play-btn span {
+a.play-btn span,
+.play-btn:hover span,
+button.play-btn:hover span,
+a.play-btn:hover span {
     color: inherit;
-    font-size: inherit;
-    font-weight: inherit;
+    font-size: 1rem;
+    font-weight: bold;
 }
 
 .play-btn:hover,
-button.play-btn span,
-button.play-btn span,
-a.play-btn span {
-    color: inherit;
-    font-size: inherit;
-    font-weight: inherit;
-}
-
-.play-btn:hover,
+button.play-btn:hover,
 a.play-btn:hover {
     background-color: var(--accent);
     color: var(--text);
+    font-size: 1rem;
+    font-weight: bold;
 }
 
 .play-btn svg,
@@ -872,7 +869,6 @@ input[type="checkbox"]:checked {
     left: 0;
     width: 100%;
     height: 5px;
-    background: rgba(255, 255, 255, 0.3);
     overflow: hidden;
 }
 
@@ -1558,9 +1554,23 @@ body.has-backdrop {
 
 .info-details button span,
 .info-details a.play-btn span,
-.info-details .play-btn span {
+.info-details .play-btn span,
+.info-details a.play-btn:hover span,
+.info-details .play-btn:hover span,
+.info-details button.play-btn:hover span {
     color: var(--text);
     font-size: 1rem;
+    font-weight: bold;
+}
+
+.info-details .play-btn,
+.info-details a.play-btn,
+.info-details button.play-btn,
+.info-details .play-btn:hover,
+.info-details a.play-btn:hover,
+.info-details button.play-btn:hover {
+    font-size: 1rem;
+    font-weight: bold;
 }
 
 .info-title {
@@ -1937,6 +1947,15 @@ a.player-close-btn:hover {
     color: var(--accent);
 }
 
+#aspectBtn,
+#aspectBtn svg,
+#aspectBtn i,
+#aspectBtn.active,
+#aspectBtn.active svg,
+#aspectBtn.active i {
+    color: var(--text) !important;
+}
+
 #rewindBtn,
 #forwardBtn {
     position: relative;
@@ -2094,6 +2113,14 @@ google-cast-launcher {
     width: max-content;
     max-width: 90vw;
     overflow-x: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+
+.dropdown-menu.show.settings-menu-expanded::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
 }
 
 .settings-section {
@@ -2101,16 +2128,26 @@ google-cast-launcher {
     flex-direction: column;
     min-width: 120px;
     max-height: 280px;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
     gap: var(--gap);
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+
+.settings-section::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
 }
 
 .settings-section button {
     max-width: 36ch;
-    overflow-x: scroll;
+    overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
     scrollbar-width: none;
+    flex-shrink: 0;
 }
 
 .settings-section button .res-rate {
@@ -2125,6 +2162,10 @@ google-cast-launcher {
 }
 
 .settings-header {
+    position: sticky;
+    top: 0;
+    background: var(--surface);
+    z-index: 2;
     padding: 5px 10px;
     margin-bottom: 5px;
     color: var(--text-muted);
@@ -2244,6 +2285,90 @@ video::-webkit-media-text-track-display,
     text-align: center;
     padding: 20px;
 }
+
+/* Player Prompt Overlays ("Are You Still Watching?" & Sleep Timer) */
+.player-prompt-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 70;
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--text);
+    pointer-events: auto;
+    text-align: center;
+    padding: 24px;
+}
+
+.player-prompt-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 32px 28px;
+    max-width: 440px;
+    width: 90%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    animation: promptFadeIn 0.25s ease-out;
+}
+
+@keyframes promptFadeIn {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+.player-prompt-icon {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: rgba(229, 9, 20, 0.15);
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.player-prompt-icon i,
+.player-prompt-icon svg {
+    width: 28px;
+    height: 28px;
+}
+
+.player-prompt-title {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.player-prompt-desc {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    line-height: 1.45;
+}
+
+.player-prompt-actions {
+    display: flex;
+    gap: 12px;
+    margin-top: 8px;
+    width: 100%;
+}
+
+.player-prompt-actions .btn {
+    flex: 1;
+    justify-content: center;
+    padding: 10px 16px;
+    font-size: 0.95rem;
+}
+
 
 /* Watch Together Action Toast (e.g. "Talon Paused", "Hannah Resumed") */
 .sync-action-toast {

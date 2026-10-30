@@ -502,7 +502,7 @@ async def async_download_image(client: Any, image_path: Optional[str], prefix: s
 
 def find_local_trailer(file_path: str) -> Optional[str]:
     """
-    Locates a local trailer file for a movie based on standard Plex/Jellyfin/Emby conventions:
+    Locates a local trailer file for a movie based on standard conventions:
     1. Exact movie stem + -trailer / .trailer in the same directory:
        e.g. 'Movie (2020)-trailer.mp4', 'Movie.trailer.mkv'
     2. 'trailer.mp4' / 'trailer.mkv' in the same directory

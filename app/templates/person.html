@@ -11,11 +11,21 @@
             background-color: #000000 !important;
         }
         @media (max-width: 768px) {
-            .person-layout .info-poster {
+            .person-layout img.info-poster {
                 display: block !important;
                 margin: 0 auto 20px auto;
                 max-width: 220px;
                 width: 60%;
+                height: auto;
+            }
+            .person-layout .info-poster.placeholder-poster {
+                display: flex !important;
+                align-items: center;
+                justify-content: center;
+                margin: 0 auto 20px auto;
+                max-width: 220px;
+                width: 60%;
+                height: auto;
             }
         }
     </style>
@@ -80,8 +90,8 @@
                 {% if person.profile_filename %}
                 <img src="/metadata/{{ person.profile_filename }}" class="info-poster" alt="{{ person.name }}" style="object-fit: cover; aspect-ratio: 2 / 3; max-height: 450px;">
                 {% else %}
-                <div class="info-poster placeholder-poster flex align-center justify-center" style="border-radius: var(--radius); background: #181818; aspect-ratio: 2 / 3; height: 420px;">
-                    <i data-lucide="user" style="width: 72px; height: 72px; color: var(--text-muted);"></i>
+                <div class="info-poster placeholder-poster flex align-center justify-center" style="border-radius: var(--radius); background: #181818; aspect-ratio: 2 / 3; max-height: 450px;">
+                    <i data-lucide="user" style="width: 72px; height: 72px; color: var(--text-muted); display: block;"></i>
                 </div>
                 {% endif %}
 

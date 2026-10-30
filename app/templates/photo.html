@@ -95,12 +95,22 @@
         </div>
     </div>
     
-    {% set from_query = ('?from=' + close_url|urlencode) if close_url else '' %}
+    {% set query_items = [] %}
+    {% if effective_sort %}
+        {% set _ = query_items.append('sort=' + effective_sort|urlencode) %}
+    {% endif %}
+    {% if effective_album %}
+        {% set _ = query_items.append('album=' + effective_album|urlencode) %}
+    {% endif %}
+    {% if close_url %}
+        {% set _ = query_items.append('from=' + close_url|urlencode) %}
+    {% endif %}
+    {% set nav_query = ('?' + query_items|join('&')) if query_items else '' %}
     {% if prev_photo_id %}
-    <a href="/photo/{{ prev_photo_id }}{{ from_query }}" class="photo-arrow left-arrow" title="Previous"><i data-lucide="chevron-left"></i></a>
+    <a href="/photo/{{ prev_photo_id }}{{ nav_query }}" class="photo-arrow left-arrow" title="Previous"><i data-lucide="chevron-left"></i></a>
     {% endif %}
     {% if next_photo_id %}
-    <a href="/photo/{{ next_photo_id }}{{ from_query }}" class="photo-arrow right-arrow" title="Next"><i data-lucide="chevron-right"></i></a>
+    <a href="/photo/{{ next_photo_id }}{{ nav_query }}" class="photo-arrow right-arrow" title="Next"><i data-lucide="chevron-right"></i></a>
     {% endif %}
 
     {% if is_video %}

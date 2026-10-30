@@ -105,6 +105,44 @@
     </div>
     {% endif %}
 
+    <!-- "Are You Still Watching?" Prompt Modal -->
+    <div id="stillWatchingModal" class="player-prompt-overlay" style="display: none;">
+        <div class="player-prompt-card">
+            <div class="player-prompt-icon">
+                <i data-lucide="help-circle"></i>
+            </div>
+            <h2 class="player-prompt-title">Are you still watching?</h2>
+            <p class="player-prompt-desc" id="stillWatchingDesc">Playback was paused after consecutive unprompted episodes to save your progress.</p>
+            <div class="player-prompt-actions">
+                <button type="button" class="btn btn-primary" id="stillWatchingResumeBtn" onclick="confirmStillWatching()">
+                    <i data-lucide="play" fill="currentColor"></i> Continue Watching
+                </button>
+                <button type="button" class="btn btn-secondary" onclick="exitPlayer()">
+                    <i data-lucide="x"></i> Exit
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sleep Timer Modal -->
+    <div id="sleepTimerModal" class="player-prompt-overlay" style="display: none;">
+        <div class="player-prompt-card">
+            <div class="player-prompt-icon">
+                <i data-lucide="moon"></i>
+            </div>
+            <h2 class="player-prompt-title">Sleep Timer Activated</h2>
+            <p class="player-prompt-desc">Playback has been paused to save your spot.</p>
+            <div class="player-prompt-actions">
+                <button type="button" class="btn btn-primary" onclick="dismissSleepModal(true)">
+                    <i data-lucide="play" fill="currentColor"></i> Resume Playback
+                </button>
+                <button type="button" class="btn btn-secondary" onclick="exitPlayer()">
+                    <i data-lucide="x"></i> Exit
+                </button>
+            </div>
+        </div>
+    </div>
+
     <div id="playerOverlay" class="player-overlay pointer-events-none"{% if is_trailer and trailer_source == 'youtube' %} style="opacity: 1;"{% endif %}>
         <div class="pointer-events-auto player-header" style="z-index: 25;">
             <div style="flex: 1;">
@@ -289,6 +327,17 @@
                                 <button class="aspect-btn" data-aspect="fill"
                                     onclick="setAspectRatio('fill')">Stretch</button>
                             </div>
+
+                            <!-- Sleep Timer -->
+                            <div class="settings-section" id="sleepTimerSection">
+                                <div class="settings-header">Sleep Timer</div>
+                                <button class="sleep-btn active" data-sleep="off" onclick="setSleepTimer('off')">Off</button>
+                                <button class="sleep-btn" data-sleep="15" onclick="setSleepTimer(15)">15 Minutes</button>
+                                <button class="sleep-btn" data-sleep="30" onclick="setSleepTimer(30)">30 Minutes</button>
+                                <button class="sleep-btn" data-sleep="45" onclick="setSleepTimer(45)">45 Minutes</button>
+                                <button class="sleep-btn" data-sleep="60" onclick="setSleepTimer(60)">60 Minutes</button>
+                                <button class="sleep-btn" data-sleep="episode" onclick="setSleepTimer('episode')">End of Episode</button>
+                            </div>
                         </div>
                     </div>
                     <button class="control-btn" id="fullscreenBtn">
@@ -413,12 +462,20 @@
 
         const savedSubForThisItem = localStorage.getItem('player_sub_track_{{ media_type }}_{{ item.id }}');
         const genericPreferredSub = localStorage.getItem('player_preferred_sub');
-        let activeSubtitleId = savedSubForThisItem || genericPreferredSub || '';
-        const defaultSubLang = ("{{ default_subtitle_lang or 'eng' }}").toLowerCase();
-        if (!activeSubtitleId) {
-            if (defaultSubLang === 'off') {
-                activeSubtitleId = 'off';
+        // Subtitles default to off unless the user previously enabled them at any point on any title
+        const userHasEnabledSubtitles = localStorage.getItem('player_subtitles') === 'true';
+
+        let activeSubtitleId = 'off';
+
+        if (savedSubForThisItem && savedSubForThisItem !== 'off') {
+            activeSubtitleId = savedSubForThisItem;
+        } else if (savedSubForThisItem === 'off') {
+            activeSubtitleId = 'off';
+        } else if (userHasEnabledSubtitles) {
+            if (genericPreferredSub && genericPreferredSub !== 'off') {
+                activeSubtitleId = genericPreferredSub;
             } else {
+                const defaultSubLang = ("{{ default_subtitle_lang or 'eng' }}").toLowerCase();
                 const matchedSub = subtitleTracksData.find(t => {
                     const l = (t.language || '').toLowerCase();
                     const lbl = (t.label || '').toLowerCase();
@@ -433,34 +490,26 @@
                     activeSubtitleId = matchedSub.id;
                 } else if (defaultSubLang === 'eng' && Boolean("{{ subtitle_url }}")) {
                     activeSubtitleId = 'legacy';
+                } else {
+                    const firstText = subtitleTracksData.find(t => t.is_text);
+                    activeSubtitleId = firstText ? firstText.id : (subtitleTracksData.length > 0 ? subtitleTracksData[0].id : 'off');
                 }
             }
+        } else {
+            activeSubtitleId = 'off';
         }
-        let activeBurnSub = null;
 
-        // Default to non-burn-in:
-        // 1. Only enable bitmap burn-in on initial load if the user EXPLICITLY chose it for this specific item.
-        // A generic preference from another title should never trigger burn-in transcode!
-        if (savedSubForThisItem && isBitmapSubtitle(savedSubForThisItem)) {
-            activeBurnSub = savedSubForThisItem;
-            activeSubtitleId = savedSubForThisItem;
-        } else if (activeSubtitleId && isBitmapSubtitle(activeSubtitleId)) {
-            // Revert generic preference to non-burn-in text track or 'off'
-            const defaultTrackEl = video.querySelector('track[default]') || video.querySelector('track[data-track-id]');
-            if (defaultTrackEl && localStorage.getItem('player_subtitles') !== 'false') {
-                activeSubtitleId = defaultTrackEl.getAttribute('data-track-id') || 'off';
+        let activeBurnSub = null;
+        if (activeSubtitleId && activeSubtitleId !== 'off' && isBitmapSubtitle(activeSubtitleId)) {
+            if (savedSubForThisItem === activeSubtitleId) {
+                activeBurnSub = activeSubtitleId;
             } else {
-                activeSubtitleId = 'off';
-            }
-            activeBurnSub = null;
-        } else if (!activeSubtitleId) {
-            const defaultTrackEl = video.querySelector('track[default]') || video.querySelector('track[data-track-id]');
-            if (defaultTrackEl && localStorage.getItem('player_subtitles') !== 'false') {
-                activeSubtitleId = defaultTrackEl.getAttribute('data-track-id') || '';
-            } else {
-                activeSubtitleId = 'off';
+                const firstText = subtitleTracksData.find(t => t.is_text);
+                activeSubtitleId = firstText ? firstText.id : 'off';
+                activeBurnSub = null;
             }
         }
+
         let subtitlesEnabled = (activeSubtitleId && activeSubtitleId !== 'off');
 
         video.volume = savedVolume;
@@ -477,7 +526,6 @@
         document.querySelectorAll('.aspect-btn').forEach(b => b.classList.toggle('active', b.dataset.aspect === savedAspect));
         const initialAspectBtn = document.getElementById('aspectBtn');
         if (initialAspectBtn) {
-            initialAspectBtn.classList.toggle('active', savedAspect !== 'contain');
             const labels = { contain: 'Fit', cover: 'Fill', fill: 'Stretch' };
             initialAspectBtn.title = `Aspect Ratio: ${labels[savedAspect] || savedAspect}`;
         }
@@ -1165,9 +1213,6 @@
             }
         }
         playBtn.addEventListener('click', togglePlay);
-        video.addEventListener('click', () => {
-            showOverlay();
-        });
 
         document.addEventListener('keydown', (e) => {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
@@ -1210,25 +1255,8 @@
             refreshIcons();
         });
 
-        // Playback Ended / Next Episode Auto-play / Exit
-        video.addEventListener('ended', async () => {
-            const actualTime = getActualTime();
+        async function proceedToNextEpisode() {
             const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
-
-            // Safety guard: ONLY treat playback as finished if genuinely near end of media
-            const isNearEnd = effectiveDuration > 0 && (
-                actualTime >= effectiveDuration - 15 || 
-                (actualTime / effectiveDuration) >= 0.92 ||
-                (creditsStart !== null && actualTime >= creditsStart)
-            );
-
-            if (!isNearEnd) {
-                console.warn(`[Heirloom Player] Suppressed premature "ended" event at ${actualTime.toFixed(1)}s of ${effectiveDuration.toFixed(1)}s. Keeping player active.`);
-                video.play().catch(e => console.debug("Resume after premature ended deferred:", e));
-                return;
-            }
-
-            {% if next_episode_id %}
             let progUrl = '/progress/{{ media_type }}/{{ item.id }}';
             {% if token %}
             progUrl += '?token={{ token }}';
@@ -1247,6 +1275,67 @@
             {% if is_mobile %} params.push("mobile=1"); {% endif %}
             if (params.length > 0) nextUrl += "?" + params.join("&");
             window.location.href = nextUrl;
+        }
+
+        function showStillWatchingModal() {
+            const modal = document.getElementById('stillWatchingModal');
+            if (modal) {
+                modal.style.display = 'flex';
+                if (window.lucide) lucide.createIcons();
+            }
+        }
+
+        async function confirmStillWatching() {
+            const modal = document.getElementById('stillWatchingModal');
+            if (modal) modal.style.display = 'none';
+            sessionStorage.setItem('heirloom_consecutive_unprompted', '0');
+            userInteractedThisEpisode = true;
+            await proceedToNextEpisode();
+        }
+
+        // Playback Ended / Next Episode Auto-play / Exit
+        video.addEventListener('ended', async () => {
+            const actualTime = getActualTime();
+            const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
+
+            // Safety guard: ONLY treat playback as finished if genuinely near end of media
+            const isNearEnd = effectiveDuration > 0 && (
+                actualTime >= effectiveDuration - 15 || 
+                (actualTime / effectiveDuration) >= 0.92 ||
+                (creditsStart !== null && actualTime >= creditsStart)
+            );
+
+            if (!isNearEnd) {
+                console.warn(`[Heirloom Player] Suppressed premature "ended" event at ${actualTime.toFixed(1)}s of ${effectiveDuration.toFixed(1)}s. Keeping player active.`);
+                video.play().catch(e => console.debug("Resume after premature ended deferred:", e));
+                return;
+            }
+
+            // Sleep Timer Check: End of Episode
+            if (sleepTimerMode === 'episode') {
+                video.pause();
+                triggerSleepTimer();
+                return;
+            }
+
+            {% if next_episode_id %}
+            // Calculate consecutive unprompted episodes
+            let consecutive = parseInt(sessionStorage.getItem('heirloom_consecutive_unprompted') || '0');
+            if (userInteractedThisEpisode) {
+                consecutive = 0;
+            } else {
+                consecutive += 1;
+            }
+            sessionStorage.setItem('heirloom_consecutive_unprompted', consecutive.toString());
+
+            const maxUnprompted = parseInt("{{ auto_pause_episodes }}");
+            if (maxUnprompted > 0 && consecutive >= maxUnprompted) {
+                video.pause();
+                showStillWatchingModal();
+                return;
+            }
+
+            await proceedToNextEpisode();
             {% else %}
             await finishAndExit();
             {% endif %}
@@ -1389,26 +1478,15 @@
         }
 
         async function skipCredits() {
-            const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
-            if (nextEpisodeId) {
-                let progUrl = '/progress/{{ media_type }}/{{ item.id }}';
-                {% if token %}
-                progUrl += '?token={{ token }}';
-                {% endif %}
-                const formData = new FormData();
-                formData.append('progress', 100.0);
-                formData.append('current_time', effectiveDuration);
-                formData.append('duration', effectiveDuration);
-                try {
-                    await fetch(progUrl, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
-                } catch (e) { }
+            markUserActive();
+            if (sleepTimerMode === 'episode') {
+                video.pause();
+                triggerSleepTimer();
+                return;
+            }
 
-                let nextUrl = "/play/tv/" + nextEpisodeId;
-                let params = [];
-                {% if token %} params.push("token={{ token }}"); {% endif %}
-                {% if is_mobile %} params.push("mobile=1"); {% endif %}
-                if (params.length > 0) nextUrl += "?" + params.join("&");
-                window.location.href = nextUrl;
+            if (nextEpisodeId) {
+                await proceedToNextEpisode();
             } else {
                 await finishAndExit();
             }
@@ -1549,8 +1627,8 @@
             if (!video.textTracks || video.textTracks.length === 0) return;
             const trackEls = video.querySelectorAll('track');
             
-            // If burn-in is active, hide all text tracks so nothing duplicates
-            if (activeBurnSub) {
+            // If burn-in is active or subtitles are disabled, hide all text tracks so nothing displays
+            if (activeBurnSub || !subtitlesEnabled || activeSubtitleId === 'off') {
                 for (let i = 0; i < video.textTracks.length; i++) {
                     video.textTracks[i].mode = 'hidden';
                 }
@@ -1825,11 +1903,7 @@
             event.stopPropagation();
             document.getElementById('settingsMenu').classList.toggle('show');
         }
-        document.addEventListener('click', (e) => {
-            if (!e.target.closest('.settings-container')) {
-                document.getElementById('settingsMenu').classList.remove('show');
-            }
-        });
+
 
         // Cast / AirPlay Initialization & Device Detection
         window['__onGCastApiAvailable'] = function(isAvailable) {
@@ -2283,23 +2357,143 @@
             });
         }
 
-        // Overlay fade logic
+        // User activity tracking for "Are You Still Watching?"
+        let userInteractedThisEpisode = false;
+        function markUserActive() {
+            userInteractedThisEpisode = true;
+            sessionStorage.setItem('heirloom_consecutive_unprompted', '0');
+        }
+
+        // Sleep Timer Implementation
+        let sleepTimerMode = 'off';
+        let sleepTimerEndMs = null;
+        let sleepTimerInterval = null;
+
+        function setSleepTimer(mode) {
+            markUserActive();
+            sleepTimerMode = mode;
+            document.querySelectorAll('.sleep-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.sleep === String(mode));
+            });
+
+            if (sleepTimerInterval) {
+                clearInterval(sleepTimerInterval);
+                sleepTimerInterval = null;
+            }
+
+            if (mode === 'off' || mode === 'episode') {
+                sleepTimerEndMs = null;
+                return;
+            }
+
+            const minutes = parseInt(mode);
+            sleepTimerEndMs = Date.now() + (minutes * 60 * 1000);
+
+            const updateTimer = () => {
+                const remainingMs = sleepTimerEndMs - Date.now();
+                if (remainingMs <= 0) {
+                    clearInterval(sleepTimerInterval);
+                    sleepTimerInterval = null;
+                    triggerSleepTimer();
+                }
+            };
+
+            updateTimer();
+            sleepTimerInterval = setInterval(updateTimer, 1000);
+        }
+
+        function triggerSleepTimer() {
+            video.pause();
+            const sleepModal = document.getElementById('sleepTimerModal');
+            if (sleepModal) {
+                sleepModal.style.display = 'flex';
+                if (window.lucide) lucide.createIcons();
+            }
+            setSleepTimer('off');
+        }
+
+        function dismissSleepModal(resumePlayback = false) {
+            const sleepModal = document.getElementById('sleepTimerModal');
+            if (sleepModal) sleepModal.style.display = 'none';
+            if (resumePlayback) {
+                markUserActive();
+                video.play().catch(() => {});
+            }
+        }
+
+        // Overlay fade & toggle logic
         const overlay = document.getElementById('playerOverlay');
         let hideTimeout;
+        let lastMouseX = -1;
+        let lastMouseY = -1;
+        let suppressMouseMoveUntil = 0;
+
+        function isOverlayVisible() {
+            if (!overlay) return false;
+            return overlay.style.opacity !== '0' && !overlay.classList.contains('overlay-hidden');
+        }
+
         function showOverlay() {
+            if (!overlay) return;
             overlay.style.opacity = '1';
             overlay.classList.remove('overlay-hidden');
             document.body.style.cursor = 'default';
             clearTimeout(hideTimeout);
             hideTimeout = setTimeout(() => {
                 if (!video.paused) {
-                    overlay.style.opacity = '0';
-                    overlay.classList.add('overlay-hidden');
-                    document.body.style.cursor = 'none';
+                    hideOverlay();
                 }
             }, 3000);
         }
-        document.addEventListener('mousemove', showOverlay);
+
+        function hideOverlay() {
+            if (!overlay) return;
+            clearTimeout(hideTimeout);
+            overlay.style.opacity = '0';
+            overlay.classList.add('overlay-hidden');
+            document.body.style.cursor = 'none';
+            const settingsMenu = document.getElementById('settingsMenu');
+            if (settingsMenu) settingsMenu.classList.remove('show');
+        }
+
+        function toggleOverlay(e) {
+            // Dismiss settings menu if open and user clicked outside settings
+            const settingsMenu = document.getElementById('settingsMenu');
+            if (settingsMenu && settingsMenu.classList.contains('show')) {
+                if (!e.target.closest('.settings-container')) {
+                    settingsMenu.classList.remove('show');
+                    return;
+                }
+            }
+
+            // Ignore clicks on interactive controls, buttons, sliders, links, menus, and overlays
+            if (e && e.target) {
+                if (e.target.closest('button, a, input, select, textarea, .progress-container, #progressContainer, .dropdown-menu, .settings-container, .skip-marker-btn, google-cast-launcher, #sessionEndedOverlay, #inboxMenu, #profileDropdownMenu, .player-prompt-overlay, .player-prompt-card')) {
+                    markUserActive();
+                    return;
+                }
+            }
+
+            // Suppress mousemove triggers momentarily so the click doesn't get immediately undone by mouse jitter
+            suppressMouseMoveUntil = Date.now() + 400;
+
+            if (isOverlayVisible()) {
+                hideOverlay();
+            } else {
+                showOverlay();
+            }
+        }
+
+        document.addEventListener('mousemove', (e) => {
+            if (Date.now() < suppressMouseMoveUntil) return;
+            if (lastMouseX === -1 || Math.abs(e.clientX - lastMouseX) > 2 || Math.abs(e.clientY - lastMouseY) > 2) {
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+                showOverlay();
+            }
+        });
+
+        document.addEventListener('click', toggleOverlay);
         video.addEventListener('pause', showOverlay);
         showOverlay();
 
