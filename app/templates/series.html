@@ -99,14 +99,14 @@
                         </div>
 
                         <!-- Row 3: Current Season and Episode -->
-                        {% if selected_ep_dict %}
-                        <div class="info-episode-indicator mb-15" style="color: var(--text-secondary); font-size: 1.2em; font-weight: normal;">
-                            {% if selected_ep_dict.episode_name %}{{ selected_ep_dict.episode_name }} &bull; {% endif %}S{{ "%02d"|format(selected_ep_dict.season) }}E{{ "%02d"|format(series.episode or 1) }}
+                        <div class="info-episode-indicator mb-15" id="heroEpisodeIndicator" style="color: var(--text-secondary); font-size: 1.2em; font-weight: normal; {% if not selected_ep_dict %}display: none;{% endif %}">
+                            {% if selected_ep_dict %}
+                            {% if selected_ep_dict.episode_name %}{{ selected_ep_dict.episode_name }} &bull; {% endif %}S{{ "%02d"|format(selected_ep_dict.season) }}E{{ "%02d"|format(series.episode or selected_ep_dict.episode or 1) }}
+                            {% endif %}
                         </div>
-                        {% endif %}
 
                         <!-- Row 4: Description -->
-                        <div class="info-plot mb-15">{{ series.plot or "No description available." }}</div>
+                        <div class="info-plot mb-15" id="heroPlot">{{ (selected_ep_dict.plot if selected_ep_dict and selected_ep_dict.plot else series.plot) or "No description available." }}</div>
                         
                         {% if series.director %}
                         <div class="metadata-block mb-15">
@@ -119,17 +119,15 @@
                         {% endif %}
                         
                         <div class="info-controls">
-                            <a href="{{ resume_link }}" class="play-btn m-0">
+                            <a href="{{ resume_link }}" class="play-btn play-main-btn m-0" id="heroPlayBtn">
                                 <i data-lucide="play" fill="currentColor"></i>
-                                {% if has_progress %}Resume{% else %}Play{% endif %}
+                                <span id="heroPlayBtnText">{% if has_progress %}Resume{% else %}Play{% endif %}</span>
                             </a>
                             
-                            {% if has_progress %}
-                            <a href="{{ resume_link }}{% if '?' in resume_link %}&{% else %}?{% endif %}restart=1" class="play-btn m-0 restart-btn" title="Restart episode from beginning">
+                            <a href="{{ resume_link }}{% if '?' in resume_link %}&{% else %}?{% endif %}restart=1" class="play-btn m-0 restart-btn" id="heroRestartBtn" title="Restart episode from beginning" style="{% if not has_progress %}display: none;{% endif %}">
                                 <i data-lucide="rotate-ccw"></i>
-                                Restart
+                                <span>Restart</span>
                             </a>
-                            {% endif %}
                             
                             <div class="info-actions">
                                 {% if is_series_watched %}
@@ -225,18 +223,16 @@
                         <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
                         <div class="carousel-row" id="episodesGrid">
                             {% for ep in episodes %}
-                            <div class="media-card episode-card {% if selected_ep_id == ep.id %}selected-episode{% endif %}" data-season="{{ ep.season }}">
-                                <div class="poster-container">
-                                    <a href="/series/{{ title | urlencode }}?ep={{ ep.id }}">
-                                        {% if ep.season_poster_filename %}
-                                        <img src="/metadata/{{ ep.season_poster_filename }}" class="poster">
-                                        {% elif ep.poster_filename %}
-                                        <img src="/metadata/{{ ep.poster_filename }}" class="poster">
+                            <div class="media-card episode-card {% if selected_ep_id == ep.id %}selected-episode{% endif %}" data-season="{{ ep.season }}" data-episode-id="{{ ep.id }}" onclick="selectEpisode({{ ep.id }})">
+                                <div class="poster-container episode-poster-container">
+                                    <a href="javascript:void(0)" onclick="selectEpisode({{ ep.id }}); return false;">
+                                        {% if ep.thumbnail_filename %}
+                                        <img src="/metadata/{{ ep.thumbnail_filename }}" class="poster episode-thumbnail" loading="lazy" alt="Episode thumbnail">
                                         {% else %}
-                                        <div class="poster-placeholder"></div>
+                                        <img src="/thumbnail/tv/{{ ep.id }}" class="poster episode-thumbnail" loading="lazy" alt="Episode thumbnail">
                                         {% endif %}
                                     </a>
-                                    <a href="/play/tv/{{ ep.id }}" class="icon-btn hover-play">
+                                    <a href="/play/tv/{{ ep.id }}" class="icon-btn hover-play" onclick="event.stopPropagation()">
                                         <i data-lucide="play" fill="currentColor"></i>
                                     </a>
                                     <button class="icon-btn three-dots-btn" onclick="toggleMenu(event, 'menu-ep-{{ ep.id }}')">
@@ -245,7 +241,7 @@
                                     {% if ep.is_watched %}
                                     <div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>
                                     {% endif %}
-                                    <div class="dropdown-menu" id="menu-ep-{{ ep.id }}">
+                                    <div class="dropdown-menu" id="menu-ep-{{ ep.id }}" onclick="event.stopPropagation()">
                                         {% if ep.is_watched %}
                                         <form action="/history/mark_unwatched/tv/{{ ep.id }}?scope=episode" method="post">
                                             <button type="submit">Mark as Unwatched</button>
@@ -269,7 +265,7 @@
                                     </div>
                                 </div>
                                 <div class="media-year" title="{{ ep.season_episode }}">
-                                    <a href="/series/{{ title | urlencode }}?ep={{ ep.id }}">
+                                    <a href="javascript:void(0)" onclick="selectEpisode({{ ep.id }}); return false;">
                                         {% for part in ep.season_episode.replace('<br>', ' • ').split(' • ') %}
                                         <span class="media-year-line">{% if 'Season ' in part and ' Episode ' in part %}Episode {{ part.split(' Episode ')[1] }}{% else %}{{ part }}{% endif %}</span>
                                         {% endfor %}
@@ -348,6 +344,85 @@
 
         <script>
             let currentSeason = -1;
+            let currentSelectedEpId = {{ selected_ep_id }};
+            const episodesData = {{ episodes | tojson }};
+            const defaultSeriesPlot = {{ (series.plot or "") | tojson }};
+
+            function selectEpisode(epId) {
+                const ep = episodesData.find(e => e.id === epId);
+                if (!ep) return;
+
+                currentSelectedEpId = ep.id;
+
+                // 1. Update Episode indicator
+                const indicatorEl = document.getElementById('heroEpisodeIndicator');
+                if (indicatorEl) {
+                    let text = '';
+                    if (ep.episode_name) {
+                        text += ep.episode_name + ' • ';
+                    }
+                    const s = String(ep.season).padStart(2, '0');
+                    const e = String(ep.episode || 1).padStart(2, '0');
+                    text += 'S' + s + 'E' + e;
+                    indicatorEl.textContent = text;
+                    indicatorEl.style.display = 'block';
+                }
+
+                // 2. Update Plot description
+                const plotEl = document.getElementById('heroPlot');
+                if (plotEl) {
+                    plotEl.textContent = ep.plot || defaultSeriesPlot || 'No description available.';
+                }
+
+                // 3. Update Play / Resume Button
+                const playBtn = document.getElementById('heroPlayBtn');
+                const playBtnText = document.getElementById('heroPlayBtnText');
+                const restartBtn = document.getElementById('heroRestartBtn');
+
+                if (playBtn) {
+                    playBtn.href = ep.play_url || `/play/tv/${ep.id}`;
+                }
+                if (playBtnText) {
+                    playBtnText.textContent = ep.has_progress ? 'Resume' : 'Play';
+                }
+                if (restartBtn) {
+                    restartBtn.href = (ep.play_url || `/play/tv/${ep.id}`) + '?restart=1';
+                    restartBtn.style.display = ep.has_progress ? 'inline-flex' : 'none';
+                }
+
+                // 4. Update Download Menu Episode button
+                const downloadEpBtn = document.getElementById('downloadEpisodeBtn');
+                if (downloadEpBtn) {
+                    const epNum = ep.episode || 1;
+                    downloadEpBtn.textContent = ep.season === 0 ? `Download Specials Episode ${epNum}` : `Download Season ${ep.season} Episode ${epNum}`;
+                }
+
+                // 5. Update Watch Together button
+                const wtBtn = document.querySelector('.watch-together-btn');
+                if (wtBtn) {
+                    wtBtn.setAttribute('onclick', `openWatchTogether('tv', ${ep.id})`);
+                }
+
+                // 6. Update Fix Match button (if admin)
+                const fixMatchBtn = document.querySelector('.info-actions .fix-match-btn');
+                if (fixMatchBtn) {
+                    fixMatchBtn.setAttribute('data-item-id', ep.id);
+                }
+
+                // 7. Update active highlight in carousel
+                document.querySelectorAll('.episode-card').forEach(card => {
+                    card.classList.remove('selected-episode');
+                });
+                const activeCard = document.querySelector(`.episode-card[data-episode-id="${ep.id}"]`);
+                if (activeCard) {
+                    activeCard.classList.add('selected-episode');
+                }
+
+                // 8. Update browser URL history without reload
+                const url = new URL(window.location.href);
+                url.searchParams.set('ep', ep.id);
+                history.replaceState({ epId: ep.id }, '', url.toString());
+            }
 
             function selectSeason(season) {
                 currentSeason = season;
@@ -450,6 +525,16 @@
             }
 
             window.addEventListener('resize', updateCarouselArrows);
+            window.addEventListener('popstate', () => {
+                const urlParams = new URLSearchParams(window.location.search);
+                const epParam = urlParams.get('ep');
+                if (epParam) {
+                    const epId = parseInt(epParam);
+                    if (!isNaN(epId)) {
+                        selectEpisode(epId);
+                    }
+                }
+            });
             document.addEventListener('DOMContentLoaded', () => {
                 updateCarouselArrows();
                 document.querySelectorAll('.carousel-row').forEach(row => {
@@ -523,7 +608,7 @@
 
             function downloadThisEpisode() {
                 document.querySelectorAll('.dropdown-menu.show').forEach(menu => menu.classList.remove('show'));
-                window.location.href = '/download/tv/{{ series.id }}';
+                window.location.href = `/download/tv/${currentSelectedEpId}`;
             }
 
             function downloadThisSeason() {

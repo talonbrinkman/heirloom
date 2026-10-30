@@ -16,6 +16,8 @@ class User(SQLModel, table=True):
     watch_together_access: bool = Field(default=False)
     kids_mode: bool = Field(default=False)
     rewind_seconds: int = Field(default=0)
+    default_audio_lang: str = Field(default="eng")
+    default_subtitle_lang: str = Field(default="eng")
     can_manage_profiles: bool = Field(default=True)
     session_token: Optional[str] = Field(default=None, index=True)
 
@@ -31,6 +33,8 @@ class Profile(SQLModel, table=True):
     pin: Optional[str] = Field(default=None)
     pin_hash: Optional[str] = Field(default=None)
     rewind_seconds: int = Field(default=0)
+    default_audio_lang: Optional[str] = Field(default="eng")
+    default_subtitle_lang: Optional[str] = Field(default="eng")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class Movie(SQLModel, table=True):
@@ -82,6 +86,7 @@ class TVShow(SQLModel, table=True):
     credits_end: Optional[float] = None
     collection_name: Optional[str] = None
     logo_filename: Optional[str] = None
+    thumbnail_filename: Optional[str] = None
 
 class Photo(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

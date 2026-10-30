@@ -289,6 +289,35 @@ def create_db_and_tables():
         except Exception:
             session.rollback()
 
+        # Default language migrations
+        try:
+            session.exec(text("ALTER TABLE user ADD COLUMN default_audio_lang VARCHAR DEFAULT 'eng'"))
+            session.exec(text("UPDATE user SET default_audio_lang = 'eng' WHERE default_audio_lang IS NULL"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
+            session.exec(text("ALTER TABLE user ADD COLUMN default_subtitle_lang VARCHAR DEFAULT 'eng'"))
+            session.exec(text("UPDATE user SET default_subtitle_lang = 'eng' WHERE default_subtitle_lang IS NULL"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
+            session.exec(text("ALTER TABLE profile ADD COLUMN default_audio_lang VARCHAR DEFAULT 'eng'"))
+            session.exec(text("UPDATE profile SET default_audio_lang = 'eng' WHERE default_audio_lang IS NULL"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
+            session.exec(text("ALTER TABLE profile ADD COLUMN default_subtitle_lang VARCHAR DEFAULT 'eng'"))
+            session.exec(text("UPDATE profile SET default_subtitle_lang = 'eng' WHERE default_subtitle_lang IS NULL"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
         # InviteCode permissions migration
         for col, dt, default in [
             ("movies_access", "BOOLEAN", 0),

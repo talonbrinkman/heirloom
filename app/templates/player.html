@@ -141,7 +141,10 @@
 
             <div class="progress-container" id="progressContainer">
                 <div class="progress-bar-fill" id="progressBarFill"></div>
-                <div class="progress-hover-time" id="progressHoverTime">0:00</div>
+                <div class="progress-hover-tooltip" id="progressHoverTooltip">
+                    <div class="trickplay-thumb" id="trickplayThumb" style="display: none;"></div>
+                    <div class="trickplay-time" id="progressHoverTime">0:00</div>
+                </div>
             </div>
 
             <div class="controls-row">
@@ -326,7 +329,46 @@
         const playBtn = document.getElementById('playPauseBtn');
         const progressContainer = document.getElementById('progressContainer');
         const progressBarFill = document.getElementById('progressBarFill');
+        const progressHoverTooltip = document.getElementById('progressHoverTooltip');
         const progressHoverTime = document.getElementById('progressHoverTime');
+        const trickplayThumb = document.getElementById('trickplayThumb');
+
+        let trickplayData = null;
+        let trickplayReady = false;
+        let trickplayLastCheck = 0;
+        const preloadedSheets = new Set();
+
+        {% if not is_trailer %}
+        async function checkTrickplayStatus(retries = 100) {
+            trickplayLastCheck = Date.now();
+            try {
+                const tokenParam = '{{ token }}' ? '?token={{ token }}' : '';
+                const res = await fetch(`/trickplay/{{ media_type }}/{{ item.id }}/manifest.json${tokenParam}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data && data.status === 'ready') {
+                        trickplayData = data;
+                        trickplayReady = true;
+                        if (trickplayThumb) {
+                            trickplayThumb.style.display = 'block';
+                        }
+                        if (data.sheets && data.sheets.length > 0) {
+                            const firstSheetUrl = `/trickplay/{{ media_type }}/{{ item.id }}/${data.sheets[0]}${tokenParam}`;
+                            const img = new Image();
+                            img.src = firstSheetUrl;
+                            preloadedSheets.add(0);
+                        }
+                        return;
+                    } else if (data && data.status === 'generating' && retries > 0) {
+                        setTimeout(() => checkTrickplayStatus(retries - 1), 3000);
+                    }
+                }
+            } catch (e) {
+                console.warn('[Trickplay] Error querying manifest:', e);
+            }
+        }
+        checkTrickplayStatus();
+        {% endif %}
         const timeDisplay = document.getElementById('timeDisplay');
         const fullscreenBtn = document.getElementById('fullscreenBtn');
         const volumeSlider = document.getElementById('volumeSlider');
@@ -338,7 +380,25 @@
         let offsetStart = 0;
 
         let currentRes = localStorage.getItem('player_res') || 'auto';
-        let currentAudioTrack = parseInt(localStorage.getItem('player_audio_{{ media_type }}_{{ item.id }}') || '0', 10);
+        const defaultAudioLang = ("{{ default_audio_lang or 'eng' }}").toLowerCase();
+        const savedAudioTrack = localStorage.getItem('player_audio_{{ media_type }}_{{ item.id }}');
+        let currentAudioTrack = 0;
+        if (savedAudioTrack !== null) {
+            currentAudioTrack = parseInt(savedAudioTrack, 10);
+        } else {
+            const audioTracksData = {{ audio_tracks | tojson | safe }} || [];
+            if (audioTracksData.length > 0) {
+                const matchedAudio = audioTracksData.find(t => {
+                    const l = (t.language || '').toLowerCase();
+                    const lbl = (t.label || '').toLowerCase();
+                    if (defaultAudioLang === 'eng') return l === 'eng' || l === 'en' || lbl.includes('english');
+                    return l === defaultAudioLang || lbl.includes(defaultAudioLang);
+                });
+                if (matchedAudio) {
+                    currentAudioTrack = matchedAudio.index;
+                }
+            }
+        }
         let savedSpeed = parseFloat(localStorage.getItem('player_speed')) || 1;
         let savedAspect = localStorage.getItem('player_aspect') || 'contain';
         let savedVolume = localStorage.getItem('player_volume');
@@ -354,6 +414,28 @@
         const savedSubForThisItem = localStorage.getItem('player_sub_track_{{ media_type }}_{{ item.id }}');
         const genericPreferredSub = localStorage.getItem('player_preferred_sub');
         let activeSubtitleId = savedSubForThisItem || genericPreferredSub || '';
+        const defaultSubLang = ("{{ default_subtitle_lang or 'eng' }}").toLowerCase();
+        if (!activeSubtitleId) {
+            if (defaultSubLang === 'off') {
+                activeSubtitleId = 'off';
+            } else {
+                const matchedSub = subtitleTracksData.find(t => {
+                    const l = (t.language || '').toLowerCase();
+                    const lbl = (t.label || '').toLowerCase();
+                    const isMatch = (defaultSubLang === 'eng') ? (l === 'eng' || l === 'en' || lbl.includes('english')) : (l === defaultSubLang || lbl.includes(defaultSubLang));
+                    return isMatch && t.is_text && !t.is_forced;
+                }) || subtitleTracksData.find(t => {
+                    const l = (t.language || '').toLowerCase();
+                    const lbl = (t.label || '').toLowerCase();
+                    return (defaultSubLang === 'eng') ? (l === 'eng' || l === 'en' || lbl.includes('english')) : (l === defaultSubLang || lbl.includes(defaultSubLang));
+                });
+                if (matchedSub) {
+                    activeSubtitleId = matchedSub.id;
+                } else if (defaultSubLang === 'eng' && Boolean("{{ subtitle_url }}")) {
+                    activeSubtitleId = 'legacy';
+                }
+            }
+        }
         let activeBurnSub = null;
 
         // Default to non-burn-in:
@@ -399,6 +481,7 @@
             const labels = { contain: 'Fit', cover: 'Fill', fill: 'Stretch' };
             initialAspectBtn.title = `Aspect Ratio: ${labels[savedAspect] || savedAspect}`;
         }
+        updateSubtitleUI();
 
 
         {% if sync_session_id and not is_sync_host %}
@@ -475,10 +558,12 @@
             resolution: currentRes,
             container: null,
             streamBitrate: null,
+            smartAudio: null,
             bufferAheadSec: 0,
             droppedFrames: 0,
             totalFrames: 0
         };
+        let lastSmartAudioSignature = null;
 
         async function probeBandwidth(bytes = 1048576) {
             const bw = playerStats.bandwidth;
@@ -595,7 +680,16 @@
             } else if (currentHdrToneMap === 'off') {
                 tonemapParam = '&tonemap=0';
             }
-            let infoUrl = `/stream-info/{{ media_type }}/{{ item.id }}?res=${encodeURIComponent(currentRes)}&start=${offsetStart}&audio_track=${currentAudioTrack}${tonemapParam}&_t=${Date.now()}`;
+            let effectiveRes = currentRes;
+            if (currentRes === 'auto' && isHlsActive && hlsInstance && hlsInstance.levels && hlsInstance.currentLevel >= 0) {
+                const activeLvl = hlsInstance.levels[hlsInstance.currentLevel];
+                if (activeLvl) {
+                    effectiveRes = (activeLvl.name && activeLvl.name.toLowerCase() === 'original') ? 'original' : String(activeLvl.height || 'original');
+                }
+            } else if (currentRes === 'auto') {
+                effectiveRes = 'original';
+            }
+            let infoUrl = `/stream-info/{{ media_type }}/{{ item.id }}?res=${encodeURIComponent(effectiveRes)}&start=${offsetStart}&audio_track=${currentAudioTrack}${tonemapParam}&_t=${Date.now()}`;
             if (activeBurnSub) {
                 infoUrl += `&burn_sub=${encodeURIComponent(activeBurnSub)}`;
             }
@@ -617,7 +711,7 @@
                     const sum = playerStats.latencyHistory.reduce((a, b) => a + b, 0);
                     playerStats.latencyAvgMs = Math.round(sum / playerStats.latencyHistory.length);
 
-                    // Transcoding info
+                    // Transcoding & Smart Audio Codec Direct Streaming info
                     playerStats.isTranscoding = data.is_transcoding;
                     playerStats.transcodeMethod = data.transcode_method;
                     playerStats.isHdr = data.is_hdr;
@@ -633,6 +727,32 @@
                     playerStats.audioCodec = data.audio_codec;
                     playerStats.audioChannels = data.audio_channels;
                     playerStats.audioTrackName = data.selected_audio_track ? data.selected_audio_track.label : `Track #${data.audio_track + 1}`;
+                    playerStats.smartAudio = data.smart_audio || null;
+
+                    if (data.smart_audio) {
+                        const sa = data.smart_audio;
+                        const sig = `${sa.active}|${sa.state}|${sa.source_spec}|${sa.target_spec}|${data.audio_track}|${data.resolution}`;
+                        if (sig !== lastSmartAudioSignature) {
+                            lastSmartAudioSignature = sig;
+                            const badgeStyle = sa.active
+                                ? 'background: #00e676; color: #000; font-weight: bold; padding: 2px 6px; border-radius: 3px;'
+                                : 'background: #37474f; color: #eceff1; font-weight: bold; padding: 2px 6px; border-radius: 3px;';
+                            console.log(
+                                `%c[Smart Audio Direct Stream]%c %c${sa.state}%c\n` +
+                                ` , Active:        ${sa.active ? 'YES (Video Bitstream Copy + Real-Time Audio Transcode)' : 'NO (' + sa.state + ')'}\n` +
+                                ` , Reason:        ${sa.reason}\n` +
+                                ` , Video Stream:  ${sa.video_mode}\n` +
+                                ` , Source Audio:  ${sa.source_spec}\n` +
+                                ` , Output Audio:  ${sa.target_spec}\n` +
+                                ` , Downmixing:    ${sa.downmixed ? 'YES (' + (sa.source_channel_layout || sa.source_channels + 'ch') + ' -> Stereo 2.0)' : 'No'}\n` +
+                                ` , FFmpeg Flags:  ${sa.ffmpeg_flags}`,
+                                'color: #e50914; font-weight: bold;',
+                                '',
+                                badgeStyle,
+                                'color: inherit;'
+                            );
+                        }
+                    }
 
                     // Check if server snapped to keyframe for stream copy (legacy piped mode only)
                     if (!isHlsActive && typeof data.actual_start === 'number' && !isNaN(data.actual_start)) {
@@ -717,8 +837,15 @@
                 ? (bw.headroomRatio >= 2.0 ? 'Plentiful headroom' : (bw.headroomRatio >= 1.0 ? 'Sufficient' : 'Low / Buffering risk'))
                 : '--';
 
+            const sa = playerStats.smartAudio;
+            const saActive = Boolean(sa && sa.active);
+            const saShort = saActive
+                ? `ACTIVE (${sa.source_spec_short} -> ${sa.target_spec_short})`
+                : (sa ? (sa.audio_mode === 'copy (-c:a copy)' ? 'COPY (-c:a copy)' : (sa.audio_mode === 'direct_play' ? 'DIRECT PLAY' : 'INACTIVE')) : '--');
+            const saColor = saActive ? '#00e676' : (sa && (sa.audio_mode === 'copy (-c:a copy)' || sa.audio_mode === 'direct_play') ? '#29b6f6' : '#888888');
+
             console.groupCollapsed(
-                `%c[Heirloom Player]%c Bandwidth: %c${bwCurrent !== null ? bwCurrent + ' Mbps' : 'probing...'}%c (Peak: %c${bwMax !== null ? bwMax + ' Mbps' : '--'}%c) | Latency: %c${lat !== null ? lat + 'ms' : '--'}%c | Transcode: %c${isTranscoding ? 'YES' : 'NO'}%c | HW: %c${isHW ? 'YES' : (isTranscoding ? 'NO' : 'N/A')}%c`,
+                `%c[Heirloom Player]%c Bandwidth: %c${bwCurrent !== null ? bwCurrent + ' Mbps' : 'probing...'}%c (Peak: %c${bwMax !== null ? bwMax + ' Mbps' : '--'}%c) | Latency: %c${lat !== null ? lat + 'ms' : '--'}%c | Transcode: %c${isTranscoding ? 'YES' : 'NO'}%c | Smart Audio: %c${saShort}%c | HW: %c${isHW ? 'YES' : (isTranscoding ? 'NO' : 'N/A')}%c`,
                 'color: #e50914; font-weight: bold;',
                 'color: #aaa;',
                 `color: ${bwColor}; font-weight: bold;`,
@@ -728,6 +855,8 @@
                 `color: ${latColor}; font-weight: bold;`,
                 'color: #aaa;',
                 `color: ${transcodeColor}; font-weight: bold;`,
+                'color: #aaa;',
+                `color: ${saColor}; font-weight: bold;`,
                 'color: #aaa;',
                 `color: ${hwColor}; font-weight: bold;`,
                 'color: #aaa;'
@@ -742,6 +871,10 @@
                 `%c  Network Latency:       %c${lat !== null ? lat + ' ms' : 'measuring...'} (avg: ${avgLat !== null ? avgLat + ' ms' : '--'})\n` +
                 `%c  Transcoding Active:    %c${isTranscoding ? 'Yes' : 'No (' + (playerStats.playType || 'Direct Play') + ')'}\n` +
                 `%c  Transcode Method:      %c${playerStats.transcodeMethod || 'Direct Play'}\n` +
+                `%c  Smart Audio Stream:    %c${sa ? (sa.active ? 'ACTIVE - Video Copy (-c:v copy) + Dynamic Audio Transcode' : sa.state) : '--'}\n` +
+                `%c  Smart Audio Reason:    %c${sa ? sa.reason : '--'}\n` +
+                `%c  Audio Stream Specs:    %c${sa ? (sa.source_spec + '  ->  ' + sa.target_spec) : (playerStats.audioTrackName || '--')}\n` +
+                `%c  Audio FFmpeg Pipeline: %c${sa ? sa.ffmpeg_flags : '--'}\n` +
                 `%c  Hardware Acceleration: %c${isHW ? 'YES (' + playerStats.encoder + ')' : (isTranscoding ? 'NO (CPU libx264)' : 'None (Direct Play / Stream Copy)')}\n` +
                 `%c  Encoder Profile:       %c${playerStats.encoder || 'none'}\n` +
                 `%c  Selected Resolution:   %c${playerStats.resolution || currentRes}\n` +
@@ -755,6 +888,10 @@
                 'font-weight: bold; color: #42a5f5;', 'color: inherit;',
                 'font-weight: bold; color: #ab47bc;', 'color: inherit;',
                 'font-weight: bold; color: #26a69a;', 'color: inherit;',
+                'font-weight: bold; color: #00e5ff;', 'color: inherit;',
+                'font-weight: bold; color: #80deea;', 'color: inherit;',
+                'font-weight: bold; color: #4dd0e1;', 'color: inherit;',
+                'font-weight: bold; color: #26c6da;', 'color: inherit;',
                 'font-weight: bold; color: #ff7043;', 'color: inherit;',
                 'font-weight: bold; color: #90a4ae;', 'color: inherit;',
                 'font-weight: bold; color: #29b6f6;', 'color: inherit;',
@@ -766,6 +903,7 @@
         }
 
         window.getPlayerStats = () => playerStats;
+        window.getSmartAudioStats = () => playerStats.smartAudio;
         window.logPlayerStats = logPlayerStats;
         window.testBandwidth = (bytes) => probeBandwidth(bytes).then(() => logPlayerStats());
 
@@ -937,14 +1075,11 @@
                         console.log(`%c[Heirloom HLS] ABR switched: ${level.name || level.height + 'p'} (${(level.bitrate / 1000000).toFixed(2)} Mbps, ${level.width}x${level.height})`, 'color: #10b981; font-weight: bold;');
                         playerStats.resolution = level.name || `${level.height}p`;
                         playerStats.streamBitrate = level.bitrate;
-                        playerStats.isTranscoding = (level.name !== 'Original');
-                        playerStats.transcodeMethod = level.name === 'Original' ? 'Direct Stream / Remux (Stream Copy)' : `HLS ABR (${level.name || level.height + 'p'})`;
-                        
                         const autoRate = document.getElementById('autoResRate');
                         if (autoRate && currentRes === 'auto') {
                             autoRate.textContent = `(${level.name || level.height + 'p'})`;
                         }
-                        logPlayerStats();
+                        updatePlaybackStats();
                     }
                 });
 
@@ -1152,7 +1287,7 @@
                 formData.append('progress', currentProgress);
                 formData.append('current_time', actualTime);
                 formData.append('duration', effectiveDuration);
-                const playType = (typeof playerStats !== 'undefined' && playerStats.isTranscoding) ? 'Transcoding' : 'Direct Play';
+                const playType = (typeof playerStats !== 'undefined' && playerStats.isTranscoding) ? 'Transcoding' : ((playerStats && playerStats.smartAudio && playerStats.smartAudio.active) ? 'Smart Audio Direct Stream' : 'Direct Play');
                 formData.append('play_type', playType);
                 let progUrl = '/progress/{{ media_type }}/{{ item.id }}';
                 {% if token %}
@@ -1288,17 +1423,84 @@
             checkMarkers(actualTime);
         });
 
-        // Seeking
-        progressContainer.addEventListener('mousemove', (e) => {
+        // Seeking & Trickplay Scrubbing
+        function handleScrubMove(clientX) {
             const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
             if (effectiveDuration <= 0) return;
 
             const rect = progressContainer.getBoundingClientRect();
-            const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-
+            const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
             const hoverTime = pct * effectiveDuration;
-            progressHoverTime.textContent = formatTime(hoverTime);
-            progressHoverTime.style.left = `${pct * 100}%`;
+
+            if (progressHoverTime) {
+                progressHoverTime.textContent = formatTime(hoverTime);
+            }
+
+            if (!trickplayReady && (Date.now() - trickplayLastCheck > 4000)) {
+                {% if not is_trailer %}
+                checkTrickplayStatus(1);
+                {% endif %}
+            }
+
+            if (trickplayReady && trickplayData && trickplayThumb) {
+                const interval = trickplayData.interval || 10;
+                const width = trickplayData.width || 160;
+                const height = trickplayData.height || 90;
+                const columns = trickplayData.columns || 10;
+                const rows = trickplayData.rows || 10;
+                const tilesPerSheet = columns * rows;
+
+                const thumbIdx = Math.max(0, Math.floor(hoverTime / interval));
+                const sheetIdx = Math.floor(thumbIdx / tilesPerSheet);
+                const posInSheet = thumbIdx % tilesPerSheet;
+                const col = posInSheet % columns;
+                const row = Math.floor(posInSheet / columns);
+
+                const sheetFilename = `sprite_${String(sheetIdx).padStart(3, '0')}.jpg`;
+                const tokenParam = '{{ token }}' ? '?token={{ token }}' : '';
+                const sheetUrl = `/trickplay/{{ media_type }}/{{ item.id }}/${sheetFilename}${tokenParam}`;
+
+                trickplayThumb.style.backgroundImage = `url('${sheetUrl}')`;
+                trickplayThumb.style.backgroundPosition = `-${col * width}px -${row * height}px`;
+                trickplayThumb.style.display = 'block';
+
+                if (!preloadedSheets.has(sheetIdx)) {
+                    const img = new Image();
+                    img.src = sheetUrl;
+                    preloadedSheets.add(sheetIdx);
+                }
+                const nextSheetIdx = sheetIdx + 1;
+                if (nextSheetIdx < (trickplayData.total_sheets || 0) && !preloadedSheets.has(nextSheetIdx)) {
+                    const nextFilename = `sprite_${String(nextSheetIdx).padStart(3, '0')}.jpg`;
+                    const nextImg = new Image();
+                    nextImg.src = `/trickplay/{{ media_type }}/{{ item.id }}/${nextFilename}${tokenParam}`;
+                    preloadedSheets.add(nextSheetIdx);
+                }
+            }
+
+            if (progressHoverTooltip) {
+                const containerWidth = rect.width;
+                const tooltipWidth = (trickplayReady && trickplayThumb && trickplayThumb.style.display !== 'none') ? 160 : 60;
+                const halfWidth = tooltipWidth / 2;
+                const mouseX = pct * containerWidth;
+                const clampedX = Math.max(halfWidth + 4, Math.min(containerWidth - halfWidth - 4, mouseX));
+                progressHoverTooltip.style.left = `${clampedX}px`;
+            } else if (progressHoverTime) {
+                progressHoverTime.style.left = `${pct * 100}%`;
+            }
+        }
+
+        progressContainer.addEventListener('mousemove', (e) => handleScrubMove(e.clientX));
+
+        progressContainer.addEventListener('touchmove', (e) => {
+            if (e.touches && e.touches.length > 0) {
+                if (progressHoverTooltip) progressHoverTooltip.style.opacity = '1';
+                handleScrubMove(e.touches[0].clientX);
+            }
+        }, { passive: true });
+
+        progressContainer.addEventListener('touchend', () => {
+            if (progressHoverTooltip) progressHoverTooltip.style.opacity = '';
         });
 
         progressContainer.addEventListener('click', (e) => {

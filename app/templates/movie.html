@@ -116,9 +116,9 @@
                         
                         <div class="info-controls">
                             {% if movie_versions and movie_versions|length > 1 %}
-                            <button type="button" class="play-btn m-0" id="moviePlayBtn" onclick="toggleMenu(event, 'movie-version-menu')" title="{% if has_progress %}Resume{% else %}Play{% endif %}">
+                            <button type="button" class="play-btn play-main-btn m-0" id="moviePlayBtn" onclick="toggleMenu(event, 'movie-version-menu')" title="{% if has_progress %}Resume{% else %}Play{% endif %}">
                                 <i data-lucide="play" fill="currentColor"></i>
-                                {% if has_progress %}Resume{% else %}Play{% endif %}
+                                <span>{% if has_progress %}Resume{% else %}Play{% endif %}</span>
                             </button>
                             <div class="dropdown-menu" id="movie-version-menu">
                                 {% for v in movie_versions %}
@@ -132,16 +132,16 @@
                                 {% endfor %}
                             </div>
                             {% else %}
-                            <a href="/play/movie/{{ movie.id }}" class="play-btn m-0">
+                            <a href="/play/movie/{{ movie.id }}" class="play-btn play-main-btn m-0">
                                 <i data-lucide="play" fill="currentColor"></i>
-                                {% if has_progress %}Resume{% else %}Play{% endif %}
+                                <span>{% if has_progress %}Resume{% else %}Play{% endif %}</span>
                             </a>
                             {% endif %}
 
                             {% if has_progress %}
                             <a href="/play/movie/{{ movie.id }}?restart=1" class="play-btn m-0 restart-btn" title="Restart from beginning">
                                 <i data-lucide="rotate-ccw"></i>
-                                Restart
+                                <span>Restart</span>
                             </a>
                             {% endif %}
                             

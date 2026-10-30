@@ -25,8 +25,15 @@ from .database import create_db_and_tables, get_session, engine
 from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile, Artist, Album, Track, Playlist, PlaylistTrack
 from .scanner import METADATA_DIR, scan_media_library, scanner_manager, is_recycle_name, is_recycle_path, download_image, async_download_image, async_fetch_additional_details, SafeHTTPClient, httpx, find_local_trailer, extract_tmdb_trailer_key
 from .watcher import start_watcher, stop_watcher, scanner_debouncer
-from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time, sanitize_vtt_content, get_video_transcode_pipeline, parse_burn_sub_index
+from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time, sanitize_vtt_content, get_video_transcode_pipeline, parse_burn_sub_index, get_smart_audio_pipeline, extract_video_frame
 from .hls_manager import hls_manager
+from .trickplay import (
+    queue_trickplay_generation,
+    is_trickplay_ready,
+    is_trickplay_generating,
+    get_trickplay_manifest,
+    get_trickplay_item_dir,
+)
 import subprocess
 import shutil
 try:
@@ -197,6 +204,7 @@ def on_startup():
             ("tvshow", "cast", "VARCHAR"),
             ("tvshow", "director", "VARCHAR"),
             ("tvshow", "logo_filename", "VARCHAR"),
+            ("tvshow", "thumbnail_filename", "VARCHAR"),
             ("movie", "logo_filename", "VARCHAR"),
             ("user", "photos_access", "BOOLEAN DEFAULT 1"),
             ("user", "downloads_access", "BOOLEAN DEFAULT 1"),
@@ -547,7 +555,7 @@ async def view_login(request: Request, session: Session = Depends(get_session)):
     return templates.TemplateResponse(request=request, name="login.html")
 
 @app.post("/login")
-async def process_login(request: Request, username: str = Form(...), password: str = Form(...), session: Session = Depends(get_session)):
+async def process_login(request: Request, username: str = Form(...), password: str = Form(...), remember_me: Optional[str] = Form(None), session: Session = Depends(get_session)):
     check_rate_limit(request)
     user = session.exec(select(User).where(User.username == username)).first()
     if user and bcrypt.checkpw(password.encode('utf-8'), user.password_hash.encode('utf-8')):
@@ -575,14 +583,15 @@ async def process_login(request: Request, username: str = Form(...), password: s
         # If user has multiple profiles or single profile has a PIN, route to /profiles
         is_secure = is_request_secure(request)
         clear_rate_limit(request)
+        cookie_max_age = (60 * 60 * 24 * 30) if remember_me else None
         if len(profiles) > 1 or (len(profiles) == 1 and profiles[0].pin_hash):
             redirect = RedirectResponse(url="/profiles", status_code=303)
-            redirect.set_cookie(key="session_token", value=user.session_token, httponly=True, samesite="lax", secure=is_secure)
+            redirect.set_cookie(key="session_token", value=user.session_token, httponly=True, max_age=cookie_max_age, samesite="lax", secure=is_secure)
             return redirect
         else:
             redirect = RedirectResponse(url="/", status_code=303)
-            redirect.set_cookie(key="session_token", value=user.session_token, httponly=True, samesite="lax", secure=is_secure)
-            redirect.set_cookie(key="active_profile_id", value=str(profiles[0].id), httponly=False, samesite="lax", secure=is_secure)
+            redirect.set_cookie(key="session_token", value=user.session_token, httponly=True, max_age=cookie_max_age, samesite="lax", secure=is_secure)
+            redirect.set_cookie(key="active_profile_id", value=str(profiles[0].id), httponly=False, max_age=cookie_max_age, samesite="lax", secure=is_secure)
             return redirect
 
     record_failed_attempt(request)
@@ -3657,7 +3666,7 @@ async def stream_movie_trailer(
     file_ext = os.path.splitext(trailer_path)[1].lower()
     probe = probe_media_streams(trailer_path)
 
-    if file_ext in [".mp4", ".m4v", ".webm"] and probe.get("can_direct_stream_video", True):
+    if file_ext in [".mp4", ".m4v", ".webm"] and probe.get("can_direct_stream_video", True) and probe.get("can_direct_stream_audio", True):
         media_type = "video/webm" if file_ext == ".webm" else "video/mp4"
         return FileResponse(trailer_path, media_type=media_type)
 
@@ -3789,6 +3798,19 @@ def series_view(
         m = re.search(r'S(\d+)E(\d+)', t.file_path, re.IGNORECASE)
         if m: return (int(m.group(1)), int(m.group(2)))
         return (0, 0)
+
+    ep_hist_q = select(WatchHistory).where(
+        WatchHistory.user_id == current_user.id,
+        WatchHistory.item_id.in_(series_ep_ids),
+        WatchHistory.media_type == 'tv'
+    )
+    if prof_id:
+        ep_hist_q = ep_hist_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+    ep_histories = session.exec(ep_hist_q).all()
+    progress_map = {}
+    for h in ep_histories:
+        if h.item_id not in progress_map or (h.last_watched and (h.progress or 0) > 0):
+            progress_map[h.item_id] = bool(0 < (h.progress or 0) < 95.0)
         
     episodes = []
     seasons = set()
@@ -3829,6 +3851,14 @@ def series_view(
         else:
             ep_dict['season_episode'] = f"{base}{rt_suffix}"
             
+        thumb_name = getattr(ep_obj, "thumbnail_filename", None) or f"tv_thumb_{ep_obj.id}.jpg"
+        metadata_dir = METADATA_DIR if os.path.exists(METADATA_DIR) else "config/metadata"
+        thumb_exists = os.path.exists(os.path.join(metadata_dir, thumb_name))
+        ep_dict["thumbnail_filename"] = thumb_name if thumb_exists else None
+        ep_dict["plot"] = ep_obj.plot or ""
+        ep_dict["has_progress"] = progress_map.get(ep_obj.id, False)
+        ep_dict["play_url"] = f"/play/tv/{ep_obj.id}"
+
         ep_dict['is_watched'] = ep_obj.id in watched_tv_episode_ids
         episodes.append(ep_dict)
     
@@ -3847,6 +3877,26 @@ def series_view(
     if prof_id:
         wl_t_q = wl_t_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
     user_watchlist_tv = set(session.exec(wl_t_q).all())
+
+    # Background ensure 16:9 episode frame thumbnails exist on disk
+    ep_tuples = [(s.id, s.file_path) for s in shows if s.id and s.file_path]
+    def _bg_generate_episode_thumbnails(tuples):
+        m_dir = METADATA_DIR if os.path.exists(METADATA_DIR) else "config/metadata"
+        for ep_id, ep_path in tuples:
+            t_name = f"tv_thumb_{ep_id}.jpg"
+            t_path = os.path.join(m_dir, t_name)
+            if not os.path.exists(t_path) and ep_path and os.path.exists(ep_path):
+                if extract_video_frame(ep_path, t_path, target_fraction=0.40):
+                    with Session(engine) as s:
+                        db_ep = s.get(TVShow, ep_id)
+                        if db_ep and not db_ep.thumbnail_filename:
+                            db_ep.thumbnail_filename = t_name
+                            s.add(db_ep)
+                            try:
+                                s.commit()
+                            except Exception:
+                                s.rollback()
+    threading.Thread(target=_bg_generate_episode_thumbnails, args=(ep_tuples,), daemon=True).start()
 
     return templates.TemplateResponse(request=request, name="series.html", context={
         "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
@@ -4834,6 +4884,8 @@ async def play_video(
             "user": current_user, "current_profile": current_profile, "token": token, "is_mobile": mobile == "1",
             "is_apple": is_apple,
             "audio_tracks": audio_tracks,
+            "default_audio_lang": (current_profile.default_audio_lang if (current_profile and current_profile.default_audio_lang) else (current_user.default_audio_lang if current_user else "eng")) or "eng",
+            "default_subtitle_lang": (current_profile.default_subtitle_lang if (current_profile and current_profile.default_subtitle_lang) else (current_user.default_subtitle_lang if current_user else "eng")) or "eng",
             "is_trailer": True,
             "trailer_source": trailer_source,
             "trailer_stream_url": trailer_stream_url,
@@ -5040,6 +5092,10 @@ async def play_video(
     hdr_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "hdr_tonemapping")).first()
     server_hdr_tonemapping = (hdr_cfg.value == "true") if hdr_cfg else True
 
+    # Asynchronously queue trickplay scrubbing thumbnails if not yet generated
+    if not is_trailer and item.file_path and os.path.exists(item.file_path):
+        queue_trickplay_generation(item.file_path, media_type, item.id, duration)
+
     return templates.TemplateResponse(request=request, name="player.html", context={
         "item": item, "media_type": media_type, "history": history_entry, "season_episode": season_episode,
         "duration": duration, "next_episode_id": next_episode_id, "prev_episode_id": prev_episode_id, "subtitle_url": subtitle_url,
@@ -5049,7 +5105,9 @@ async def play_video(
         "sync_session_id": sync, "is_sync_host": is_sync_host, "sync_initial_time": sync_initial_time,
         "user": current_user, "current_profile": current_profile, "token": active_token, "is_mobile": mobile == "1",
         "is_apple": is_apple,
-        "audio_tracks": audio_tracks, "is_restart": bool(restart)
+        "audio_tracks": audio_tracks, "is_restart": bool(restart),
+        "default_audio_lang": (current_profile.default_audio_lang if (current_profile and current_profile.default_audio_lang) else (current_user.default_audio_lang if current_user else "eng")) or "eng",
+        "default_subtitle_lang": (current_profile.default_subtitle_lang if (current_profile and current_profile.default_subtitle_lang) else (current_user.default_subtitle_lang if current_user else "eng")) or "eng"
     })
 
 @app.get("/subtitle/{media_type}/{item_id}")
@@ -5488,6 +5546,7 @@ def stream_video(
         selected_track = audio_tracks[0]
         audio_track = 0
 
+    effective_res = "original" if res in ("original", "auto") else res
     track_can_copy = selected_track.get("can_direct_stream", False) if selected_track else False
     track_label = selected_track.get("label", f"Track {audio_track + 1}") if selected_track else "None"
 
@@ -5497,7 +5556,7 @@ def stream_video(
     is_direct_play = (
         not burn_sub_active and
         not tonemap_active and
-        res == "original" and
+        effective_res == "original" and
         is_mp4 and
         start == 0.0 and
         audio_track == 0 and
@@ -5505,6 +5564,19 @@ def stream_video(
         track_can_copy
     )
     if is_direct_play:
+        _, smart_audio = get_smart_audio_pipeline(
+            selected_track=selected_track,
+            can_direct_stream_video=True,
+            is_direct_play=True,
+            video_codec=probe.get("video_codec"),
+            video_encoder="none"
+        )
+        print(
+            f"[Smart Audio Direct Stream] {smart_audio['state']} | "
+            f"Media: {media_type} #{item_id} | "
+            f"Video: {smart_audio['video_mode']} | "
+            f"Audio: {smart_audio['source_spec']} -> {smart_audio['target_spec']}"
+        )
         headers = {
             "X-Transcode-Active": "false",
             "X-Transcode-Method": "Direct Play",
@@ -5514,13 +5586,15 @@ def stream_video(
             "X-Audio-Track": str(audio_track),
             "X-Burn-Sub": "none",
             "X-Tone-Mapping": "off",
+            "X-Smart-Audio-Active": "false",
+            "X-Smart-Audio-State": smart_audio["state"],
         }
         return FileResponse(file_path, media_type="video/mp4", headers=headers)
 
-    # 2. Smart Remuxing / Direct Stream:
+    # 2. Smart Remuxing & Smart Audio Codec Direct Streaming:
     # When video codec is already web-compatible (H.264), native resolution is requested,
     # no subtitle burn-in is active, and HDR is not being tone mapped to SDR.
-    can_direct_stream_video = (not burn_sub_active and not tonemap_active and res == "original" and probe.get("can_direct_stream_video", False))
+    can_direct_stream_video = (not burn_sub_active and not tonemap_active and effective_res == "original" and probe.get("can_direct_stream_video", False))
 
     actual_start = start
     if start > 0.0 and can_direct_stream_video:
@@ -5536,30 +5610,35 @@ def stream_video(
         cmd.extend(["-avoid_negative_ts", "make_zero"])
 
     if can_direct_stream_video:
+        audio_args, smart_audio = get_smart_audio_pipeline(
+            selected_track=selected_track,
+            can_direct_stream_video=True,
+            is_direct_play=False,
+            video_codec=probe.get("video_codec"),
+            video_encoder="copy"
+        )
         cmd.extend(["-map", "0:v:0"])
         if selected_track:
             cmd.extend(["-map", f"0:a:{audio_track}"])
-        else:
-            cmd.append("-an")
         cmd.extend(["-sn", "-map_chapters", "-1"])
 
         cmd.extend(["-c:v", "copy"])
+        cmd.extend(audio_args)
         is_transcode = False
-        encoder_type = "copy"
         hw_accel = False
-        
+
         if not selected_track:
             transcode_method = "Direct Stream (Video Copy, No Audio)"
+            encoder_type = "copy"
             play_type = "remux"
         elif track_can_copy:
-            cmd.extend(["-c:a", "copy"])
             transcode_method = f"Direct Stream / Remux (Stream Copy, Audio: {track_label})"
+            encoder_type = "copy"
             play_type = "remux"
         else:
-            cmd.extend(["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-af", "aresample=async=1"])
-            transcode_method = f"Direct Stream (Video Copy, Audio: {track_label} -> AAC)"
-            encoder_type = "copy (audio: aac)"
-            play_type = "direct_stream"
+            transcode_method = f"Smart Audio Direct Stream (Video Copy, Audio: {smart_audio['source_spec_short']} -> {smart_audio['target_spec_short']})"
+            encoder_type = "copy (smart audio: aac)"
+            play_type = "smart_audio_direct_stream"
 
         cmd.extend([
             "-max_muxing_queue_size", "1024",
@@ -5572,7 +5651,7 @@ def stream_video(
         # Required when downscaling resolution, when source video codec is incompatible,
         # when burning in bitmap/PGS subtitles, or when tone mapping HDR content to SDR.
         pipeline_args, v_map, encoder_type = get_video_transcode_pipeline(
-            res=res,
+            res=effective_res,
             profile=hw_profile,
             burn_sub_stream=sub_idx,
             is_hdr=is_hdr,
@@ -5580,13 +5659,18 @@ def stream_video(
             color_transfer=probe.get("color_transfer"),
             tonemap_algo=tonemap_algo
         )
+        audio_args, smart_audio = get_smart_audio_pipeline(
+            selected_track=selected_track,
+            can_direct_stream_video=False,
+            is_direct_play=False,
+            video_codec=probe.get("video_codec"),
+            video_encoder=encoder_type
+        )
         cmd.extend(pipeline_args)
         cmd.extend(["-map", v_map])
         if selected_track:
             cmd.extend(["-map", f"0:a:{audio_track}"])
-            cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ac", "2", "-af", "aresample=async=1"])
-        else:
-            cmd.append("-an")
+        cmd.extend(audio_args)
         cmd.extend(["-sn", "-map_chapters", "-1"])
             
         cmd.extend([
@@ -5614,6 +5698,14 @@ def stream_video(
             transcode_method = f"{base_method} (Audio: {track_label})"
         play_type = "transcode"
 
+    print(
+        f"[Smart Audio Direct Stream] {smart_audio['state']} | "
+        f"Media: {media_type} #{item_id} | "
+        f"Video: {smart_audio['video_mode']} | "
+        f"Audio: {smart_audio['source_spec']} -> {smart_audio['target_spec']} | "
+        f"Flags: {smart_audio['ffmpeg_flags']}"
+    )
+
     headers = {
         "X-Transcode-Active": "true" if is_transcode else "false",
         "X-Transcode-Method": transcode_method,
@@ -5624,6 +5716,8 @@ def stream_video(
         "X-Burn-Sub": str(sub_idx) if burn_sub_active else "none",
         "X-Tone-Mapping": f"active ({tonemap_algo})" if tonemap_active else "off",
         "X-Actual-Start": str(actual_start),
+        "X-Smart-Audio-Active": "true" if smart_audio["active"] else "false",
+        "X-Smart-Audio-State": smart_audio["state"],
     }
 
     def generate():
@@ -5696,18 +5790,45 @@ def get_stream_info(
         selected_track = audio_tracks[0]
         audio_track = 0
 
+    effective_res = "original" if res in ("original", "auto") else res
     track_can_copy = selected_track.get("can_direct_stream", False) if selected_track else False
     track_label = selected_track.get("label", f"Track {audio_track + 1}") if selected_track else "None"
 
-    if not burn_sub_active and not tonemap_active and res == "original" and is_mp4 and start == 0.0 and audio_track == 0 and probe.get("can_direct_stream_video", True) and track_can_copy:
+    can_direct_stream_video = (not burn_sub_active and not tonemap_active and effective_res == "original" and probe.get("can_direct_stream_video", False))
+    is_direct_play = (
+        not burn_sub_active and
+        not tonemap_active and
+        effective_res == "original" and
+        is_mp4 and
+        start == 0.0 and
+        audio_track == 0 and
+        probe.get("can_direct_stream_video", True) and
+        track_can_copy
+    )
+
+    if is_direct_play:
         is_transcode = False
         method = "Direct Play"
         encoder = "none"
         hw_accel = False
         play_type = "direct_play"
-    elif not burn_sub_active and not tonemap_active and res == "original" and probe.get("can_direct_stream_video", False):
+        _, smart_audio = get_smart_audio_pipeline(
+            selected_track=selected_track,
+            can_direct_stream_video=True,
+            is_direct_play=True,
+            video_codec=probe.get("video_codec"),
+            video_encoder="none"
+        )
+    elif can_direct_stream_video:
         is_transcode = False
         hw_accel = False
+        _, smart_audio = get_smart_audio_pipeline(
+            selected_track=selected_track,
+            can_direct_stream_video=True,
+            is_direct_play=False,
+            video_codec=probe.get("video_codec"),
+            video_encoder="copy"
+        )
         if not selected_track:
             method = "Direct Stream (Video Copy, No Audio)"
             encoder = "copy"
@@ -5717,13 +5838,20 @@ def get_stream_info(
             encoder = "copy"
             play_type = "remux"
         else:
-            method = f"Direct Stream (Video Copy, Audio: {track_label} -> AAC)"
-            encoder = "copy (audio: aac)"
-            play_type = "direct_stream"
+            method = f"Smart Audio Direct Stream (Video Copy, Audio: {smart_audio['source_spec_short']} -> {smart_audio['target_spec_short']})"
+            encoder = "copy (smart audio: aac)"
+            play_type = "smart_audio_direct_stream"
     else:
         encoder, _ = get_working_encoder(profile=hw_profile)
         is_transcode = True
         hw_accel = (encoder != "software")
+        _, smart_audio = get_smart_audio_pipeline(
+            selected_track=selected_track,
+            can_direct_stream_video=False,
+            is_direct_play=False,
+            video_codec=probe.get("video_codec"),
+            video_encoder=encoder
+        )
         method_names = {
             "nvenc": "NVIDIA NVENC (h264_nvenc)",
             "qsv": "Intel QuickSync (h264_qsv)",
@@ -5741,7 +5869,6 @@ def get_stream_info(
             method = f"{base_method} (Audio: {track_label})"
         play_type = "transcode"
 
-    can_direct_stream_video = (not burn_sub_active and not tonemap_active and res == "original" and probe.get("can_direct_stream_video", False))
     actual_start = start
     if start > 0.0 and can_direct_stream_video:
         actual_start = get_keyframe_before_time(file_path, start)
@@ -5750,12 +5877,13 @@ def get_stream_info(
         "media_type": media_type,
         "item_id": item_id,
         "title": item_title,
-        "resolution": res,
+        "resolution": effective_res,
         "start": start,
         "actual_start": actual_start,
         "audio_track": audio_track,
         "audio_tracks": audio_tracks,
         "selected_audio_track": selected_track,
+        "smart_audio": smart_audio,
         "burn_sub": sub_idx,
         "burn_sub_active": burn_sub_active,
         "is_transcoding": is_transcode,
@@ -5944,6 +6072,138 @@ def stop_hls(
     if current_user:
         hls_manager.stop_session(media_type, item_id)
     return {"status": "stopped"}
+
+
+# --- Trickplay (Scrubbing Preview Sprites) ---
+
+@app.get("/trickplay/{media_type}/{item_id}/manifest.json")
+def get_trickplay_manifest_endpoint(
+    media_type: str,
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if media_type == "movie" and not current_user.movies_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if media_type == "tv" and not current_user.tv_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    with Session(engine) as session:
+        item = session.get(Movie if media_type == "movie" else TVShow, item_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found")
+        file_path = item.file_path
+        rating_level = get_profile_rating_level(current_user, current_profile)
+        if rating_level > 0 and not is_rating_allowed(getattr(item, "content_rating", ""), rating_level):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+    manifest = get_trickplay_manifest(media_type, item_id)
+    if manifest and manifest.get("status") == "ready":
+        return JSONResponse(manifest)
+
+    if is_trickplay_generating(media_type, item_id):
+        return JSONResponse({"status": "generating"})
+
+    if file_path and os.path.exists(file_path):
+        queue_trickplay_generation(file_path, media_type, item_id)
+        return JSONResponse({"status": "generating"})
+
+    return JSONResponse({"status": "unavailable"})
+
+
+@app.get("/trickplay/{media_type}/{item_id}/thumbnails.vtt")
+def get_trickplay_vtt_endpoint(
+    media_type: str,
+    item_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    item_dir = get_trickplay_item_dir(media_type, item_id)
+    vtt_path = os.path.join(item_dir, "thumbnails.vtt")
+    if not os.path.exists(vtt_path):
+        raise HTTPException(status_code=404, detail="VTT manifest not found")
+    return FileResponse(vtt_path, media_type="text/vtt", headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/trickplay/{media_type}/{item_id}/{filename}")
+def get_trickplay_sprite_endpoint(
+    media_type: str,
+    item_id: int,
+    filename: str,
+    current_user: User = Depends(get_current_user)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if os.path.basename(filename) != filename or not (filename.startswith("sprite_") and filename.endswith(".jpg")):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    item_dir = get_trickplay_item_dir(media_type, item_id)
+    file_path = os.path.join(item_dir, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Sprite sheet not found")
+    return FileResponse(file_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/thumbnail/tv/{item_id}")
+def get_tv_episode_thumbnail(
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile)
+):
+    """
+    Serves a crisp 16:9 landscape frame captured at ~40% (between 1/3 and 1/2) from the episode video.
+    Extracts on-demand if not already generated on disk.
+    """
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not current_user.tv_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    with Session(engine) as session:
+        item = session.get(TVShow, item_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found")
+        file_path = item.file_path
+        rating_level = get_profile_rating_level(current_user, current_profile)
+        if rating_level > 0 and not is_rating_allowed(getattr(item, "content_rating", ""), rating_level):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        metadata_dir = METADATA_DIR if os.path.exists(METADATA_DIR) else "config/metadata"
+        thumb_name = item.thumbnail_filename or f"tv_thumb_{item.id}.jpg"
+        thumb_path = os.path.join(metadata_dir, thumb_name)
+
+        if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0:
+            if not item.thumbnail_filename:
+                item.thumbnail_filename = thumb_name
+                session.add(item)
+                try:
+                    session.commit()
+                except Exception:
+                    session.rollback()
+            return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=604800"})
+
+        # On-demand extraction: single frame at ~40% (between 1/3 and 1/2 of duration)
+        if file_path and os.path.exists(file_path):
+            success = extract_video_frame(file_path, thumb_path, target_fraction=0.40)
+            if success and os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0:
+                item.thumbnail_filename = thumb_name
+                session.add(item)
+                try:
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=604800"})
+
+        # Fallback to season poster or series poster
+        fallback_fn = item.season_poster_filename or item.poster_filename
+        if fallback_fn:
+            fallback_path = os.path.join(metadata_dir, fallback_fn)
+            if os.path.exists(fallback_path):
+                return FileResponse(fallback_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
+
+        raise HTTPException(status_code=404, detail="Thumbnail not available")
 
 @app.post("/watchlist/remove/{watchlist_id}")
 async def remove_watchlist(request: Request, watchlist_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
@@ -6878,6 +7138,34 @@ async def api_scanner_start(
     started = scanner_manager.start_scan()
     return {"started": started, "status": scanner_manager.get_status()}
 
+AVAILABLE_LANGUAGES = [
+    ("eng", "English"),
+    ("spa", "Spanish"),
+    ("fra", "French"),
+    ("deu", "German"),
+    ("ita", "Italian"),
+    ("por", "Portuguese"),
+    ("jpn", "Japanese"),
+    ("zho", "Chinese"),
+    ("kor", "Korean"),
+    ("ara", "Arabic"),
+    ("hin", "Hindi"),
+    ("rus", "Russian"),
+    ("nld", "Dutch"),
+    ("pol", "Polish"),
+    ("swe", "Swedish"),
+    ("nor", "Norwegian"),
+    ("dan", "Danish"),
+    ("fin", "Finnish"),
+    ("tur", "Turkish"),
+    ("vie", "Vietnamese"),
+    ("tha", "Thai"),
+    ("ukr", "Ukrainian"),
+    ("ces", "Czech"),
+    ("hun", "Hungarian"),
+    ("ell", "Greek"),
+]
+
 @app.get("/settings", response_class=HTMLResponse)
 async def view_settings(
     request: Request,
@@ -6954,13 +7242,15 @@ async def view_settings(
         hdr_tonemapping = "hable"
     
     rewind_seconds = current_profile.rewind_seconds if (current_profile and current_profile.rewind_seconds is not None) else (current_user.rewind_seconds or 0)
+    default_audio_lang = (current_profile.default_audio_lang if (current_profile and current_profile.default_audio_lang) else (current_user.default_audio_lang or "eng")) or "eng"
+    default_subtitle_lang = (current_profile.default_subtitle_lang if (current_profile and current_profile.default_subtitle_lang) else (current_user.default_subtitle_lang or "eng")) or "eng"
     
     return templates.TemplateResponse(request=request, name="settings.html", context={
         "user": current_user, "current_profile": current_profile,
         "is_admin": is_admin, "can_change_password": can_change_password,
         "invites": invites, "users": users, "volume_paths": volume_paths, "mounted_volumes": mounted_volumes,
         "host_url": host_url, "remote_url": remote_url, "tmdb_key": tmdb_key, "theaudiodb_key": theaudiodb_key,
-        "hw_accel_profile": hw_accel_profile, "hdr_tonemapping": hdr_tonemapping, "rewind_seconds": rewind_seconds
+        "hw_accel_profile": hw_accel_profile, "hdr_tonemapping": hdr_tonemapping, "rewind_seconds": rewind_seconds, "default_audio_lang": default_audio_lang, "default_subtitle_lang": default_subtitle_lang, "available_languages": AVAILABLE_LANGUAGES
     })
 
 @app.post("/settings/transcoding")
@@ -7034,6 +7324,28 @@ async def save_rewind_settings(
         session.add(current_user)
     session.commit()
     return RedirectResponse(url="/settings?rewind_success=1", status_code=303)
+
+@app.post("/settings/language")
+async def save_language_settings(
+    default_audio_lang: str = Form("eng"),
+    default_subtitle_lang: str = Form("eng"),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    clean_audio = (default_audio_lang or "eng").strip().lower()
+    clean_sub = (default_subtitle_lang or "eng").strip().lower()
+    if current_profile:
+        current_profile.default_audio_lang = clean_audio
+        current_profile.default_subtitle_lang = clean_sub
+        session.add(current_profile)
+    if current_profile is None or current_profile.is_primary:
+        current_user.default_audio_lang = clean_audio
+        current_user.default_subtitle_lang = clean_sub
+        session.add(current_user)
+    session.commit()
+    return JSONResponse({"status": "ok", "default_audio_lang": clean_audio, "default_subtitle_lang": clean_sub})
 
 @app.post("/settings/tmdb")
 async def save_tmdb_key(

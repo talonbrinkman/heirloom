@@ -42,6 +42,12 @@
                 <input type="password" name="confirm_password" id="confirm_password" required>
                 {% endif %}
                 
+                {% if mode == 'login' %}
+                <div style="display: flex; align-items: center; gap: 8px; margin-top: 15px; margin-bottom: 10px;">
+                    <input type="checkbox" name="remember_me" id="remember_me" value="1" checked>
+                    <label for="remember_me" style="margin: 0; cursor: pointer; user-select: none; font-size: 0.9em; color: var(--text-secondary);">Keep me signed in</label>
+                </div>
+                {% endif %}
                 <button type="submit" class="btn" style="width: 100%; margin-top: 10px;">
                     {% if mode == 'setup' %}Create Admin Account
                     {% elif mode == 'register' %}Create Account

@@ -10,6 +10,7 @@ By leveraging a lightweight, API-first architecture using Python and FastAPI, He
 - Watch Together
 - Skip Intro & Credits
 - Rewind on Resume
+- Trickplay Scrubbing Thumbnail Previews
 - Download Capability
 - Automated Media Management
 - Real-Time Stream Dashboard
@@ -19,7 +20,7 @@ By leveraging a lightweight, API-first architecture using Python and FastAPI, He
 - Role-Based Access Control
 - Kids Mode & Content Filtering
 - Stateful Playback & Watchlists
-- Smart Remuxing & Direct Stream
+- Smart Remuxing & Smart Audio Codec Direct Streaming
 - Multi-Audio Track Selection
 - Multi-Track Subtitle Extraction (Embedded & Sidecar WebVTT)
 - Subtitle Bitmap Burn-In
@@ -117,7 +118,7 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 - **Inviting Users**: As an admin, navigate to the dashboard to generate one-time use invite codes for your family and friends.
 - **Watch Together**: Start a session from any media page and share the session invite with another registered user.
 - **Rewind on Resume**: Configure your preferred rewind buffer (e.g., 5s, 10s) in Settings so playback automatically skips back slightly when resuming interrupted movies or TV episodes, easing you back into context.
-- **Smart Remuxing & Direct Stream**: Media files with web-compatible video streams (H.264/AVC) are repacked on-the-fly into fragmented MP4 streams via zero-overhead stream copy (`-c:v copy`), even across MKV/AVI containers and seeking/resuming. Only audio or incompatible video codecs/resolutions are transcoded, eliminating unnecessary CPU/GPU load while delivering instant playback and bit-for-bit picture quality.
+- **Smart Remuxing & Smart Audio Codec Direct Streaming**: Media files with web-compatible video streams (H.264/AVC) are repacked on-the-fly via zero-overhead video stream copy (`-c:v copy`), even across MKV/AVI containers and seeking/resuming. When a file contains incompatible or multichannel surround audio codecs (Dolby TrueHD, DTS-HD MA, E-AC3, AC-3, FLAC, PCM, or 5.1/7.1 layouts), Heirloom copies the video bitstream untouched while dynamically downmixing and transcoding only the audio track to client-universal Stereo AAC (`192 kbps`, `48 kHz`), with real-time state and pipeline telemetry logged directly to the console.
 - **Multi-Audio Track Selection**: Switch between multiple audio tracks (e.g., original language tracks, international dubs, director's commentary) on-the-fly directly from the player settings menu, with persistent per-title track memory and zero buffering loss.
 - **Multi-Track Subtitles & Bitmap Burn-In**: Stream embedded text subtitles (SRT, WebVTT, ASS/SSA, MOV text) and external sidecar files dynamically extracted to WebVTT with keyframe-accurate seek synchronization. For Blu-ray (PGS) and DVD (VobSub) bitmap subtitle formats incompatible with browser text rendering, Heirloom dynamically burns subtitles directly into the video transcode stream with full resolution scaling and ABR support. Toggle captions instantly with the dedicated player button or the `C` keyboard shortcut, select specific subtitle tracks directly from the player settings menu with persistent per-title memory, and close the player anytime with `Esc`.
 - **Adaptive Bitrate (ABR) & HLS Streaming**: Enjoy buffer-free playback with native HTTP Live Streaming (HLS). Heirloom automatically generates master and variant VOD playlists, dynamically scaling stream bitrates (Original, 1080p, 720p, 480p, 360p) based on real-time client bandwidth and device capabilities. Select **Auto** for hands-free dynamic switching, or manually lock your preferred quality tier with instant, zero-reload level transitions. Completely self-hosted and offline-ready with bundled Hls.js and native iOS/Safari fallback.
@@ -131,12 +132,16 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 - **Related Titles & Smart Media Discovery**: Seamlessly discover similar content directly from any movie or TV series detail page underneath the main info layout and season episode carousel. Heirloom evaluates franchise collections, shared genres, directors, and cast members with weighted similarity scoring to present up to 15 relevant recommendations matching your active profile rating, complete with instant hover-play, watchlist management, and full media actions.
 - **Actor & Director Filmography Hubs ("Person" Pages)**: Explore dedicated talent hubs for actors, directors, writers, and crew directly by clicking any cast card or director name on movie and TV series detail pages, or searching for talent in global search. Features high-resolution headshots, occupations, birthdates with current or at-death age calculation, biographies, and a "Known For" carousel featuring all matching movies and TV shows in your local library (with release years, total season counts, and rating stars).
 - **Real-Time HDR to SDR Tone Mapping**: Enjoy vibrant, color-accurate playback of 4K HDR10, HLG, and Dolby Vision content on standard dynamic range (SDR) displays without washed-out, grayish colors. Uses perceptual color space transformation across hardware and CPU transcode pipelines with industry-standard tone mapping algorithms (Hable Filmic, Mobius Highlight-Preserving, Reinhard Shadow-Preserving, Linear, Gamma, Clip, or Disabled / Passthrough). Features instant auto-saving algorithm configuration in **Settings -> Transcoding & Processing** as well as an in-player control (`Auto`, `On`, `Off / Passthrough`) in the playback settings menu for flexible per-stream playback.
+- **Trickplay Scrubbing Thumbnail Previews**: Frame-accurate visual scrubbing across the player seekbar just like modern premium streaming services. Heirloom automatically queues high-speed background generation of 160x90 thumbnails assembled into 10x10 WebVTT sprite sheets at 10-second intervals. Powered by multi-threaded FFmpeg keyframe extraction (`-skip_frame nokey`), generation completes in seconds (~20s for TV episodes, ~60s for feature films) with polite non-blocking CPU priority and zero playback impact. Hovering over the seekbar displays live visual preview cards with synced timestamps, with seamless, graceful fallback to standard time tooltips whenever trickplay assets are still generating.
 
 ## 🔮 Upcoming Improvements
 
 - **Smart TV & Native Client Ecosystem**: Dedicated native client applications for Apple TV, Android TV / Google TV, Roku, and Fire TV.
 - **Mobile Offline Sync**: Transcode and download media to phones and tablets for offline airplane and travel playback.
-
+- **Automated Audio Fingerprinting for Intro/Outro Detection**: Advanced cross-episode audio fingerprinting (Chromaprint / silence analysis) across entire seasons to automatically detect theme songs and credits on media lacking embedded chapter markers.
+- **Seamless Continuous Music Streaming Across Pages**: Client-side PJAX/Turbo navigation keeping the persistent audio player and background music streaming uninterrupted across page transitions without audio pause or reload gaps.
+- **On-Demand Subtitle Fetching**: In-player and background retrieval of missing subtitle tracks and languages via external provider integrations (OpenSubtitles / Bazarr).
+- **"Are You Still Watching?" & Sleep Timer**: Intelligent auto-pause after consecutive unprompted episodes to prevent runaway overnight playback on TVs and mobile devices.
 
 ## 🤝 Contributing
 

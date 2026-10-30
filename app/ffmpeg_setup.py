@@ -652,13 +652,29 @@ def probe_media_streams(file_path: str) -> dict:
             audio_tracks = []
             for idx, s in enumerate(audio_streams):
                 c_name = s.get("codec_name", "").lower()
+                c_profile = (s.get("profile") or "").strip()
+                ch_layout = (s.get("channel_layout") or "").strip()
                 ch = s.get("channels")
                 try:
                     ch = int(ch) if ch is not None else None
                 except (ValueError, TypeError):
                     ch = None
 
+                sample_rate = s.get("sample_rate")
+                try:
+                    sample_rate = int(sample_rate) if sample_rate is not None else None
+                except (ValueError, TypeError):
+                    sample_rate = None
+
                 tags = s.get("tags") or {}
+                raw_br = s.get("bit_rate") or tags.get("BPS") or tags.get("BPS-eng") or tags.get("bps")
+                audio_bitrate = None
+                try:
+                    if raw_br is not None:
+                        audio_bitrate = int(raw_br)
+                except (ValueError, TypeError):
+                    audio_bitrate = None
+
                 lang = tags.get("language") or tags.get("LANGUAGE") or ""
                 title = tags.get("title") or tags.get("TITLE") or ""
 
@@ -697,14 +713,19 @@ def probe_media_streams(file_path: str) -> dict:
 
                 can_copy = (
                     c_name in ("aac", "mp3") and
-                    (ch is None or ch <= 2)
+                    (ch is None or ch <= 2) and
+                    (sample_rate is None or sample_rate <= 48000)
                 )
 
                 audio_tracks.append({
                     "index": idx,
                     "stream_index": s.get("index"),
                     "codec": c_name,
+                    "profile": c_profile,
                     "channels": ch,
+                    "channel_layout": ch_layout or ch_label,
+                    "sample_rate": sample_rate,
+                    "bit_rate": audio_bitrate,
                     "language": lang_clean,
                     "title": title,
                     "label": label,
@@ -856,6 +877,305 @@ def probe_media_streams(file_path: str) -> dict:
         "subtitle_tracks": get_sidecar_subtitles(file_path),
     }
     return fallback_result
+
+
+AUDIO_CODEC_DISPLAY_NAMES = {
+    "eac3": "Dolby Digital Plus (E-AC3)",
+    "ac3": "Dolby Digital (AC-3)",
+    "truehd": "Dolby TrueHD",
+    "mlp": "MLP Lossless",
+    "dts": "DTS",
+    "dca": "DTS",
+    "flac": "FLAC Lossless",
+    "alac": "Apple Lossless (ALAC)",
+    "aac": "AAC",
+    "mp3": "MP3",
+    "opus": "Opus",
+    "vorbis": "Vorbis",
+    "pcm_s16le": "PCM 16-bit",
+    "pcm_s24le": "PCM 24-bit",
+    "pcm_s32le": "PCM 32-bit",
+    "pcm_bluray": "PCM Blu-ray",
+}
+
+
+def _format_channel_label(channels: Optional[int], layout: str = "") -> tuple[str, str]:
+    """Returns (long_label, short_label) for an audio channel count."""
+    if channels == 1:
+        return "Mono (1.0)", "1.0"
+    if channels == 2:
+        return "Stereo (2.0)", "2.0"
+    if channels == 6:
+        return "5.1 Surround (6ch)", "5.1"
+    if channels == 8:
+        return "7.1 Surround (8ch)", "7.1"
+    if channels:
+        return f"{channels}ch ({layout})" if layout else f"{channels}ch", f"{channels}ch"
+    return (layout or "Unknown Channels"), (layout or "2.0")
+
+
+def get_smart_audio_pipeline(
+    selected_track: Optional[dict],
+    can_direct_stream_video: bool,
+    is_direct_play: bool = False,
+    video_codec: Optional[str] = None,
+    video_encoder: Optional[str] = None
+) -> tuple[list[str], dict]:
+    """
+    Constructs FFmpeg audio arguments and detailed telemetry for Smart Audio Codec Direct Streaming.
+    When video can be direct-streamed (-c:v copy) but the selected audio track uses an incompatible
+    codec (e.g., E-AC3, TrueHD, DTS, AC-3, FLAC, PCM, Opus) or multichannel layout (>2ch),
+    Smart Audio Codec Direct Streaming copies the video untouched while dynamically downmixing
+    and transcoding only the audio track to client-universal Stereo AAC.
+    """
+    v_codec_up = (video_codec or "h264").upper()
+
+    if not selected_track:
+        info = {
+            "active": False,
+            "state": "INACTIVE (No Audio Track)",
+            "reason": "Media file has no selected audio stream (-an)",
+            "video_mode": f"copy ({v_codec_up})" if can_direct_stream_video else f"transcode ({video_encoder or 'h264'})",
+            "audio_mode": "none",
+            "downmixed": False,
+            "source_spec": "No Audio",
+            "target_spec": "Muted / No Audio (-an)",
+            "source_spec_short": "None",
+            "target_spec_short": "None",
+            "source_codec": None,
+            "source_codec_display": "None",
+            "source_profile": None,
+            "source_channels": 0,
+            "source_channel_layout": "None",
+            "source_sample_rate": None,
+            "source_bitrate_kbps": None,
+            "target_codec": None,
+            "target_channels": 0,
+            "target_channel_layout": "None",
+            "target_sample_rate": None,
+            "target_bitrate_kbps": None,
+            "ffmpeg_flags": "-an",
+        }
+        return ["-an"], info
+
+    src_codec = (selected_track.get("codec") or "unknown").lower()
+    src_profile = (selected_track.get("profile") or "").strip()
+    src_codec_display = AUDIO_CODEC_DISPLAY_NAMES.get(src_codec, src_codec.upper())
+    if src_profile and src_profile.lower() not in src_codec_display.lower() and src_profile.lower() != "lc":
+        src_codec_display = f"{src_codec_display} [{src_profile}]"
+
+    src_channels = selected_track.get("channels")
+    src_layout_raw = selected_track.get("channel_layout") or ""
+    src_ch_long, src_ch_short = _format_channel_label(src_channels, src_layout_raw)
+
+    src_sr = selected_track.get("sample_rate")
+    src_br = selected_track.get("bit_rate")
+    src_br_kbps = round(src_br / 1000) if (src_br and src_br > 0) else None
+    track_can_copy = bool(selected_track.get("can_direct_stream", False))
+
+    src_parts = [src_codec_display, src_ch_long]
+    if src_sr:
+        src_parts.append(f"{src_sr / 1000:.1f} kHz")
+    if src_br_kbps:
+        src_parts.append(f"{src_br_kbps} kbps")
+    source_spec = ", ".join(src_parts)
+    source_spec_short = f"{src_codec.upper()} {src_ch_short}"
+
+    # 1. Native Direct Play (MP4 file served directly without FFmpeg)
+    if is_direct_play:
+        info = {
+            "active": False,
+            "state": "INACTIVE (Native Direct Play)",
+            "reason": f"Container & audio ({src_codec.upper()} {src_ch_short}) are natively supported; streaming file directly with zero remuxing",
+            "video_mode": f"direct_play ({v_codec_up})",
+            "audio_mode": "direct_play",
+            "downmixed": False,
+            "source_spec": source_spec,
+            "target_spec": f"Direct Play ({source_spec})",
+            "source_spec_short": source_spec_short,
+            "target_spec_short": f"{source_spec_short} (Direct)",
+            "source_codec": src_codec,
+            "source_codec_display": src_codec_display,
+            "source_profile": src_profile,
+            "source_channels": src_channels,
+            "source_channel_layout": src_ch_long,
+            "source_sample_rate": src_sr,
+            "source_bitrate_kbps": src_br_kbps,
+            "target_codec": src_codec,
+            "target_channels": src_channels,
+            "target_channel_layout": src_ch_long,
+            "target_sample_rate": src_sr,
+            "target_bitrate_kbps": src_br_kbps,
+            "ffmpeg_flags": "none (Direct File Response)",
+        }
+        return [], info
+
+    # 2. Video Direct Copy + Audio Direct Copy (Full Stream Copy / Remux)
+    if can_direct_stream_video and track_can_copy:
+        audio_args = ["-c:a", "copy"]
+        info = {
+            "active": False,
+            "state": "INACTIVE (Audio Stream Copy)",
+            "reason": f"Source audio ({src_codec.upper()} {src_ch_short}) is already client-compatible; copying both video (-c:v copy) and audio (-c:a copy) untouched",
+            "video_mode": f"copy (-c:v copy, {v_codec_up})",
+            "audio_mode": "copy (-c:a copy)",
+            "downmixed": False,
+            "source_spec": source_spec,
+            "target_spec": f"Stream Copy ({source_spec})",
+            "source_spec_short": source_spec_short,
+            "target_spec_short": f"{source_spec_short} (Copy)",
+            "source_codec": src_codec,
+            "source_codec_display": src_codec_display,
+            "source_profile": src_profile,
+            "source_channels": src_channels,
+            "source_channel_layout": src_ch_long,
+            "source_sample_rate": src_sr,
+            "source_bitrate_kbps": src_br_kbps,
+            "target_codec": src_codec,
+            "target_channels": src_channels,
+            "target_channel_layout": src_ch_long,
+            "target_sample_rate": src_sr,
+            "target_bitrate_kbps": src_br_kbps,
+            "ffmpeg_flags": "-c:v copy -c:a copy",
+        }
+        return audio_args, info
+
+    # Target audio parameters for AAC transcode / downmix
+    target_ch = 1 if src_channels == 1 else 2
+    target_ch_long, target_ch_short = _format_channel_label(target_ch)
+    target_br_kbps = 192
+    target_sr = 48000 if (src_sr and src_sr > 48000) else (src_sr or 48000)
+    is_downmix = bool(src_channels and src_channels > 2)
+    af_filter = "aresample=async=1:ochl=stereo" if is_downmix else "aresample=async=1"
+
+    audio_args = ["-c:a", "aac", "-b:a", f"{target_br_kbps}k", "-ac", str(target_ch)]
+    if src_sr and src_sr > 48000:
+        audio_args.extend(["-ar", "48000"])
+    audio_args.extend(["-af", af_filter])
+
+    target_spec = f"AAC-LC, {target_ch_long}, {target_sr / 1000:.1f} kHz, {target_br_kbps} kbps"
+    target_spec_short = f"AAC {target_ch_short} ({target_br_kbps}k)"
+
+    # 3. SMART AUDIO CODEC DIRECT STREAMING ACTIVE:
+    # Video is copied untouched (-c:v copy), while incompatible/surround audio is dynamically downmixed & transcoded
+    if can_direct_stream_video:
+        if src_codec not in ("aac", "mp3") and is_downmix:
+            why = f"Incompatible surround codec ({src_codec_display}, {src_ch_short})"
+        elif src_codec not in ("aac", "mp3"):
+            why = f"Incompatible audio codec ({src_codec_display})"
+        elif is_downmix:
+            why = f"Multichannel audio layout ({src_codec.upper()} {src_ch_short} > 2ch)"
+        else:
+            why = f"High sample rate ({src_sr} Hz > 48 kHz)"
+
+        reason = (
+            f"{why} - copying video bit-for-bit (-c:v copy) while dynamically "
+            f"{'downmixing and ' if is_downmix else ''}transcoding audio to {target_spec_short}"
+        )
+        ffmpeg_flags = f"-c:v copy {' '.join(audio_args)}"
+        info = {
+            "active": True,
+            "state": "ACTIVE",
+            "reason": reason,
+            "video_mode": f"copy (-c:v copy, {v_codec_up})",
+            "audio_mode": "smart_downmix_aac" if is_downmix else "smart_transcode_aac",
+            "downmixed": is_downmix,
+            "source_spec": source_spec,
+            "target_spec": target_spec,
+            "source_spec_short": source_spec_short,
+            "target_spec_short": target_spec_short,
+            "source_codec": src_codec,
+            "source_codec_display": src_codec_display,
+            "source_profile": src_profile,
+            "source_channels": src_channels,
+            "source_channel_layout": src_ch_long,
+            "source_sample_rate": src_sr,
+            "source_bitrate_kbps": src_br_kbps,
+            "target_codec": "aac",
+            "target_channels": target_ch,
+            "target_channel_layout": target_ch_long,
+            "target_sample_rate": target_sr,
+            "target_bitrate_kbps": target_br_kbps,
+            "ffmpeg_flags": ffmpeg_flags,
+        }
+        return audio_args, info
+
+    # 4. Full Video + Audio Transcode (Video cannot be direct-copied due to codec/resolution/tonemap/burn-in)
+    enc_label = video_encoder or "h264"
+    reason = (
+        f"Video stream requires transcoding ({v_codec_up} -> H.264 via {enc_label}); "
+        f"audio transcoded alongside video to {target_spec_short}"
+    )
+    ffmpeg_flags = f"-c:v {enc_label} {' '.join(audio_args)}"
+    info = {
+        "active": False,
+        "state": "INACTIVE (Full Video + Audio Transcode)",
+        "reason": reason,
+        "video_mode": f"transcode ({v_codec_up} -> {enc_label})",
+        "audio_mode": "transcode_downmix_aac" if is_downmix else "transcode_aac",
+        "downmixed": is_downmix,
+        "source_spec": source_spec,
+        "target_spec": target_spec,
+        "source_spec_short": source_spec_short,
+        "target_spec_short": target_spec_short,
+        "source_codec": src_codec,
+        "source_codec_display": src_codec_display,
+        "source_profile": src_profile,
+        "source_channels": src_channels,
+        "source_channel_layout": src_ch_long,
+        "source_sample_rate": src_sr,
+        "source_bitrate_kbps": src_br_kbps,
+        "target_codec": "aac",
+        "target_channels": target_ch,
+        "target_channel_layout": target_ch_long,
+        "target_sample_rate": target_sr,
+        "target_bitrate_kbps": target_br_kbps,
+        "ffmpeg_flags": ffmpeg_flags,
+    }
+    return audio_args, info
+
+
+
+
+def extract_video_frame(file_path: str, dest_path: str, target_fraction: float = 0.40) -> bool:
+    """
+    Extracts a crisp 16:9 frame from a video file at target_fraction (default: ~40%, between 1/3 and 1/2)
+    and saves it to dest_path.
+    Uses fast input-seeking (-ss before -i) for near-instant execution.
+    """
+    if not file_path or not os.path.exists(file_path):
+        return False
+    try:
+        probe = probe_media_streams(file_path)
+        duration = float(probe.get("duration") or 0.0)
+        if duration > 0:
+            # Between 1/3 and 1/2 of duration
+            seek_time = max(10.0, min(duration - 10.0, duration * target_fraction))
+        else:
+            seek_time = 300.0  # fallback to 5 minutes
+
+        os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
+        # Scale to 640x360 with aspect decrease and pad to guarantee exact 16:9 frame
+        vf = "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2"
+        cmd = [
+            get_ffmpeg_path(),
+            "-v", "error",
+            "-ss", f"{seek_time:.2f}",
+            "-i", file_path,
+            "-vframes", "1",
+            "-an", "-sn", "-dn",
+            "-vf", vf,
+            "-q:v", "3",
+            "-y",
+            dest_path
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if res.returncode == 0 and os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+            return True
+        return False
+    except Exception as e:
+        print(f"[FFmpeg] Error extracting video frame from {file_path}: {e}")
+        return False
 
 if __name__ == "__main__":
     ensure_ffmpeg()

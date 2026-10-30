@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Heirloom</title>
+    <title>Settings - Heirloom</title>
     <link rel="stylesheet" href="/static/style.css">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <script src="/static/password-strength.js"></script>
@@ -158,6 +158,36 @@
             })
             .catch(err => {
                 console.error('Error saving transcoding settings:', err);
+            });
+        }
+
+        let languageSaveTimer = null;
+        function autoSaveLanguageSettings() {
+            const form = document.getElementById("languageSettingsForm");
+            if (!form) return;
+            const formData = new FormData(form);
+            const statusEl = document.getElementById("languageSaveStatus");
+
+            fetch(form.action, {
+                method: "POST",
+                body: formData
+            })
+            .then(res => {
+                if (res.ok) {
+                    if (statusEl) {
+                        statusEl.style.display = "inline-flex";
+                        if (window.lucide) lucide.createIcons();
+                        clearTimeout(languageSaveTimer);
+                        languageSaveTimer = setTimeout(() => {
+                            statusEl.style.display = "none";
+                        }, 2500);
+                    }
+                } else {
+                    console.error("Failed to save language settings");
+                }
+            })
+            .catch(err => {
+                console.error("Error saving language settings:", err);
             });
         }
 
@@ -488,19 +518,21 @@
 </head>
 
 <body>
-    <div class="header flex justify-between align-center">
-        <div class="flex align-center gap-15">
+    <div class="header">
+        <div class="flex gap-15 align-center">
             <a href="/" class="icon-link" title="Home">
                 <i data-lucide="arrow-left"></i>
             </a>
             <h1 class="m-0" style="font-size: 1.5rem;">Settings</h1>
         </div>
-        {% if is_admin %}
-        <a href="/server-dashboard" id="serverActivityBadge" class="server-activity-badge" style="display: none;" title="Server Action">
-            <span class="activity-pulse-dot"></span>
-            <span id="serverActivityText">Scanning...</span>
-        </a>
-        {% endif %}
+        <div class="flex gap-15 align-center">
+            {% if is_admin %}
+            <a href="/server-dashboard" id="serverActivityBadge" class="server-activity-badge" style="display: none;" title="Server Action">
+                <span class="activity-pulse-dot"></span>
+                <span id="serverActivityText">Scanning...</span>
+            </a>
+            {% endif %}
+        </div>
     </div>
     
     <div class="container">
@@ -549,6 +581,39 @@
                         placeholder="Seconds (e.g. 5, 10)" required class="w-full m-0" style="box-sizing: border-box;">
                 </div>
                 <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <div class="card-header flex align-center justify-between">
+                <h2 class="m-0">Audio & Subtitle Preferences{% if current_profile and not current_profile.is_primary %} ({{ current_profile.name }}){% endif %}</h2>
+                <span id="languageSaveStatus" style="display: none; color: #4ade80; font-size: 0.9em; font-weight: 500;" class="align-center gap-5">
+                    <i data-lucide="check" style="width: 16px; height: 16px;"></i> Saved
+                </span>
+            </div>
+            <p style="color: var(--text-secondary); font-size: 0.9em;" class="mb-15">
+                Choose the default audio and subtitle languages for video playback.
+            </p>
+            <form id="languageSettingsForm" action="/settings/language" method="post" class="m-0">
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 15px;">
+                    <div>
+                        <label for="defaultAudioLang" style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 0.9rem;">Default Audio Language</label>
+                        <select name="default_audio_lang" id="defaultAudioLang" class="select-input w-100 m-0" onchange="autoSaveLanguageSettings()">
+                            {% for code, name in available_languages %}
+                            <option value="{{ code }}" {% if default_audio_lang == code %}selected{% endif %}>{{ name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label for="defaultSubtitleLang" style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 0.9rem;">Default Subtitle Language</label>
+                        <select name="default_subtitle_lang" id="defaultSubtitleLang" class="select-input w-100 m-0" onchange="autoSaveLanguageSettings()">
+                            <option value="off" {% if default_subtitle_lang == "off" %}selected{% endif %}>Off</option>
+                            {% for code, name in available_languages %}
+                            <option value="{{ code }}" {% if default_subtitle_lang == code %}selected{% endif %}>{{ name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
             </form>
         </div>
 

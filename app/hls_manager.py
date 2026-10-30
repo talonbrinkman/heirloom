@@ -10,7 +10,7 @@ from typing import Optional, Dict
 from .ffmpeg_setup import (
     get_ffmpeg_path, probe_media_streams, get_video_transcode_args, 
     get_working_encoder, get_keyframe_before_time, get_video_transcode_pipeline,
-    parse_burn_sub_index
+    parse_burn_sub_index, get_smart_audio_pipeline
 )
 
 SEGMENT_DURATION = 6.0  # 6.0 seconds per HLS chunk
@@ -83,19 +83,21 @@ class HLSTranscodeWorker:
             cmd.extend(["-i", self.media_path])
 
             if can_direct_stream_video:
+                audio_args, smart_audio = get_smart_audio_pipeline(
+                    selected_track=selected_track,
+                    can_direct_stream_video=True,
+                    is_direct_play=False,
+                    video_codec=probe.get("video_codec"),
+                    video_encoder="copy"
+                )
                 cmd.extend(["-map", "0:v:0"])
                 if selected_track:
                     cmd.extend(["-map", f"0:a:{self.audio_track}"])
-                else:
-                    cmd.append("-an")
                 cmd.extend(["-sn", "-map_chapters", "-1"])
                 cmd.extend(["-c:v", "copy"])
-                if track_can_copy:
-                    cmd.extend(["-c:a", "copy"])
-                else:
-                    cmd.extend(["-c:a", "aac", "-b:a", "192k", "-ac", "2", "-af", "aresample=async=1"])
+                cmd.extend(audio_args)
             else:
-                pipeline_args, v_map, _ = get_video_transcode_pipeline(
+                pipeline_args, v_map, enc_type = get_video_transcode_pipeline(
                     res=self.res,
                     profile=self.hw_profile,
                     burn_sub_stream=self.burn_sub,
@@ -104,16 +106,28 @@ class HLSTranscodeWorker:
                     color_transfer=color_transfer,
                     tonemap_algo=self.tonemap_algo
                 )
+                audio_args, smart_audio = get_smart_audio_pipeline(
+                    selected_track=selected_track,
+                    can_direct_stream_video=False,
+                    is_direct_play=False,
+                    video_codec=probe.get("video_codec"),
+                    video_encoder=enc_type
+                )
                 cmd.extend(pipeline_args)
                 cmd.extend(["-map", v_map])
                 if selected_track:
                     cmd.extend(["-map", f"0:a:{self.audio_track}"])
-                else:
-                    cmd.append("-an")
                 cmd.extend(["-sn", "-map_chapters", "-1"])
                 cmd.extend(["-force_key_frames", f"expr:gte(t,n_forced*{int(SEGMENT_DURATION)})"])
-                if selected_track:
-                    cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ac", "2", "-af", "aresample=async=1"])
+                cmd.extend(audio_args)
+
+            print(
+                f"[Smart Audio Direct Stream] {smart_audio['state']} | "
+                f"Session: {self.session_key} (seg {self.start_segment}) | "
+                f"Video: {smart_audio['video_mode']} | "
+                f"Audio: {smart_audio['source_spec']} -> {smart_audio['target_spec']} | "
+                f"Flags: {smart_audio['ffmpeg_flags']}"
+            )
 
             segment_pattern = os.path.join(self.output_dir, "seg_%04d.ts")
             playlist_path = os.path.join(self.output_dir, "prog.m3u8")
