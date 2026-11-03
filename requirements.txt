@@ -1,5 +1,7 @@
 fastapi
-uvicorn
+uvicorn[standard]
+websockets>=12.0
+wsproto
 sqlmodel
 python-multipart
 bcrypt
@@ -7,7 +9,6 @@ requests
 jinja2
 watchdog
 Pillow
-websockets
 psutil
 httpx
 mutagen

@@ -19,6 +19,7 @@ class _MainLayoutState extends State<MainLayout> {
     const LibraryScreen(mediaType: 'movie', title: 'Movies'),
     const LibraryScreen(mediaType: 'tv', title: 'TV Shows'),
     const LibraryScreen(mediaType: 'photo', title: 'Photos'),
+    const LibraryScreen(mediaType: 'music', title: 'Music'),
   ];
 
   @override
@@ -32,6 +33,8 @@ class _MainLayoutState extends State<MainLayout> {
         backgroundColor: AppTheme.bgSecondary,
         selectedItemColor: AppTheme.primaryRed,
         unselectedItemColor: AppTheme.textTertiary,
+        selectedFontSize: 11,
+        unselectedFontSize: 11,
         items: const [
           BottomNavigationBarItem(
             icon: Icon(LucideIcons.home),
@@ -48,6 +51,10 @@ class _MainLayoutState extends State<MainLayout> {
           BottomNavigationBarItem(
             icon: Icon(LucideIcons.image),
             label: 'Photos',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(LucideIcons.music),
+            label: 'Music',
           ),
         ],
       ),

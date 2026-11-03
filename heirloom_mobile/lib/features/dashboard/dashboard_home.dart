@@ -5,6 +5,8 @@ import 'package:go_router/go_router.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../../core/api_client.dart';
 import '../../core/theme.dart';
+import '../../core/widgets/profile_avatar_button.dart';
+import '../media/photo_viewer_dialog.dart';
 
 final dashboardDataProvider = FutureProvider<Map<String, dynamic>>((ref) async {
   final dio = ref.watch(apiClientProvider);
@@ -22,7 +24,7 @@ class DashboardHome extends ConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Heirloom', style: TextStyle(color: AppTheme.primaryRed, fontSize: 24)),
+        title: const Text('Heirloom', style: TextStyle(color: AppTheme.primaryRed, fontSize: 24, fontWeight: FontWeight.bold)),
         centerTitle: false,
         actions: [
           IconButton(
@@ -32,17 +34,13 @@ class DashboardHome extends ConsumerWidget {
             },
           ),
           IconButton(
-            icon: const Icon(LucideIcons.inbox),
-            onPressed: () {
-              // TODO: Implement inbox
-            },
-          ),
-          IconButton(
             icon: const Icon(LucideIcons.settings),
             onPressed: () {
               context.push('/settings');
             },
           ),
+          const SizedBox(width: 4),
+          const ProfileAvatarButton(),
         ],
       ),
       body: dashboardData.when(
@@ -121,7 +119,11 @@ class DashboardHome extends ConsumerWidget {
     return GestureDetector(
       onTap: () {
         if (mediaType != null) {
-          context.push('/details/$mediaType/${item['id']}');
+          if (mediaType == 'photo') {
+            showHeirloomPhotoViewer(context, Map<String, dynamic>.from(item), serverUrl);
+          } else {
+            context.push('/details/$mediaType/${item['id']}');
+          }
         }
       },
       child: Container(

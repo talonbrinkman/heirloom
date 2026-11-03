@@ -1,3 +1,13 @@
+# Ensure WebSocket support is available in Uvicorn environment
+try:
+    import websockets
+except ImportError:
+    try:
+        import subprocess, sys
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets>=12.0", "wsproto"])
+    except Exception:
+        pass
+
 from fastapi import FastAPI, Depends, Form, Request, HTTPException, Response, WebSocket, WebSocketDisconnect, Query, BackgroundTasks
 import threading
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse, StreamingResponse
@@ -22,7 +32,7 @@ import random
 from collections import defaultdict, Counter
 from datetime import datetime, timezone, timedelta
 from .database import create_db_and_tables, get_session, engine
-from .models import User, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile, Artist, Album, Track, Playlist, PlaylistTrack
+from .models import User, UserSession, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile, Artist, Album, Track, Playlist, PlaylistTrack
 from .scanner import METADATA_DIR, scan_media_library, scanner_manager, is_recycle_name, is_recycle_path, download_image, async_download_image, async_fetch_additional_details, SafeHTTPClient, httpx, find_local_trailer, extract_tmdb_trailer_key
 from .watcher import start_watcher, stop_watcher, scanner_debouncer
 from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time, sanitize_vtt_content, get_video_transcode_pipeline, parse_burn_sub_index, get_smart_audio_pipeline, extract_video_frame
@@ -52,22 +62,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.exception_handler(RuntimeError)
+async def runtime_error_handler(request: Request, exc: RuntimeError):
+    if "does not exist" in str(exc).lower():
+        return Response(status_code=404, content="File does not exist")
+    raise exc
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[str, list[WebSocket]] = {}
         self.session_clients: dict[str, dict[WebSocket, dict]] = {}
         self.session_playback: dict[str, dict] = {}
 
-    async def connect(self, websocket: WebSocket, session_id: str, user_id: int = None, username: str = None, is_host: bool = False):
+    async def connect(self, websocket: WebSocket, session_id: str, user_id: int = None, profile_id: int = None, username: str = None, is_host: bool = False):
         await websocket.accept()
         if session_id not in self.active_connections:
             self.active_connections[session_id] = []
             self.session_clients[session_id] = {}
             if session_id not in self.session_playback:
-                self.session_playback[session_id] = {"current_time": 0.0, "is_paused": True, "updated_at": time.time()}
+                self.session_playback[session_id] = {"current_time": 0.0, "is_paused": True, "has_started": False, "updated_at": time.time()}
         self.active_connections[session_id].append(websocket)
         self.session_clients[session_id][websocket] = {
             "user_id": user_id,
+            "profile_id": profile_id,
             "username": username or "Guest",
             "is_host": is_host,
             "is_ready": False,
@@ -104,11 +121,81 @@ class ConnectionManager:
         clients = self.session_clients.get(session_id, {})
         if not clients:
             return True
-        return all(c.get("is_ready", False) for c in clients.values())
+        if not all(c.get("is_ready", False) for c in clients.values()):
+            return False
+
+        playback = self.session_playback.get(session_id, {})
+        if not playback.get("has_started", False):
+            try:
+                with Session(engine) as db:
+                    invites = db.exec(
+                        select(WatchInvite).where(
+                            WatchInvite.session_id == session_id,
+                            WatchInvite.status.in_(["pending", "accepted"])
+                        )
+                    ).all()
+                    for inv in invites:
+                        connected = False
+                        for c in clients.values():
+                            if inv.invited_profile_id is not None:
+                                if c.get("profile_id") == inv.invited_profile_id:
+                                    connected = True
+                                    break
+                            elif inv.invited_user_id is not None:
+                                if c.get("user_id") == inv.invited_user_id:
+                                    connected = True
+                                    break
+                        if not connected:
+                            return False
+            except Exception:
+                pass
+
+        return True
 
     def get_waiting_users(self, session_id: str) -> list[str]:
         clients = self.session_clients.get(session_id, {})
-        return [c.get("username", "User") for c in clients.values() if not c.get("is_ready", False)]
+        waiting = [c.get("username", "User") for c in clients.values() if not c.get("is_ready", False)]
+
+        playback = self.session_playback.get(session_id, {})
+        if not playback.get("has_started", False):
+            try:
+                with Session(engine) as db:
+                    invites = db.exec(
+                        select(WatchInvite).where(
+                            WatchInvite.session_id == session_id,
+                            WatchInvite.status.in_(["pending", "accepted"])
+                        )
+                    ).all()
+                    for inv in invites:
+                        connected = False
+                        for c in clients.values():
+                            if inv.invited_profile_id is not None:
+                                if c.get("profile_id") == inv.invited_profile_id:
+                                    connected = True
+                                    break
+                            elif inv.invited_user_id is not None:
+                                if c.get("user_id") == inv.invited_user_id:
+                                    connected = True
+                                    break
+                        if not connected:
+                            name = None
+                            if inv.invited_profile_id:
+                                p = db.get(Profile, inv.invited_profile_id)
+                                if p:
+                                    name = p.name
+                            if not name and inv.invited_user_id:
+                                u = db.get(User, inv.invited_user_id)
+                                if u:
+                                    name = u.username
+                            waiting.append(name or "Invited Guest")
+            except Exception:
+                pass
+
+        unique_waiting = []
+        for u in waiting:
+            if u not in unique_waiting:
+                unique_waiting.append(u)
+        return unique_waiting
 
     def get_session_time(self, session_id: str) -> float:
         return self.session_playback.get(session_id, {}).get("current_time", 0.0)
@@ -329,11 +416,32 @@ def on_startup():
     ensure_ffmpeg()
     
     start_watcher()
+    scanner_manager.post_scan_callbacks.append(lambda: (invalidate_series_cache(), invalidate_movie_cache()))
 
 @app.on_event("shutdown")
 def on_shutdown():
     stop_watcher()
     hls_manager.shutdown()
+
+def get_user_by_session_token(session: Session, token: str) -> Optional[User]:
+    if not token:
+        return None
+    try:
+        user_sess = session.exec(select(UserSession).where(UserSession.session_token == token)).first()
+        if user_sess:
+            if user_sess.expires_at:
+                now_utc = datetime.now(timezone.utc)
+                exp = user_sess.expires_at
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                if exp < now_utc:
+                    session.delete(user_sess)
+                    session.commit()
+                    return None
+            return session.get(User, user_sess.user_id)
+    except Exception:
+        pass
+    return session.exec(select(User).where(User.session_token == token)).first()
 
 def get_current_user(request: Request):
     token = request.cookies.get("session_token")
@@ -346,7 +454,7 @@ def get_current_user(request: Request):
     if not token:
         return None
     with Session(engine) as session:
-        return session.exec(select(User).where(User.session_token == token)).first()
+        return get_user_by_session_token(session, token)
 
 PIN_REGEX = re.compile(r"^\d{4,15}$")
 
@@ -421,8 +529,12 @@ def get_current_profile(
     if not current_user:
         return None
 
-    # Check active_profile_id cookie or query parameter
-    active_id_str = request.cookies.get("active_profile_id") or request.query_params.get("profile_id")
+    # Check active_profile_id header, cookie, or query parameter
+    active_id_str = (
+        request.headers.get("X-Profile-ID")
+        or request.cookies.get("active_profile_id")
+        or request.query_params.get("profile_id")
+    )
     profile = None
     if active_id_str:
         try:
@@ -432,7 +544,10 @@ def get_current_profile(
                 if not p.pin_hash:
                     profile = p
                 else:
-                    unlock_token = request.cookies.get(f"profile_unlocked_{p.id}")
+                    unlock_token = (
+                        request.headers.get(f"X-Profile-Unlock-{p.id}")
+                        or request.cookies.get(f"profile_unlocked_{p.id}")
+                    )
                     expected = make_profile_unlock_token(p.id, current_user.session_token or "")
                     if unlock_token and hmac.compare_digest(unlock_token, expected):
                         profile = p
@@ -446,7 +561,10 @@ def get_current_profile(
             if not candidate.pin_hash:
                 profile = candidate
             else:
-                unlock_token = request.cookies.get(f"profile_unlocked_{candidate.id}")
+                unlock_token = (
+                    request.headers.get(f"X-Profile-Unlock-{candidate.id}")
+                    or request.cookies.get(f"profile_unlocked_{candidate.id}")
+                )
                 expected = make_profile_unlock_token(candidate.id, current_user.session_token or "")
                 if unlock_token and hmac.compare_digest(unlock_token, expected):
                     profile = candidate
@@ -549,9 +667,21 @@ async def favicon():
 # ----------------- AUTH & REGISTRATION -----------------
 
 @app.get("/login", response_class=HTMLResponse)
-async def view_login(request: Request, session: Session = Depends(get_session)):
+async def view_login(
+    request: Request,
+    current_user: Optional[User] = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
     if not session.exec(select(User)).first():
         return templates.TemplateResponse(request=request, name="setup.html")
+    if current_user:
+        profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id)).all()
+        if len(profiles) > 1 or (len(profiles) == 1 and profiles[0].pin_hash):
+            if current_profile:
+                return RedirectResponse(url="/", status_code=303)
+            return RedirectResponse(url="/profiles", status_code=303)
+        return RedirectResponse(url="/", status_code=303)
     return templates.TemplateResponse(request=request, name="login.html")
 
 @app.post("/login")
@@ -559,8 +689,22 @@ async def process_login(request: Request, username: str = Form(...), password: s
     check_rate_limit(request)
     user = session.exec(select(User).where(User.username == username)).first()
     if user and bcrypt.checkpw(password.encode('utf-8'), user.password_hash.encode('utf-8')):
-        user.session_token = str(uuid.uuid4())
+        new_token = str(uuid.uuid4())
+        user.session_token = new_token
         session.add(user)
+
+        cookie_max_age = (60 * 60 * 24 * 30) if remember_me else None
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=30)) if remember_me else (datetime.now(timezone.utc) + timedelta(days=1))
+        ua = request.headers.get("user-agent", "")[:120]
+        try:
+            session.add(UserSession(
+                user_id=user.id,
+                session_token=new_token,
+                expires_at=expires_at,
+                client_name=ua
+            ))
+        except Exception:
+            pass
         session.commit()
 
         # Check or ensure primary profile
@@ -583,7 +727,6 @@ async def process_login(request: Request, username: str = Form(...), password: s
         # If user has multiple profiles or single profile has a PIN, route to /profiles
         is_secure = is_request_secure(request)
         clear_rate_limit(request)
-        cookie_max_age = (60 * 60 * 24 * 30) if remember_me else None
         if len(profiles) > 1 or (len(profiles) == 1 and profiles[0].pin_hash):
             redirect = RedirectResponse(url="/profiles", status_code=303)
             redirect.set_cookie(key="session_token", value=user.session_token, httponly=True, max_age=cookie_max_age, samesite="lax", secure=is_secure)
@@ -607,8 +750,18 @@ async def api_login(request: Request, login_data: APILoginRequest, session: Sess
     user = session.exec(select(User).where(User.username == login_data.username)).first()
     if user and bcrypt.checkpw(login_data.password.encode('utf-8'), user.password_hash.encode('utf-8')):
         clear_rate_limit(request)
-        user.session_token = str(uuid.uuid4())
+        new_token = str(uuid.uuid4())
+        user.session_token = new_token
         session.add(user)
+        try:
+            session.add(UserSession(
+                user_id=user.id,
+                session_token=new_token,
+                expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+                client_name=request.headers.get("user-agent", "")[:120]
+            ))
+        except Exception:
+            pass
         session.commit()
         return {"success": True, "token": user.session_token, "user": {"id": user.id, "username": user.username}}
     record_failed_attempt(request)
@@ -616,8 +769,17 @@ async def api_login(request: Request, login_data: APILoginRequest, session: Sess
 
 
 @app.api_route("/logout", methods=["GET", "POST"])
-async def process_logout(response: Response, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if current_user:
+async def process_logout(request: Request, response: Response, current_user: Optional[User] = Depends(get_current_user), session: Session = Depends(get_session)):
+    token = request.cookies.get("session_token")
+    if token:
+        try:
+            sess_entry = session.exec(select(UserSession).where(UserSession.session_token == token)).first()
+            if sess_entry:
+                session.delete(sess_entry)
+                session.commit()
+        except Exception:
+            pass
+    if current_user and current_user.session_token == token:
         current_user.session_token = None
         session.add(current_user)
         session.commit()
@@ -730,6 +892,17 @@ async def process_setup(request: Request, username: str = Form(...), password: s
     session.add(new_user)
     session.commit()
 
+    try:
+        session.add(UserSession(
+            user_id=new_user.id,
+            session_token=new_user.session_token,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            client_name=request.headers.get("user-agent", "")[:120]
+        ))
+        session.commit()
+    except Exception:
+        pass
+
     primary_profile = Profile(
         user_id=new_user.id,
         name=username,
@@ -740,6 +913,15 @@ async def process_setup(request: Request, username: str = Form(...), password: s
         rewind_seconds=0
     )
     session.add(primary_profile)
+    try:
+        session.add(UserSession(
+            user_id=new_user.id,
+            session_token=new_user.session_token,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            client_name=request.headers.get("user-agent", "")[:120]
+        ))
+    except Exception:
+        pass
     session.commit()
 
     is_secure = is_request_secure(request)
@@ -796,6 +978,15 @@ async def process_register(request: Request, username: str = Form(...), password
         rewind_seconds=0
     )
     session.add(primary_profile)
+    try:
+        session.add(UserSession(
+            user_id=new_user.id,
+            session_token=new_user.session_token,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            client_name=request.headers.get("user-agent", "")[:120]
+        ))
+    except Exception:
+        pass
     session.commit()
 
     clear_rate_limit(request)
@@ -917,7 +1108,7 @@ async def select_profile(
             })
 
     is_secure = is_request_secure(request)
-    resp = JSONResponse(content={"success": True, "redirect": "/"})
+    resp = JSONResponse(content={"success": True, "redirect": "/", "profile_id": profile.id})
     resp.set_cookie(key="active_profile_id", value=str(profile.id), httponly=False, max_age=60*60*24*30, samesite="lax", secure=is_secure)
     return resp
 
@@ -957,7 +1148,7 @@ async def verify_profile_pin(
 
     clear_rate_limit(rate_key)
     unlock_token = make_profile_unlock_token(profile.id, current_user.session_token or "")
-    resp = JSONResponse(content={"success": True, "redirect": "/"})
+    resp = JSONResponse(content={"success": True, "redirect": "/", "unlock_token": unlock_token, "profile_id": profile.id})
     resp.set_cookie(key="active_profile_id", value=str(profile.id), httponly=False, max_age=60*60*24*30, samesite="lax", secure=is_secure)
     resp.set_cookie(key=f"profile_unlocked_{profile.id}", value=unlock_token, httponly=True, max_age=60*60*24*7, samesite="lax", secure=is_secure)
     return resp
@@ -997,7 +1188,7 @@ async def reset_pin_with_password(
 
     is_secure = is_request_secure(request)
     unlock_token = make_profile_unlock_token(profile.id, current_user.session_token or "")
-    resp = JSONResponse(content={"success": True, "redirect": "/"})
+    resp = JSONResponse(content={"success": True, "redirect": "/", "unlock_token": unlock_token, "profile_id": profile.id})
     resp.set_cookie(key="active_profile_id", value=str(profile.id), httponly=False, max_age=60*60*24*30, samesite="lax", secure=is_secure)
     resp.set_cookie(key=f"profile_unlocked_{profile.id}", value=unlock_token, httponly=True, max_age=60*60*24*7, samesite="lax", secure=is_secure)
     return resp
@@ -2705,6 +2896,8 @@ def api_library(
             result.append({
                 "id": item.id,
                 "title": item.title,
+                "type": media_type,
+                "media_type": media_type,
                 "year": item.year if hasattr(item, 'year') else None,
                 "poster_filename": item.poster_filename if hasattr(item, 'poster_filename') else None,
                 "rating": getattr(item, 'rating', None),
@@ -2715,6 +2908,157 @@ def api_library(
             })
         
     return {"items": result}
+
+@app.get("/api/info")
+def api_server_info(
+    current_user: Optional[User] = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    avail_vols = get_available_volumes(session)
+    info = {
+        "server_name": "Heirloom",
+        "version": "1.7.4",
+        "features": {
+            "movies": bool(avail_vols.get("movie")),
+            "tv": bool(avail_vols.get("tv")),
+            "photos": bool(avail_vols.get("photo")),
+            "music": bool(avail_vols.get("music"))
+        },
+        "auth_required": True,
+        "authenticated": bool(current_user)
+    }
+    if current_user:
+        info["user"] = {
+            "id": current_user.id,
+            "username": current_user.username,
+            "is_admin": current_user.is_admin,
+            "movies_access": current_user.movies_access,
+            "tv_access": current_user.tv_access,
+            "photos_access": current_user.photos_access,
+            "music_access": current_user.music_access,
+        }
+        if current_profile:
+            info["active_profile"] = {
+                "id": current_profile.id,
+                "name": current_profile.name,
+                "is_primary": current_profile.is_primary,
+                "rating_level": current_profile.rating_level or 0
+            }
+    return info
+
+
+class MobileSettingsRequest(BaseModel):
+    rewind_seconds: Optional[int] = None
+    auto_pause_episodes: Optional[int] = None
+    default_audio_lang: Optional[str] = None
+    default_subtitle_lang: Optional[str] = None
+    new_password: Optional[str] = None
+
+@app.get("/api/settings")
+def api_get_settings(
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    rewind_val = (current_profile.rewind_seconds if current_profile and current_profile.rewind_seconds is not None else current_user.rewind_seconds) or 0
+    autopause_val = (current_profile.auto_pause_episodes if current_profile and current_profile.auto_pause_episodes is not None else current_user.auto_pause_episodes)
+    if autopause_val is None:
+        autopause_val = 3
+    audio_val = (current_profile.default_audio_lang if current_profile and current_profile.default_audio_lang else current_user.default_audio_lang) or "eng"
+    sub_val = (current_profile.default_subtitle_lang if current_profile and current_profile.default_subtitle_lang else current_user.default_subtitle_lang) or "off"
+
+    return {
+        "user": {
+            "id": current_user.id,
+            "username": current_user.username,
+            "is_admin": current_user.is_admin,
+            "movies_access": current_user.movies_access,
+            "tv_access": current_user.tv_access,
+            "photos_access": current_user.photos_access,
+            "music_access": current_user.music_access,
+        },
+        "active_profile": {
+            "id": current_profile.id if current_profile else None,
+            "name": current_profile.name if current_profile else current_user.username,
+            "avatar_color": current_profile.avatar_color if current_profile else "#e50914",
+            "avatar_icon": (current_profile.avatar_icon if current_profile else "user") or "user",
+            "is_primary": current_profile.is_primary if current_profile else True,
+            "is_kids": bool((current_profile.rating_level == 2 if current_profile and current_profile.rating_level is not None else (current_profile.is_kids if current_profile else False))),
+            "rating_level": (current_profile.rating_level if current_profile and current_profile.rating_level is not None else 0),
+            "has_pin": bool(current_profile.pin_hash if current_profile else False)
+        },
+        "preferences": {
+            "rewind_seconds": rewind_val,
+            "auto_pause_episodes": autopause_val,
+            "default_audio_lang": audio_val,
+            "default_subtitle_lang": sub_val,
+        },
+        "available_languages": [{"code": c, "name": n} for c, n in AVAILABLE_LANGUAGES],
+        "server": {
+            "name": "Heirloom",
+            "version": "1.7.4"
+        }
+    }
+
+@app.post("/api/settings")
+def api_save_settings(
+    body: MobileSettingsRequest,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if body.rewind_seconds is not None:
+        val = max(0, min(300, body.rewind_seconds))
+        if current_profile:
+            current_profile.rewind_seconds = val
+            session.add(current_profile)
+        if current_profile is None or current_profile.is_primary:
+            current_user.rewind_seconds = val
+            session.add(current_user)
+
+    if body.auto_pause_episodes is not None:
+        val = max(0, min(10, body.auto_pause_episodes))
+        if current_profile:
+            current_profile.auto_pause_episodes = val
+            session.add(current_profile)
+        if current_profile is None or current_profile.is_primary:
+            current_user.auto_pause_episodes = val
+            session.add(current_user)
+
+    if body.default_audio_lang is not None:
+        val = body.default_audio_lang.strip().lower()
+        if current_profile:
+            current_profile.default_audio_lang = val
+            session.add(current_profile)
+        if current_profile is None or current_profile.is_primary:
+            current_user.default_audio_lang = val
+            session.add(current_user)
+
+    if body.default_subtitle_lang is not None:
+        val = body.default_subtitle_lang.strip().lower()
+        if current_profile:
+            current_profile.default_subtitle_lang = val
+            session.add(current_profile)
+        if current_profile is None or current_profile.is_primary:
+            current_user.default_subtitle_lang = val
+            session.add(current_user)
+
+    if body.new_password:
+        clean_pw = body.new_password.strip()
+        if len(clean_pw) >= 6:
+            current_user.password_hash = bcrypt.hashpw(clean_pw.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            session.add(current_user)
+
+    session.commit()
+    return {"status": "ok", "message": "Settings saved successfully"}
+
 
 @app.get("/api/me")
 async def api_me(current_user: User = Depends(get_current_user)):
@@ -2895,7 +3239,7 @@ def api_dashboard(
 
 @app.get("/api/movie/{movie_id}")
 def api_movie(
-    movie_id: int,
+    movie_id: str,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
@@ -2906,7 +3250,12 @@ def api_movie(
     rating_level = get_profile_rating_level(current_user, current_profile)
     prof_id = current_profile.id if current_profile else None
     
-    movie = session.get(Movie, movie_id)
+    movie = None
+    if str(movie_id).isdigit():
+        movie = session.get(Movie, int(movie_id))
+    if not movie:
+        unquoted = urllib.parse.unquote(str(movie_id)).strip()
+        movie = session.exec(select(Movie).where(func.lower(Movie.title) == unquoted.lower())).first()
     if not movie: raise HTTPException(status_code=404, detail="Movie not found")
     if rating_level > 0 and not is_rating_allowed(movie.content_rating, rating_level):
         raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
@@ -2956,7 +3305,7 @@ def api_movie(
 
 @app.get("/api/series/{series_id}")
 def api_series(
-    series_id: int,
+    series_id: str,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
@@ -2966,7 +3315,12 @@ def api_series(
     rating_level = get_profile_rating_level(current_user, current_profile)
     prof_id = current_profile.id if current_profile else None
     
-    show = session.get(TVShow, series_id)
+    show = None
+    if str(series_id).isdigit():
+        show = session.get(TVShow, int(series_id))
+    if not show:
+        unquoted = urllib.parse.unquote(str(series_id)).strip()
+        show = session.exec(select(TVShow).where(func.lower(TVShow.title) == unquoted.lower())).first()
     if not show: raise HTTPException(status_code=404, detail="Show not found")
     
     if rating_level > 0 and not is_rating_allowed(show.content_rating, rating_level):
@@ -3179,6 +3533,29 @@ def sort_photos_list(photos: list[Photo], sort: str) -> list[Photo]:
         photos.sort(key=lambda p: (p.title.lower() if p.title else "", p.id))
     
     return photos
+
+@app.get("/api/photo/{photo_id}")
+def api_photo(
+    photo_id: int,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    if not current_user.photos_access: raise HTTPException(status_code=403, detail="Forbidden")
+    photo = session.get(Photo, photo_id)
+    if not photo: raise HTTPException(status_code=404, detail="Photo not found")
+    dt = photo.date_taken or photo.date_added
+    return {
+        "id": photo.id,
+        "title": photo.title,
+        "album": photo.album,
+        "poster_filename": photo.poster_filename,
+        "image_url": f"/metadata/{photo.poster_filename}" if photo.poster_filename else None,
+        "raw_url": f"/photo_file/{photo.id}",
+        "date_display": dt.strftime("%B %d, %Y") if dt else "Undated",
+        "date": dt.isoformat() if dt else None
+    }
+
 
 @app.get("/api/photos/timeline")
 def api_photos_timeline(
@@ -3482,6 +3859,37 @@ def get_photo_recommended_sections(session: Session):
                 
     return sections
 
+
+@app.get("/api/photos/recommended")
+def api_photos_recommended(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    if not current_user.photos_access: raise HTTPException(status_code=403, detail="Forbidden")
+
+    sections = get_photo_recommended_sections(session)
+    result = []
+    for sec in sections:
+        sec_photos = []
+        for p in sec["photos"]:
+            dt = p.date_taken or p.date_added
+            sec_photos.append({
+                "id": p.id,
+                "title": p.title,
+                "poster_filename": p.poster_filename,
+                "thumbnail_url": f"/metadata/{p.poster_filename}" if p.poster_filename else None,
+                "date_display": dt.strftime("%b %d, %Y") if dt else None,
+                "date": dt.isoformat() if dt else None,
+                "url": f"/photo/{p.id}?from=/library/photo?view=recommended"
+            })
+        result.append({
+            "title": sec["title"],
+            "photos": sec_photos
+        })
+    return {"sections": result}
+
+
 @app.get("/library/{media_type}", response_class=HTMLResponse)
 def library_view(
     request: Request,
@@ -3713,6 +4121,82 @@ def library_view(
     if media_type == "photo":
         response.set_cookie("photo_view_pref", current_view, max_age=31536000, path="/", samesite="lax")
     return response
+# ----------------- MEDIA METADATA IN-MEMORY CACHES -----------------
+_SERIES_CACHE = {}
+_SERIES_CACHE_LOCK = threading.Lock()
+_SERIES_CACHE_TTL = 900  # 15 minutes
+
+_MOVIE_CACHE = {}
+_MOVIE_CACHE_LOCK = threading.Lock()
+_MOVIE_CACHE_TTL = 900  # 15 minutes
+
+def get_cached_series(title: str) -> Optional[dict]:
+    key = title.strip().lower()
+    with _SERIES_CACHE_LOCK:
+        item = _SERIES_CACHE.get(key)
+        if item:
+            if time.time() - item["time"] < _SERIES_CACHE_TTL:
+                return item["data"]
+            _SERIES_CACHE.pop(key, None)
+    return None
+
+def set_cached_series(title: str, data: dict):
+    key = title.strip().lower()
+    with _SERIES_CACHE_LOCK:
+        if len(_SERIES_CACHE) >= 500:
+            oldest_key = min(_SERIES_CACHE.keys(), key=lambda k: _SERIES_CACHE[k]["time"])
+            _SERIES_CACHE.pop(oldest_key, None)
+        _SERIES_CACHE[key] = {"time": time.time(), "data": data}
+
+def invalidate_series_cache(title: Optional[str] = None):
+    with _SERIES_CACHE_LOCK:
+        if title:
+            _SERIES_CACHE.pop(title.strip().lower(), None)
+        else:
+            _SERIES_CACHE.clear()
+
+def get_cached_movie(movie_id: int) -> Optional[dict]:
+    with _MOVIE_CACHE_LOCK:
+        item = _MOVIE_CACHE.get(movie_id)
+        if item:
+            if time.time() - item["time"] < _MOVIE_CACHE_TTL:
+                return item["data"]
+            _MOVIE_CACHE.pop(movie_id, None)
+    return None
+
+def set_cached_movie(movie_id: int, data: dict):
+    with _MOVIE_CACHE_LOCK:
+        if len(_MOVIE_CACHE) >= 1000:
+            oldest_key = min(_MOVIE_CACHE.keys(), key=lambda k: _MOVIE_CACHE[k]["time"])
+            _MOVIE_CACHE.pop(oldest_key, None)
+        _MOVIE_CACHE[movie_id] = {"time": time.time(), "data": data}
+
+def invalidate_movie_cache(movie_id: Optional[int] = None):
+    with _MOVIE_CACHE_LOCK:
+        if movie_id:
+            _MOVIE_CACHE.pop(movie_id, None)
+        else:
+            _MOVIE_CACHE.clear()
+
+def get_runtime_str(item, session):
+    if hasattr(item, 'runtime') and item.runtime is None:
+        if getattr(item, 'file_path', None) and os.path.exists(item.file_path):
+            try:
+                cmd = [get_ffprobe_path(), "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", item.file_path]
+                import subprocess
+                out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=1.5).decode('utf-8').strip()
+                item.runtime = int(float(out))
+                session.commit()
+            except Exception:
+                item.runtime = 0
+        else:
+            item.runtime = 0
+            
+    if not hasattr(item, 'runtime') or not item.runtime: return ""
+    m = int(item.runtime // 60)
+    if m < 60: return f"{m}min"
+    return f"{m//60}hr {m%60}min"
+
 @app.get("/movie/{movie_id}", response_class=HTMLResponse)
 def movie_view(
     request: Request,
@@ -3727,62 +4211,84 @@ def movie_view(
     rating_level = get_profile_rating_level(current_user, current_profile)
     prof_id = current_profile.id if current_profile else None
     
-    movie = session.get(Movie, movie_id)
-    if not movie: raise HTTPException(status_code=404, detail="Movie not found")
-    if rating_level > 0 and not is_rating_allowed(movie.content_rating, rating_level):
+    cached_m = get_cached_movie(movie_id)
+    if not cached_m:
+        movie = session.get(Movie, movie_id)
+        if not movie: raise HTTPException(status_code=404, detail="Movie not found")
+        
+        cast_list = []
+        if movie.cast and movie.cast.startswith("["):
+            try:
+                import json
+                cast_list = json.loads(movie.cast)
+            except Exception: pass
+            
+        # Discover all editions/versions for this movie
+        raw_year = str(movie.year or "").split(" • ")[0].strip()
+        if movie.tmdb_id:
+            v_q = select(Movie).where(
+                (Movie.tmdb_id == movie.tmdb_id) |
+                ((func.lower(Movie.title) == movie.title.strip().lower()) & (Movie.year.like(f"{raw_year}%") if raw_year else True))
+            )
+        else:
+            v_q = select(Movie).where(
+                func.lower(Movie.title) == movie.title.strip().lower()
+            )
+            if raw_year:
+                v_q = v_q.where(Movie.year.like(f"{raw_year}%"))
+
+        raw_versions = session.exec(v_q).all()
+
+        movie_versions = []
+        for v in raw_versions:
+            f_size = 0
+            try:
+                if v.file_path and os.path.exists(v.file_path):
+                    f_size = os.path.getsize(v.file_path)
+            except Exception:
+                pass
+
+            probe = probe_media_streams(v.file_path) if (v.file_path and os.path.exists(v.file_path)) else {}
+            res_label = get_media_resolution_label(probe)
+            height = probe.get("height") or 0
+
+            movie_versions.append({
+                "id": v.id,
+                "filename": os.path.basename(v.file_path),
+                "file_path": v.file_path,
+                "resolution": res_label,
+                "file_size": format_file_size(f_size),
+                "raw_size": f_size,
+                "height": height,
+                "content_rating": v.content_rating,
+                "is_current": v.id == movie.id
+            })
+
+        movie_versions.sort(key=lambda x: (x["height"], x["raw_size"]), reverse=True)
+        rt_str = get_runtime_str(movie, session)
+        formatted_year = f"{movie.year} • {rt_str}" if (movie.year and rt_str) else (movie.year or rt_str or "")
+
+        cached_m = {
+            "movie": movie,
+            "cast_list": cast_list,
+            "movie_versions": movie_versions,
+            "raw_version_ids": [v.id for v in raw_versions],
+            "formatted_year": formatted_year,
+            "content_rating": movie.content_rating
+        }
+        set_cached_movie(movie_id, cached_m)
+
+    movie = cached_m["movie"]
+    cast_list = cached_m["cast_list"]
+    if rating_level > 0 and not is_rating_allowed(cached_m["content_rating"], rating_level):
         raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
-        
-    cast_list = []
-    if movie.cast and movie.cast.startswith("["):
-        try:
-            import json
-            cast_list = json.loads(movie.cast)
-        except: pass
-        
-    # Discover all editions/versions for this movie
-    raw_year = str(movie.year or "").split(" • ")[0].strip()
-    if movie.tmdb_id:
-        v_q = select(Movie).where(
-            (Movie.tmdb_id == movie.tmdb_id) |
-            ((func.lower(Movie.title) == movie.title.strip().lower()) & (Movie.year.like(f"{raw_year}%") if raw_year else True))
-        )
-    else:
-        v_q = select(Movie).where(
-            func.lower(Movie.title) == movie.title.strip().lower()
-        )
-        if raw_year:
-            v_q = v_q.where(Movie.year.like(f"{raw_year}%"))
 
-    raw_versions = session.exec(v_q).all()
-    if rating_level > 0:
-        raw_versions = [v for v in raw_versions if is_rating_allowed(v.content_rating, rating_level)]
+    movie_versions = [v for v in cached_m["movie_versions"] if (rating_level == 0 or is_rating_allowed(v.get("content_rating"), rating_level))]
+    current_version = next((v for v in movie_versions if v["id"] == movie_id), movie_versions[0] if movie_versions else None)
+    if cached_m.get("formatted_year"):
+        movie.year = cached_m["formatted_year"]
 
-    movie_versions = []
-    for v in raw_versions:
-        f_size = 0
-        try:
-            if v.file_path and os.path.exists(v.file_path):
-                f_size = os.path.getsize(v.file_path)
-        except Exception:
-            pass
-
-        probe = probe_media_streams(v.file_path) if (v.file_path and os.path.exists(v.file_path)) else {}
-        res_label = get_media_resolution_label(probe)
-        height = probe.get("height") or 0
-
-        movie_versions.append({
-            "id": v.id,
-            "filename": os.path.basename(v.file_path),
-            "file_path": v.file_path,
-            "resolution": res_label,
-            "file_size": format_file_size(f_size),
-            "raw_size": f_size,
-            "height": height,
-            "is_current": v.id == movie.id
-        })
-
-    movie_versions.sort(key=lambda x: (x["height"], x["raw_size"]), reverse=True)
-    current_version = next((v for v in movie_versions if v["is_current"]), movie_versions[0] if movie_versions else None)
+    raw_version_ids = cached_m.get("raw_version_ids", [movie.id])
 
     hist_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == movie.id).where(WatchHistory.media_type == 'movie')
     if prof_id:
@@ -3790,8 +4296,8 @@ def movie_view(
     history = session.exec(hist_q).first()
 
     # If current version has no progress, check if user has progress on a sibling version
-    if (not history or not history.progress) and raw_versions:
-        sibling_ids = [v.id for v in raw_versions if v.id != movie.id]
+    if (not history or not history.progress) and raw_version_ids:
+        sibling_ids = [vid for vid in raw_version_ids if vid != movie.id]
         if sibling_ids:
             sib_q = select(WatchHistory).where(
                 WatchHistory.user_id == current_user.id,
@@ -3812,10 +4318,6 @@ def movie_view(
         wl_q = wl_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
     in_watchlist = bool(session.exec(wl_q).first())
 
-    rt_str = get_runtime_str(movie, session)
-    if rt_str:
-        movie.year = f"{movie.year} • {rt_str}" if movie.year else rt_str
-
     watched_movie_ids, _, _ = get_user_watched_status(session, current_user.id, prof_id)
     is_watched = movie.id in watched_movie_ids
 
@@ -3834,22 +4336,6 @@ def movie_view(
         "is_watched": is_watched, "movie_versions": movie_versions, "current_version": current_version,
         "related_movies": related_movies, "watched_movie_ids": watched_movie_ids, "user_watchlist_movies": user_watchlist_movies
     })
-
-def get_runtime_str(item, session):
-    if hasattr(item, 'runtime') and item.runtime is None:
-        try:
-            cmd = [get_ffprobe_path(), "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", item.file_path]
-            import subprocess
-            out = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode('utf-8').strip()
-            item.runtime = int(float(out))
-            session.commit()
-        except:
-            item.runtime = 0
-            
-    if not hasattr(item, 'runtime') or not item.runtime: return ""
-    m = int(item.runtime // 60)
-    if m < 60: return f"{m}min"
-    return f"{m//60}hr {m%60}min"
 
 @app.get("/api/movie/{movie_id}/trailer")
 async def get_movie_trailer(
@@ -4017,30 +4503,105 @@ def series_view(
     rating_level = get_profile_rating_level(current_user, current_profile)
     prof_id = current_profile.id if current_profile else None
     
-    shows = session.exec(select(TVShow).where(TVShow.title == title)).all()
-    if not shows:
-        raise HTTPException(status_code=404, detail="Series not found")
-    if rating_level > 0 and not is_rating_allowed(shows[0].content_rating, rating_level):
+    cached_s = get_cached_series(title)
+    if not cached_s:
+        shows = session.exec(select(TVShow).where(TVShow.title == title)).all()
+        if not shows:
+            raise HTTPException(status_code=404, detail="Series not found")
+        
+        # Non-blocking background enrichment of missing logo, cast photos, and season posters
+        needs_tv_enrichment = (
+            not shows[0].logo_filename or
+            not shows[0].cast or
+            shows[0].cast == "[]" or
+            '"profile_filename": null' in (shows[0].cast or '') or
+            any(not e.season_poster_filename for e in shows)
+        )
+        if needs_tv_enrichment:
+            background_tasks.add_task(async_enrich_tv_show, title)
+            
+        cast_list = []
+        if shows[0].cast and shows[0].cast.startswith("["):
+            try:
+                import json
+                cast_list = json.loads(shows[0].cast)
+            except: pass
+
+        def get_s_e(t):
+            m = re.search(r'S(\d+)E(\d+)', t.file_path, re.IGNORECASE)
+            if m: return (int(m.group(1)), int(m.group(2)))
+            return (0, 0)
+
+        episodes_template = []
+        seasons = set()
+        for ep_obj in sorted(shows, key=get_s_e):
+            ep_dict = {
+                "id": ep_obj.id,
+                "title": ep_obj.title,
+                "poster_filename": ep_obj.poster_filename,
+                "season_poster_filename": ep_obj.season_poster_filename,
+                "file_path": ep_obj.file_path,
+                "season_episode": "",
+                "episode_name": "",
+                "season": 0,
+                "episode": ep_obj.episode,
+                "plot": ep_obj.plot or "",
+                "play_url": f"/play/tv/{ep_obj.id}"
+            }
+            m = re.search(r'S(\d+)E(\d+)', ep_dict['file_path'], re.IGNORECASE)
+            if m:
+                s_num = int(m.group(1))
+                e_num = int(m.group(2))
+                ep_dict["season"] = s_num
+                ep_dict["episode"] = ep_obj.episode or e_num
+                seasons.add(s_num)
+                base = f"Episode {e_num}"
+            else:
+                ep_dict["season"] = ep_obj.season or 0
+                ep_dict["episode"] = ep_obj.episode or 1
+                seasons.add(ep_dict["season"])
+                base = f"Episode {ep_dict['episode']}" if ep_dict.get("episode") else "Special"
+            
+            rt_str = get_runtime_str(ep_obj, session)
+            rt_suffix = f" • {rt_str}" if rt_str else ""
+            
+            filename = os.path.splitext(os.path.basename(ep_dict['file_path']))[0]
+            name_match = re.search(r'S\d+E\d+[ \-]*(.+)', filename, re.IGNORECASE)
+            
+            if name_match and name_match.group(1).strip():
+                ep_dict['episode_name'] = name_match.group(1).strip()
+                ep_dict['season_episode'] = f"{ep_dict['episode_name']} • {base}{rt_suffix}"
+            else:
+                ep_dict['season_episode'] = f"{base}{rt_suffix}"
+                
+            thumb_name = getattr(ep_obj, "thumbnail_filename", None) or f"tv_thumb_{ep_obj.id}.jpg"
+            metadata_dir = METADATA_DIR if os.path.exists(METADATA_DIR) else "config/metadata"
+            thumb_exists = os.path.exists(os.path.join(metadata_dir, thumb_name))
+            ep_dict["thumbnail_filename"] = thumb_name if thumb_exists else None
+            episodes_template.append(ep_dict)
+
+        sorted_seasons = sorted(list(seasons))
+        sorted_shows = sorted(shows, key=get_tv_episode_sort_key)
+
+        cached_s = {
+            "shows": shows,
+            "sorted_shows": sorted_shows,
+            "cast_list": cast_list,
+            "episodes_template": episodes_template,
+            "sorted_seasons": sorted_seasons,
+            "content_rating": shows[0].content_rating
+        }
+        set_cached_series(title, cached_s)
+
+    shows = cached_s["shows"]
+    sorted_shows = cached_s["sorted_shows"]
+    cast_list = cached_s["cast_list"]
+    episodes_template = cached_s["episodes_template"]
+    sorted_seasons = cached_s["sorted_seasons"]
+
+    if rating_level > 0 and not is_rating_allowed(cached_s["content_rating"], rating_level):
         raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
 
-    # Non-blocking background enrichment of missing logo, cast photos, and season posters
-    needs_tv_enrichment = (
-        not shows[0].logo_filename or
-        not shows[0].cast or
-        shows[0].cast == "[]" or
-        '"profile_filename": null' in (shows[0].cast or '') or
-        any(not e.season_poster_filename for e in shows)
-    )
-    if needs_tv_enrichment:
-        background_tasks.add_task(async_enrich_tv_show, title)
-        
-    cast_list = []
-    if shows[0].cast and shows[0].cast.startswith("["):
-        try:
-            import json
-            cast_list = json.loads(shows[0].cast)
-        except: pass
-        
     series_ep_ids = [e.id for e in shows]
     hist_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id.in_(series_ep_ids)).where(WatchHistory.media_type == 'tv')
     if prof_id:
@@ -4068,7 +4629,6 @@ def series_view(
             
     if not selected_episode:
         # Default behavior: use first episode or history
-        sorted_shows = sorted(shows, key=get_tv_episode_sort_key)
         selected_episode = sorted_shows[0]
         if history:
             hist_ep = next((e for e in shows if e.id == history.item_id), None)
@@ -4098,11 +4658,6 @@ def series_view(
 
     _, watched_tv_episode_ids, watched_tv_titles = get_user_watched_status(session, current_user.id, prof_id)
     is_series_watched = title.strip().lower() in watched_tv_titles
-        
-    def get_s_e(t):
-        m = re.search(r'S(\d+)E(\d+)', t.file_path, re.IGNORECASE)
-        if m: return (int(m.group(1)), int(m.group(2)))
-        return (0, 0)
 
     ep_hist_q = select(WatchHistory).where(
         WatchHistory.user_id == current_user.id,
@@ -4118,56 +4673,11 @@ def series_view(
             progress_map[h.item_id] = bool(0 < (h.progress or 0) < 95.0)
         
     episodes = []
-    seasons = set()
-    for ep_obj in sorted(shows, key=get_s_e):
-        ep_dict = {
-            "id": ep_obj.id,
-            "title": ep_obj.title,
-            "poster_filename": ep_obj.poster_filename,
-            "season_poster_filename": ep_obj.season_poster_filename,
-            "file_path": ep_obj.file_path,
-            "season_episode": "",
-            "episode_name": "",
-            "season": 0
-        }
-        m = re.search(r'S(\d+)E(\d+)', ep_dict['file_path'], re.IGNORECASE)
-        if m:
-            s_num = int(m.group(1))
-            e_num = int(m.group(2))
-            ep_dict["season"] = s_num
-            ep_dict["episode"] = ep_obj.episode or e_num
-            seasons.add(s_num)
-            base = f"Episode {e_num}"
-        else:
-            ep_dict["season"] = ep_obj.season or 0
-            ep_dict["episode"] = ep_obj.episode or 1
-            seasons.add(ep_dict["season"])
-            base = f"Episode {ep_dict['episode']}" if ep_dict.get("episode") else "Special"
-        
-        rt_str = get_runtime_str(ep_obj, session)
-        rt_suffix = f" • {rt_str}" if rt_str else ""
-        
-        filename = os.path.splitext(os.path.basename(ep_dict['file_path']))[0]
-        name_match = re.search(r'S\d+E\d+[ \-]*(.+)', filename, re.IGNORECASE)
-        
-        if name_match and name_match.group(1).strip():
-            ep_dict['episode_name'] = name_match.group(1).strip()
-            ep_dict['season_episode'] = f"{ep_dict['episode_name']} • {base}{rt_suffix}"
-        else:
-            ep_dict['season_episode'] = f"{base}{rt_suffix}"
-            
-        thumb_name = getattr(ep_obj, "thumbnail_filename", None) or f"tv_thumb_{ep_obj.id}.jpg"
-        metadata_dir = METADATA_DIR if os.path.exists(METADATA_DIR) else "config/metadata"
-        thumb_exists = os.path.exists(os.path.join(metadata_dir, thumb_name))
-        ep_dict["thumbnail_filename"] = thumb_name if thumb_exists else None
-        ep_dict["plot"] = ep_obj.plot or ""
-        ep_dict["has_progress"] = progress_map.get(ep_obj.id, False)
-        ep_dict["play_url"] = f"/play/tv/{ep_obj.id}"
-
-        ep_dict['is_watched'] = ep_obj.id in watched_tv_episode_ids
-        episodes.append(ep_dict)
-    
-    sorted_seasons = sorted(list(seasons))
+    for ep_dict in episodes_template:
+        ep_copy = dict(ep_dict)
+        ep_copy["has_progress"] = progress_map.get(ep_dict["id"], False)
+        ep_copy["is_watched"] = ep_dict["id"] in watched_tv_episode_ids
+        episodes.append(ep_copy)
     
     selected_ep_dict = next((e for e in episodes if e['id'] == selected_episode.id), None)
     
@@ -5096,6 +5606,136 @@ def api_remove_track_from_playlist(
     session.commit()
     return {"success": True}
 
+@app.get("/api/playback/info/{media_type}/{item_id}")
+def api_playback_info(
+    request: Request,
+    media_type: str,
+    item_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user: raise HTTPException(status_code=401, detail="Unauthorized")
+    if media_type not in ("movie", "tv"): raise HTTPException(status_code=400, detail="Invalid media type")
+    if media_type == "movie" and not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
+    if media_type == "tv" and not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
+
+    item = session.get(Movie if media_type == "movie" else TVShow, item_id)
+    if not item: raise HTTPException(status_code=404, detail="Item not found")
+
+    rating_level = get_profile_rating_level(current_user, current_profile)
+    if rating_level > 0 and not is_rating_allowed(item.content_rating, rating_level):
+        raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
+
+    prof_id = current_profile.id if current_profile else None
+    all_hist = session.exec(
+        select(WatchHistory).where(
+            WatchHistory.user_id == current_user.id,
+            WatchHistory.item_id == item_id,
+            WatchHistory.media_type == media_type
+        ).order_by(WatchHistory.last_watched.desc())
+    ).all()
+    history_entry = None
+    if all_hist:
+        history_entry = next((h for h in all_hist if h.profile_id == prof_id), None)
+        if not history_entry:
+            history_entry = next((h for h in all_hist if h.profile_id is None), all_hist[0])
+
+    probe = probe_media_streams(item.file_path) if item.file_path and os.path.exists(item.file_path) else {}
+    duration = probe.get("duration") or 0.0
+    if not duration and hasattr(item, "runtime") and item.runtime:
+        duration = float(item.runtime * 60)
+
+    progress = history_entry.progress if history_entry else 0.0
+    resume_seconds = (progress / 100.0) * duration if (duration and progress > 0) else 0.0
+    rewind_buffer = (current_profile.rewind_seconds if current_profile and current_profile.rewind_seconds else current_user.rewind_seconds) or 0
+    if rewind_buffer and resume_seconds > rewind_buffer and progress < 95.0:
+        resume_seconds = max(0.0, resume_seconds - rewind_buffer)
+
+    # Subtitles
+    subtitle_tracks = probe.get("subtitle_tracks", [])
+    formatted_subs = []
+    for s in subtitle_tracks:
+        formatted_subs.append({
+            "track_id": s.get("id"),
+            "language": s.get("language") or "und",
+            "title": s.get("title") or s.get("language") or f"Track {s.get('id')}",
+            "format": s.get("codec_name"),
+            "is_default": bool(s.get("is_default")),
+            "is_forced": bool(s.get("is_forced")),
+            "url": f"/subtitle/{media_type}/{item.id}?track_id={s.get('id')}"
+        })
+
+    if not formatted_subs and item.file_path:
+        base_path = os.path.splitext(item.file_path)[0]
+        for ext in [".srt", ".vtt"]:
+            if os.path.exists(base_path + ext):
+                formatted_subs.append({
+                    "track_id": 0,
+                    "language": "und",
+                    "title": f"External ({ext[1:].upper()})",
+                    "format": ext[1:],
+                    "is_default": True,
+                    "is_forced": False,
+                    "url": f"/subtitle/{media_type}/{item.id}?ext={ext[1:]}"
+                })
+                break
+
+    audio_tracks = probe.get("audio_tracks", [])
+
+    next_episode_id = None
+    prev_episode_id = None
+    season_number = None
+    episode_number = None
+    episode_title = None
+    season_episode_display = ""
+    if media_type == "tv":
+        m = re.search(r'S(\d+)E(\d+)', item.file_path or '', re.IGNORECASE)
+        if m:
+            season_number = int(m.group(1))
+            episode_number = int(m.group(2))
+            season_episode_display = f"S{season_number} • E{episode_number}"
+            fn = os.path.splitext(os.path.basename(item.file_path))[0]
+            name_m = re.search(r'S\d+E\d+[ \-]*(.+)', fn, re.IGNORECASE)
+            if name_m:
+                episode_title = name_m.group(1).strip()
+
+        series_episodes = session.exec(select(TVShow).where(func.lower(TVShow.title) == item.title.strip().lower())).all()
+        sorted_eps = sorted(series_episodes, key=get_tv_episode_sort_key)
+        for i, ep in enumerate(sorted_eps):
+            if ep.id == item_id:
+                if i > 0: prev_episode_id = sorted_eps[i-1].id
+                if i + 1 < len(sorted_eps): next_episode_id = sorted_eps[i+1].id
+                break
+
+    return {
+        "media_type": media_type,
+        "item_id": item.id,
+        "title": item.title,
+        "episode_title": episode_title,
+        "season_number": season_number,
+        "episode_number": episode_number,
+        "season_episode": season_episode_display,
+        "year": getattr(item, "year", None),
+        "content_rating": getattr(item, "content_rating", None),
+        "duration": duration,
+        "resume_position_seconds": resume_seconds,
+        "progress_percent": progress,
+        "stream_url": f"/stream/{media_type}/{item.id}",
+        "hls_master_url": f"/stream/hls/{media_type}/{item.id}/master.m3u8",
+        "poster_url": f"/metadata/{item.poster_filename}" if item.poster_filename else None,
+        "backdrop_url": f"/metadata/{item.backdrop_filename}" if getattr(item, "backdrop_filename", None) else None,
+        "audio_tracks": audio_tracks,
+        "subtitle_tracks": formatted_subs,
+        "intro_start": getattr(item, "intro_start", None),
+        "intro_end": getattr(item, "intro_end", None),
+        "credits_start": getattr(item, "credits_start", None),
+        "credits_end": getattr(item, "credits_end", None),
+        "next_episode_id": next_episode_id,
+        "prev_episode_id": prev_episode_id
+    }
+
+
 @app.get("/play/{media_type}/{item_id}", response_class=HTMLResponse)
 async def play_video(
     request: Request,
@@ -5198,6 +5838,20 @@ async def play_video(
         })
         
     prof_id = current_profile.id if current_profile else None
+    
+    # Check Watch Together sync role early to avoid writing progress for guests
+    is_sync_host = False
+    is_sync_guest = False
+    if sync:
+        ws_session = session.get(WatchSession, sync)
+        if not ws_session or not ws_session.is_active:
+            return RedirectResponse(url="/?session_ended=1", status_code=303)
+        if ws_session.host_profile_id and current_profile:
+            is_sync_host = (ws_session.host_profile_id == current_profile.id)
+        else:
+            is_sync_host = (ws_session.host_id == current_user.id)
+        is_sync_guest = not is_sync_host
+
     all_hist = session.exec(
         select(WatchHistory).where(
             WatchHistory.user_id == current_user.id,
@@ -5212,61 +5866,62 @@ async def play_video(
         if not history_entry:
             history_entry = next((h for h in all_hist if h.profile_id is None), all_hist[0])
         # Purge any duplicate records for this item so only one persists
-        for extra in all_hist:
-            if extra.id != history_entry.id:
-                session.delete(extra)
+        if not is_sync_guest:
+            for extra in all_hist:
+                if extra.id != history_entry.id:
+                    session.delete(extra)
     
-    if media_type == "movie":
-        sibling_ids = get_sibling_movie_ids(session, item)
-        sib_q = select(WatchHistory).where(
-            WatchHistory.user_id == current_user.id,
-            WatchHistory.media_type == "movie",
-            WatchHistory.item_id.in_(sibling_ids),
-            WatchHistory.progress > 0
-        )
-        if prof_id:
-            sib_q = sib_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
-        latest_sib_hist = session.exec(sib_q.order_by(WatchHistory.last_watched.desc())).first()
+    if not is_sync_guest:
+        if media_type == "movie":
+            sibling_ids = get_sibling_movie_ids(session, item)
+            sib_q = select(WatchHistory).where(
+                WatchHistory.user_id == current_user.id,
+                WatchHistory.media_type == "movie",
+                WatchHistory.item_id.in_(sibling_ids),
+                WatchHistory.progress > 0
+            )
+            if prof_id:
+                sib_q = sib_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+            latest_sib_hist = session.exec(sib_q.order_by(WatchHistory.last_watched.desc())).first()
 
-        if not history_entry:
-            history_entry = WatchHistory(user_id=current_user.id, profile_id=prof_id, media_type=media_type, item_id=item_id)
-            if not restart and latest_sib_hist:
-                history_entry.progress = latest_sib_hist.progress
-            session.add(history_entry)
-        else:
-            if restart:
-                history_entry.progress = 0.0
-            elif latest_sib_hist and latest_sib_hist.progress > 0:
-                history_entry.progress = latest_sib_hist.progress
-            if prof_id and not history_entry.profile_id:
-                history_entry.profile_id = prof_id
-            history_entry.last_watched = datetime.now(timezone.utc)
-            session.add(history_entry)
-    else:
-        if history_entry:
-            if restart:
-                history_entry.progress = 0.0
-            if prof_id and not history_entry.profile_id:
-                history_entry.profile_id = prof_id
-            history_entry.last_watched = datetime.now(timezone.utc)
-            session.add(history_entry)
-        else:
-            history_entry = WatchHistory(user_id=current_user.id, profile_id=prof_id, media_type=media_type, item_id=item_id)
-            if restart:
-                history_entry.progress = 0.0
-            session.add(history_entry)
-        
-    for attempt in range(5):
-        try:
-            session.commit()
-            break
-        except Exception as e:
-            if "locked" in str(e).lower() and attempt < 4:
-                import time
-                time.sleep(0.05 * (attempt + 1))
+            if not history_entry:
+                history_entry = WatchHistory(user_id=current_user.id, profile_id=prof_id, media_type=media_type, item_id=item_id)
+                if not restart and latest_sib_hist:
+                    history_entry.progress = latest_sib_hist.progress
+                session.add(history_entry)
             else:
-                session.rollback()
+                if restart:
+                    history_entry.progress = 0.0
+                elif latest_sib_hist and latest_sib_hist.progress > 0:
+                    history_entry.progress = latest_sib_hist.progress
+                if prof_id and not history_entry.profile_id:
+                    history_entry.profile_id = prof_id
+                history_entry.last_watched = datetime.now(timezone.utc)
+                session.add(history_entry)
+        else:
+            if history_entry:
+                if restart:
+                    history_entry.progress = 0.0
+                if prof_id and not history_entry.profile_id:
+                    history_entry.profile_id = prof_id
+                history_entry.last_watched = datetime.now(timezone.utc)
+                session.add(history_entry)
+            else:
+                history_entry = WatchHistory(user_id=current_user.id, profile_id=prof_id, media_type=media_type, item_id=item_id)
+                if restart:
+                    history_entry.progress = 0.0
+                session.add(history_entry)
+            
+        for attempt in range(5):
+            try:
+                session.commit()
                 break
+            except Exception as e:
+                if "locked" in str(e).lower() and attempt < 4:
+                    time.sleep(0.05 * (attempt + 1))
+                else:
+                    session.rollback()
+                    break
     
     next_episode_id = None
     prev_episode_id = None
@@ -5317,7 +5972,7 @@ async def play_video(
         except:
             pass
 
-    if history_entry and duration > 0 and (not getattr(history_entry, 'duration', 0.0) or history_entry.duration <= 0):
+    if not is_sync_guest and history_entry and duration > 0 and (not getattr(history_entry, 'duration', 0.0) or history_entry.duration <= 0):
         history_entry.duration = float(duration)
         session.add(history_entry)
         session.commit()
@@ -5335,17 +5990,10 @@ async def play_video(
             session.commit()
 
     token = request.query_params.get("token", "")
-    is_sync_host = False
     sync_initial_time = 0.0
     rewind_buffer = (current_profile.rewind_seconds if current_profile and current_profile.rewind_seconds else current_user.rewind_seconds) or 0
     if sync:
         ws_session = session.get(WatchSession, sync)
-        if not ws_session or not ws_session.is_active:
-            return RedirectResponse(url="/?session_ended=1", status_code=303)
-        if ws_session.host_profile_id and current_profile:
-            is_sync_host = (ws_session.host_profile_id == current_profile.id)
-        else:
-            is_sync_host = (ws_session.host_id == current_user.id)
         if is_sync_host:
             host_start = 0.0
             if history_entry and duration and history_entry.progress > 0 and history_entry.progress < 100:
@@ -5353,7 +6001,7 @@ async def play_video(
                 if rewind_buffer:
                     host_start = max(0.0, host_start - rewind_buffer)
             if sync not in manager.session_playback or manager.session_playback[sync].get("current_time", 0.0) == 0.0:
-                manager.session_playback[sync] = {"current_time": host_start, "is_paused": True, "updated_at": time.time()}
+                manager.session_playback[sync] = {"current_time": host_start, "is_paused": True, "has_started": False, "updated_at": time.time()}
             sync_initial_time = manager.session_playback[sync]["current_time"]
         else:
             sync_initial_time = manager.session_playback.get(sync, {}).get("current_time", 0.0)
@@ -5365,7 +6013,7 @@ async def play_video(
                 if host_hist and duration and host_hist.progress > 0:
                     sync_initial_time = (host_hist.progress / 100.0) * duration
                     if sync not in manager.session_playback:
-                        manager.session_playback[sync] = {"current_time": sync_initial_time, "is_paused": True, "updated_at": time.time()}
+                        manager.session_playback[sync] = {"current_time": sync_initial_time, "is_paused": True, "has_started": False, "updated_at": time.time()}
 
     # Register active stream telemetry immediately
     session_key = f"{current_user.id}_{prof_id or 0}_{media_type}_{item_id}"
@@ -5571,11 +6219,33 @@ async def update_progress(
     current_time: Optional[float] = Form(None),
     duration: Optional[float] = Form(None),
     play_type: Optional[str] = Form(None),
+    sync: Optional[str] = Query(None),
+    sync_session_id: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
 ):
     if not current_user: return {"status": "unauthorized"}
+
+    # Do not save progress for non-host participants in a Watch Together session
+    active_sync_id = sync or sync_session_id or request.query_params.get("sync")
+    if active_sync_id:
+        ws_session = session.get(WatchSession, active_sync_id)
+        if ws_session:
+            is_host = False
+            if ws_session.host_profile_id and current_profile:
+                is_host = (ws_session.host_profile_id == current_profile.id)
+            else:
+                is_host = (ws_session.host_id == current_user.id)
+            if not is_host:
+                return {"status": "ignored", "reason": "watch_together_guest"}
+
+    for sid, clients in list(manager.session_clients.items()):
+        for ws_conn, client_data in list(clients.items()):
+            if client_data.get("user_id") == current_user.id and not client_data.get("is_host"):
+                ws_session = session.get(WatchSession, sid)
+                if ws_session and ws_session.is_active and ws_session.media_type == media_type and ws_session.item_id == item_id:
+                    return {"status": "ignored", "reason": "watch_together_guest"}
     
     prof_id = current_profile.id if current_profile else None
     session_key = f"{current_user.id}_{prof_id or 0}_{media_type}_{item_id}"
@@ -7839,6 +8509,7 @@ async def fix_media_match(
 
             session.add(movie)
             session.commit()
+            invalidate_movie_cache(movie.id)
             return {"success": True, "title": movie.title}
 
         elif media_type == "tv":
@@ -7900,6 +8571,7 @@ async def fix_media_match(
                 session.add(ep)
 
             session.commit()
+            invalidate_series_cache()
             return {"success": True, "title": new_title}
         else:
             raise HTTPException(status_code=400, detail="Invalid media type")
@@ -8326,7 +8998,7 @@ async def websocket_sync(websocket: WebSocket, session_id: str):
     is_host = False
     with Session(engine) as db:
         if token:
-            current_user = db.exec(select(User).where(User.session_token == token)).first()
+            current_user = get_user_by_session_token(db, token)
         if current_user and active_pid_str:
             try:
                 p = db.get(Profile, int(active_pid_str))
@@ -8351,22 +9023,25 @@ async def websocket_sync(websocket: WebSocket, session_id: str):
     await manager.connect(
         websocket, session_id,
         user_id=current_user.id if current_user else None,
+        profile_id=current_profile.id if current_profile else None,
         username=display_name,
         is_host=is_host
     )
 
     # Send initial room state to newly connected client
     try:
-        playback = manager.session_playback.get(session_id, {"current_time": 0.0, "is_paused": True})
+        playback = manager.session_playback.get(session_id, {"current_time": 0.0, "is_paused": True, "has_started": False})
+        is_ready = manager.check_all_ready(session_id)
+        paused_state = playback.get("is_paused", True) if playback.get("has_started", False) else False
         await websocket.send_text(json.dumps({
             "action": "room_state",
             "time": playback.get("current_time", 0.0),
-            "paused": playback.get("is_paused", True),
-            "all_ready": manager.check_all_ready(session_id),
+            "paused": paused_state,
+            "all_ready": is_ready,
             "waiting_users": manager.get_waiting_users(session_id),
             "is_host": is_host
         }))
-        if not manager.check_all_ready(session_id):
+        if not is_ready:
             await manager.broadcast(json.dumps({
                 "action": "waiting_for",
                 "users": manager.get_waiting_users(session_id)
@@ -8398,14 +9073,19 @@ async def websocket_sync(websocket: WebSocket, session_id: str):
                         manager.session_playback[session_id]["current_time"] = msg.get("time", manager.session_playback[session_id]["current_time"])
 
                     if manager.check_all_ready(session_id):
-                        playback = manager.session_playback.get(session_id, {"current_time": 0.0, "is_paused": True})
+                        playback = manager.session_playback.get(session_id, {"current_time": 0.0, "is_paused": True, "has_started": False})
+                        # Default to play once everyone connects and is synced!
+                        if not playback.get("has_started", False):
+                            manager.session_playback[session_id]["has_started"] = True
+                            manager.session_playback[session_id]["is_paused"] = False
+                            playback["is_paused"] = False
+
                         ready_msg = json.dumps({
                             "action": "all_ready",
                             "time": playback.get("current_time", 0.0),
-                            "paused": playback.get("is_paused", True)
+                            "paused": playback.get("is_paused", False)
                         })
                         await manager.broadcast(ready_msg, session_id)
-                        await websocket.send_text(ready_msg)
                     else:
                         await manager.broadcast(json.dumps({
                             "action": "waiting_for",
@@ -8422,7 +9102,14 @@ async def websocket_sync(websocket: WebSocket, session_id: str):
                     continue
 
                 elif action == "play":
-                    if manager.check_all_ready(session_id):
+                    if client_info.get("is_host"):
+                        manager.session_playback[session_id]["has_started"] = True
+
+                    connected_clients = manager.session_clients.get(session_id, {})
+                    connected_ready = all(c.get("is_ready", False) for c in connected_clients.values()) if connected_clients else True
+
+                    if connected_ready:
+                        manager.session_playback[session_id]["has_started"] = True
                         manager.session_playback[session_id]["is_paused"] = False
                         if "time" in msg and isinstance(msg["time"], (int, float)):
                             manager.session_playback[session_id]["current_time"] = float(msg["time"])
@@ -8485,11 +9172,11 @@ async def websocket_sync(websocket: WebSocket, session_id: str):
             }), session_id)
         else:
             if remaining > 0 and manager.check_all_ready(session_id):
-                playback = manager.session_playback.get(session_id, {"current_time": 0.0, "is_paused": True})
+                playback = manager.session_playback.get(session_id, {"current_time": 0.0, "is_paused": False, "has_started": True})
                 await manager.broadcast(json.dumps({
                     "action": "all_ready",
                     "time": playback.get("current_time", 0.0),
-                    "paused": playback.get("is_paused", True)
+                    "paused": playback.get("is_paused", False)
                 }), session_id)
 
 @app.get("/api/inbox")
@@ -8570,6 +9257,59 @@ async def get_inbox(
 
     return {"invites": results, "reset_requests": reset_requests}
 
+def get_user_active_session(user_id: int, db: Session) -> Optional[WatchSession]:
+    now = datetime.now(timezone.utc)
+    # 1. Check if user is host of an active session in the database
+    hosted_sessions = db.exec(
+        select(WatchSession).where(
+            WatchSession.host_id == user_id,
+            WatchSession.is_active == True
+        )
+    ).all()
+    for s in hosted_sessions:
+        created = s.created_at.replace(tzinfo=timezone.utc) if s.created_at.tzinfo is None else s.created_at
+        grace_period = (now - created).total_seconds() < 90
+        has_active_conns = s.id in manager.active_connections and len(manager.active_connections[s.id]) > 0
+        if has_active_conns or grace_period:
+            return s
+        else:
+            # Stale session where host didn't connect and grace period elapsed
+            s.is_active = False
+            db.add(s)
+            for inv in db.exec(select(WatchInvite).where(WatchInvite.session_id == s.id)).all():
+                if inv.status == "pending":
+                    inv.status = "expired"
+                    db.add(inv)
+            db.commit()
+
+    # 2. Check if user is currently connected to any active session as participant/guest
+    for sid, clients in list(manager.session_clients.items()):
+        for ws, client_data in list(clients.items()):
+            if client_data.get("user_id") == user_id:
+                s = db.get(WatchSession, sid)
+                if s and s.is_active:
+                    return s
+
+    return None
+
+@app.get("/watch_together/active")
+@app.get("/api/watch_together/active")
+async def check_active_watch_together(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    if not current_user:
+        return {"has_active_session": False}
+    active_session = get_user_active_session(current_user.id, session)
+    if active_session:
+        return {
+            "has_active_session": True,
+            "session_id": active_session.id,
+            "media_type": active_session.media_type,
+            "item_id": active_session.item_id
+        }
+    return {"has_active_session": False}
+
 class WatchTogetherRequest(BaseModel):
     media_type: str
     item_id: int
@@ -8577,6 +9317,7 @@ class WatchTogetherRequest(BaseModel):
     invited_targets: Optional[list[str]] = None
 
 @app.post("/watch_together/create")
+@app.post("/api/watch_together/create")
 async def create_watch_together(
     req: WatchTogetherRequest,
     current_user: User = Depends(get_current_user),
@@ -8585,6 +9326,18 @@ async def create_watch_together(
 ):
     if not current_user or not current_user.watch_together_access:
         raise HTTPException(status_code=403, detail="Forbidden")
+
+    # Block creation if the user already has an active session
+    active_session = get_user_active_session(current_user.id, session)
+    if active_session:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "You already have an active Watch Together session.",
+                "detail": "You already have an active Watch Together session.",
+                "session_id": active_session.id
+            }
+        )
 
     if not current_profile:
         current_profile = session.exec(select(Profile).where(Profile.user_id == current_user.id, Profile.is_primary == True)).first()

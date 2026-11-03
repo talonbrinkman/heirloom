@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:lucide_icons/lucide_icons.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/api_client.dart';
 import '../../core/theme.dart';
 
@@ -39,7 +38,7 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
 
     try {
       final dio = ref.read(apiClientProvider);
-      final response = await dio.get('$url/ping');
+      final response = await dio.get('$url/api/info');
 
       if (response.statusCode == 200) {
         // Save to SharedPreferences and update state
@@ -51,7 +50,7 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
           context.go('/login');
         }
       } else {
-        setState(() => _error = 'Could not connect to server.');
+        setState(() => _error = 'Could not connect to Heirloom server.');
       }
     } catch (e) {
       setState(() => _error = 'Failed to connect. Make sure the server is running and the URL is correct.');

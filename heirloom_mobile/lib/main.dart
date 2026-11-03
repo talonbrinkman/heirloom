@@ -7,6 +7,7 @@ import 'core/theme.dart';
 import 'core/api_client.dart';
 import 'features/setup/setup_screen.dart';
 import 'features/auth/login_screen.dart';
+import 'features/auth/profile_picker_screen.dart';
 import 'features/dashboard/main_layout.dart';
 import 'features/media/media_details_screen.dart';
 import 'features/media/video_player_screen.dart';
@@ -35,9 +36,10 @@ class HeirloomApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final serverUrl = ref.watch(serverUrlProvider);
     final authToken = ref.watch(authTokenProvider);
+    final activeProfileId = ref.watch(activeProfileIdProvider);
 
     final router = GoRouter(
-      initialLocation: _getInitialLocation(serverUrl, authToken),
+      initialLocation: _getInitialLocation(serverUrl, authToken, activeProfileId),
       routes: [
         GoRoute(
           path: '/setup',
@@ -46,6 +48,10 @@ class HeirloomApp extends ConsumerWidget {
         GoRoute(
           path: '/login',
           builder: (context, state) => const LoginScreen(),
+        ),
+        GoRoute(
+          path: '/profiles',
+          builder: (context, state) => const ProfilePickerScreen(),
         ),
         GoRoute(
           path: '/',
@@ -77,16 +83,27 @@ class HeirloomApp extends ConsumerWidget {
         ),
       ],
       redirect: (context, state) {
-        // Enforce flow: Setup -> Login -> Dashboard
+        // Enforce flow: Setup -> Login -> Profile Picker -> Dashboard
         final isSetup = serverUrl != null && serverUrl.isNotEmpty;
         final isLogged = authToken != null && authToken.isNotEmpty;
+        final hasProfile = activeProfileId != null;
         
         final goingToSetup = state.matchedLocation == '/setup';
         final goingToLogin = state.matchedLocation == '/login';
+        final goingToProfiles = state.matchedLocation == '/profiles';
 
         if (!isSetup && !goingToSetup) return '/setup';
         if (isSetup && !isLogged && !goingToLogin && !goingToSetup) return '/login';
-        if (isSetup && isLogged && (goingToSetup || goingToLogin)) return '/';
+        
+        // If logged in but hasn't selected a profile yet, force /profiles
+        if (isSetup && isLogged && !hasProfile && !goingToProfiles) {
+          return '/profiles';
+        }
+
+        // If logged in and attempting to access setup or login screens
+        if (isSetup && isLogged && (goingToSetup || goingToLogin)) {
+          return hasProfile ? '/' : '/profiles';
+        }
         
         return null;
       },
@@ -100,12 +117,15 @@ class HeirloomApp extends ConsumerWidget {
     );
   }
 
-  String _getInitialLocation(String? serverUrl, String? authToken) {
+  String _getInitialLocation(String? serverUrl, String? authToken, int? activeProfileId) {
     if (serverUrl == null || serverUrl.isEmpty) {
       return '/setup';
     }
     if (authToken == null || authToken.isEmpty) {
       return '/login';
+    }
+    if (activeProfileId == null) {
+      return '/profiles';
     }
     return '/';
   }

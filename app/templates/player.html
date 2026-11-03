@@ -566,6 +566,9 @@
                         // Ensure play button icon is visible and start on user's first click anywhere.
                         playBtn.innerHTML = '<i data-lucide="play" id="playIcon"></i>';
                         refreshIcons();
+                        if (typeof showSyncAction === 'function') {
+                            showSyncAction('Autoplay blocked. Click anywhere to play', 'pause');
+                        }
                         const onFirstInteraction = () => {
                             if (video.paused) {
                                 video.play().catch(() => { });
@@ -1256,6 +1259,17 @@
         });
 
         async function proceedToNextEpisode() {
+            let nextUrl = "/play/tv/{{ next_episode_id }}";
+            let params = [];
+            {% if token %} params.push("token={{ token }}"); {% endif %}
+            {% if is_mobile %} params.push("mobile=1"); {% endif %}
+            if (params.length > 0) nextUrl += "?" + params.join("&");
+
+            {% if sync_session_id and not is_sync_host %}
+            window.location.href = nextUrl;
+            return;
+            {% endif %}
+
             const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
             let progUrl = '/progress/{{ media_type }}/{{ item.id }}';
             {% if token %}
@@ -1269,11 +1283,6 @@
                 await fetch(progUrl, { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
             } catch (e) { }
 
-            let nextUrl = "/play/tv/{{ next_episode_id }}";
-            let params = [];
-            {% if token %} params.push("token={{ token }}"); {% endif %}
-            {% if is_mobile %} params.push("mobile=1"); {% endif %}
-            if (params.length > 0) nextUrl += "?" + params.join("&");
             window.location.href = nextUrl;
         }
 
@@ -1366,7 +1375,7 @@
             }
 
             // Sync progress to backend
-            {% if is_trailer %}
+            {% if is_trailer or (sync_session_id and not is_sync_host) %}
             return;
             {% endif %}
             const now = Date.now();
@@ -1379,9 +1388,14 @@
                 const playType = (typeof playerStats !== 'undefined' && playerStats.isTranscoding) ? 'Transcoding' : ((playerStats && playerStats.smartAudio && playerStats.smartAudio.active) ? 'Smart Audio Direct Stream' : 'Direct Play');
                 formData.append('play_type', playType);
                 let progUrl = '/progress/{{ media_type }}/{{ item.id }}';
-                {% if token %}
-                progUrl += '?token={{ token }}';
+                let progParams = [];
+                {% if sync_session_id %}
+                progParams.push('sync={{ sync_session_id }}');
                 {% endif %}
+                {% if token %}
+                progParams.push('token={{ token }}');
+                {% endif %}
+                if (progParams.length > 0) progUrl += '?' + progParams.join('&');
                 fetch(progUrl, { method: 'POST', body: formData });
                 lastUpdate = now;
             }
@@ -1433,6 +1447,10 @@
         }
 
         async function finishAndExit() {
+            {% if sync_session_id and not is_sync_host %}
+            exitPlayer();
+            return;
+            {% endif %}
             const effectiveDuration = totalDuration > 0 ? totalDuration : (isFinite(video.duration) ? video.duration : 0);
             let progUrl = '/progress/{{ media_type }}/{{ item.id }}';
             {% if token %}
@@ -2499,7 +2517,7 @@
 
         // Notify server that active stream stopped on exit
         window.addEventListener('beforeunload', () => {
-            {% if is_trailer %}
+            {% if is_trailer or (sync_session_id and not is_sync_host) %}
             return;
             {% endif %}
             try {
@@ -2620,10 +2638,28 @@
             }
         }
 
+        ws.onerror = function (event) {
+            console.warn("Watch Together WebSocket error:", event);
+            if (syncText && syncSubtext) {
+                syncText.textContent = "Sync connection issue";
+                syncSubtext.textContent = "Unable to connect to Watch Together server. Retrying...";
+            }
+        };
+
+        ws.onclose = function (event) {
+            console.log("Watch Together WebSocket closed:", event.code, event.reason);
+            clearInterval(pingInterval);
+            if (event.code !== 1000 && !allUsersReady) {
+                if (syncText && syncSubtext) {
+                    syncText.textContent = "Sync disconnected";
+                    syncSubtext.textContent = event.reason || "WebSocket connection closed by server.";
+                }
+            }
+        };
+
         ws.onopen = function () {
             pingServer();
-            // Check if video is already ready
-            if (video.readyState >= 3) {
+            if (video.readyState >= 2) {
                 notifyReady();
             } else {
                 showSyncLoading("Waiting for all users to load...", "Loading media stream...");
@@ -2631,6 +2667,17 @@
         };
 
         const pingInterval = setInterval(pingServer, 4000);
+
+        // Keep verifying readiness until local ready is confirmed
+        const readyInterval = setInterval(() => {
+            if (isLocalReady) {
+                clearInterval(readyInterval);
+                return;
+            }
+            if (ws.readyState === WebSocket.OPEN && video.readyState >= 2) {
+                notifyReady();
+            }
+        }, 300);
 
         function sendSync(action, time) {
             if (ws.readyState === WebSocket.OPEN && !isRemoteUpdate) {
@@ -2697,7 +2744,7 @@
                     }
 
                     if (!data.paused) {
-                        video.play().catch(e => console.debug("Sync play deferred:", e));
+                        attemptPlay();
                     } else {
                         video.pause();
                     }
@@ -2716,7 +2763,7 @@
                         allUsersReady = true;
                         hideSyncLoading();
                         if (!data.paused) {
-                            video.play().catch(e => console.debug("Sync play deferred:", e));
+                            attemptPlay();
                         }
                     } else {
                         allUsersReady = false;
@@ -2750,7 +2797,7 @@
                         video.currentTime += (targetActualTime - currentActualTime);
                     }
                     if (allUsersReady) {
-                        video.play().catch(e => console.debug("Sync play deferred:", e));
+                        attemptPlay();
                     }
                 } else if (data.action === 'pause') {
                     if (data.username) {
@@ -2787,23 +2834,33 @@
             notifyReady();
         });
 
+        video.addEventListener('canplaythrough', () => {
+            notifyReady();
+        });
+
+        video.addEventListener('loadeddata', () => {
+            notifyReady();
+        });
+
         video.addEventListener('playing', () => {
             notifyReady();
         });
 
         video.addEventListener('waiting', () => {
-            notifyLoading();
+            if (!video.paused && allUsersReady) {
+                notifyLoading();
+            }
         });
 
         video.addEventListener('seeking', () => {
-            if (!isRemoteUpdate) {
+            if (!isRemoteUpdate && allUsersReady && !video.paused) {
                 notifyLoading();
             }
         });
 
         video.addEventListener('play', () => {
             if (!isRemoteUpdate) {
-                if (!allUsersReady) {
+                if (!allUsersReady && !isSyncHost) {
                     video.pause();
                     showSyncLoading("Waiting for all users to load...", "Please wait until everyone has finished loading.");
                     return;

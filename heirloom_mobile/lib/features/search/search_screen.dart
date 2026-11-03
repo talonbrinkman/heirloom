@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../../core/api_client.dart';
 import '../../core/theme.dart';
+import '../media/photo_viewer_dialog.dart';
 import 'dart:async';
 
 final searchQueryProvider = StateProvider<String>((ref) => '');
@@ -95,18 +96,28 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
                   itemCount: items.length,
                   itemBuilder: (context, index) {
                     final item = items[index];
-                    final posterFilename = item['poster_filename'];
+                    final posterFilename = item['poster_filename'] ?? item['poster'];
                     final imageUrl = posterFilename != null ? '$serverUrl/metadata/$posterFilename' : null;
 
                     return GestureDetector(
                       onTap: () {
-                        final url = item['url'] as String;
-                        // url is like /movie/123 or /series/Breaking%20Bad or /photo/123
+                        final url = item['url'] as String? ?? '';
                         final parts = url.split('/').where((p) => p.isNotEmpty).toList();
-                        if (parts.length >= 2) {
+                        final itemType = item['type'] as String? ?? (parts.isNotEmpty ? parts[0] : '');
+
+                        if (itemType == 'photo' || (parts.isNotEmpty && parts[0] == 'photo')) {
+                          showHeirloomPhotoViewer(context, Map<String, dynamic>.from(item), serverUrl);
+                        } else if (itemType == 'music' || (parts.isNotEmpty && (parts[0] == 'album' || parts[0] == 'artist'))) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('${item['title'] ?? 'Music'} (${item['year'] ?? ''})')),
+                          );
+                        } else if (parts.length >= 2) {
                           final type = parts[0] == 'series' ? 'tv' : parts[0];
                           final id = Uri.decodeComponent(parts[1]);
                           context.push('/details/$type/$id');
+                        } else if (item['id'] != null) {
+                          final type = itemType == 'tv' ? 'tv' : 'movie';
+                          context.push('/details/$type/${item['id']}');
                         }
                       },
                       child: ClipRRect(

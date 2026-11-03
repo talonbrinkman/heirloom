@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:lucide_icons/lucide_icons.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/api_client.dart';
 import '../../core/theme.dart';
 
@@ -52,7 +51,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         ref.read(authTokenProvider.notifier).state = token;
 
         if (mounted) {
-          context.go('/');
+          context.go('/profiles');
         }
       } else {
         setState(() => _error = response.data['error'] ?? 'Invalid credentials.');

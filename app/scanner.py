@@ -1266,6 +1266,7 @@ class ScannerManager:
         self.scanned_volumes: set[str] = set()
         self.scanned_types: set[str] = set()
         self.last_validity_check: float = 0.0
+        self.post_scan_callbacks: list = []
 
     def check_scan_necessary(self) -> bool:
         """
@@ -1490,6 +1491,12 @@ class ScannerManager:
                     self.phase = "complete"
                     self.action = "Scan complete"
                 self._abort_event.clear()
+
+            for cb in list(getattr(self, 'post_scan_callbacks', [])):
+                try:
+                    cb()
+                except Exception:
+                    pass
 
             if was_aborted:
                 try:

@@ -22,6 +22,14 @@ class User(SQLModel, table=True):
     can_manage_profiles: bool = Field(default=True)
     session_token: Optional[str] = Field(default=None, index=True)
 
+class UserSession(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    session_token: str = Field(unique=True, index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: Optional[datetime] = Field(default=None, index=True)
+    client_name: Optional[str] = None
+
 class Profile(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)

@@ -18,3 +18,4 @@ app/bin/*.exe
 devtools_options.yaml
 *.csv
 *.log
+MOBILE_ROADMAP.md

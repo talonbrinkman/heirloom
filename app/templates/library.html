@@ -1388,6 +1388,7 @@
     </script>
     <script src="/static/lucide.min.js"></script>
     <script src="/static/audio-player.js"></script>
+    <script src="/static/navigation-loader.js"></script>
     <script>lucide.createIcons();</script>
 
     <script>
@@ -1533,40 +1534,84 @@
     </script>
 
 
-    <!-- Watch Together Modal -->
+        <!-- Watch Together Modal -->
     <div id="wtModal" class="modal-overlay" style="display: none;">
         <div class="modal-content">
             <div class="card-header">
                 <h2 class="m-0">Watch Together</h2>
-                <button class="btn btn-sm btn-secondary"
-                    onclick="document.getElementById('wtModal').style.display='none'">Close</button>
+                <button class="btn btn-sm btn-secondary" onclick="document.getElementById('wtModal').style.display='none'">Close</button>
             </div>
+            <div id="wtActiveSessionAlert" style="display: none;"></div>
             <p>Select users to invite to this session:</p>
             <div id="wtUserList" class="modal-list">
                 Loading users...
             </div>
-            <button class="btn btn-block" onclick="startWatchTogether()">Start Session</button>
+            <button id="wtStartBtn" class="btn btn-block" onclick="startWatchTogether()">Start Session</button>
         </div>
     </div>
 
     <script>
-        let wtCurrentMedia = { type: null, id: null };
+                let wtCurrentMedia = { type: null, id: null };
+        let isCreatingWatchSession = false;
 
         async function openWatchTogether(mediaType, itemId) {
             wtCurrentMedia = { type: mediaType, id: itemId };
+            isCreatingWatchSession = false;
             const modal = document.getElementById('wtModal');
             const userList = document.getElementById('wtUserList');
+            const alertBox = document.getElementById('wtActiveSessionAlert');
+            const startBtn = document.getElementById('wtStartBtn');
+
+            if (alertBox) {
+                alertBox.style.display = 'none';
+                alertBox.innerHTML = '';
+            }
+            if (startBtn) {
+                startBtn.disabled = false;
+                startBtn.style.opacity = '';
+                startBtn.style.pointerEvents = '';
+                startBtn.textContent = 'Start Session';
+            }
+
             modal.style.display = 'flex';
             userList.innerHTML = 'Loading users...';
 
             try {
-                const res = await fetch(`/api/users/eligible?media_type=${mediaType}`);
-                const users = await res.json();
+                const [usersRes, activeRes] = await Promise.all([
+                    fetch(`/api/users/eligible?media_type=${mediaType}`),
+                    fetch('/watch_together/active')
+                ]);
+                const users = await usersRes.json();
+                let activeData = { has_active_session: false };
+                try {
+                    activeData = await activeRes.json();
+                } catch (e) { }
 
-                const householdUsers = users.filter(u => u.category === 'Household' || u.tag === 'Household');
-                const sharedUsers = users.filter(u => u.category === 'Shared' || u.tag === 'Shared');
+                if (activeData.has_active_session) {
+                    if (alertBox) {
+                        alertBox.style.display = 'block';
+                        alertBox.innerHTML = `
+                            <div class="wt-active-warning" style="background: rgba(234, 179, 8, 0.15); border: 1px solid rgba(234, 179, 8, 0.3); border-radius: 6px; padding: 12px; margin-bottom: 15px; font-size: 0.9rem;">
+                                <div style="font-weight: 600; color: #facc15; margin-bottom: 6px;">You already have an active Watch Together session.</div>
+                                <div style="display: flex; gap: 8px; margin-top: 8px;">
+                                    <a href="/play_sync/${activeData.session_id}" class="btn btn-sm btn-primary" style="text-decoration: none; display: inline-flex; align-items: center;">Rejoin Session</a>
+                                    <button type="button" class="btn btn-sm btn-secondary" onclick="endAndRestartSession('${activeData.session_id}', '${mediaType}', ${itemId})">End Active Session</button>
+                                </div>
+                            </div>
+                        `;
+                    }
+                    if (startBtn) {
+                        startBtn.disabled = true;
+                        startBtn.style.opacity = '0.6';
+                        startBtn.style.pointerEvents = 'none';
+                        startBtn.textContent = 'Active Session in Progress';
+                    }
+                }
 
-                if (users.length === 0) {
+                const householdUsers = Array.isArray(users) ? users.filter(u => u.category === 'Household' || u.tag === 'Household') : [];
+                const sharedUsers = Array.isArray(users) ? users.filter(u => u.category === 'Shared' || u.tag === 'Shared') : [];
+
+                if (!Array.isArray(users) || users.length === 0) {
                     userList.innerHTML = '<div class="empty-state">No eligible users found. Make sure they have Watch Together and library access enabled in settings.</div>';
                 } else {
                     let html = '';
@@ -1596,7 +1641,30 @@
             }
         }
 
+        async function endAndRestartSession(sessionId, mediaType, itemId) {
+            try {
+                await fetch(`/watch_together/end/${sessionId}`, { method: 'POST' });
+                openWatchTogether(mediaType, itemId);
+            } catch (err) {
+                console.error(err);
+                alert("Failed to end active session.");
+            }
+        }
+
         async function startWatchTogether() {
+            if (isCreatingWatchSession) return;
+
+            const startBtn = document.getElementById('wtStartBtn');
+            const originalText = startBtn ? startBtn.innerHTML : 'Start Session';
+
+            isCreatingWatchSession = true;
+            if (startBtn) {
+                startBtn.disabled = true;
+                startBtn.style.opacity = '0.6';
+                startBtn.style.pointerEvents = 'none';
+                startBtn.innerHTML = '<span class="spinner" style="display:inline-block; width:14px; height:14px; border:2px solid #fff; border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite; vertical-align:middle; margin-right:8px;"></span>Starting Session...';
+            }
+
             const checkboxes = document.querySelectorAll('.wt-user-checkbox:checked');
             const targetIds = Array.from(checkboxes).map(cb => cb.value);
 
@@ -1612,12 +1680,41 @@
                     })
                 });
                 const data = await res.json();
+                if (!res.ok || data.error) {
+                    alert(data.error || data.detail || "Error creating session.");
+                    if (startBtn) {
+                        startBtn.disabled = false;
+                        startBtn.style.opacity = '';
+                        startBtn.style.pointerEvents = '';
+                        startBtn.innerHTML = originalText;
+                    }
+                    isCreatingWatchSession = false;
+                    if (data.session_id) {
+                        openWatchTogether(wtCurrentMedia.type, wtCurrentMedia.id);
+                    }
+                    return;
+                }
                 if (data.session_id) {
                     window.location.href = `/play_sync/${data.session_id}`;
+                } else {
+                    if (startBtn) {
+                        startBtn.disabled = false;
+                        startBtn.style.opacity = '';
+                        startBtn.style.pointerEvents = '';
+                        startBtn.innerHTML = originalText;
+                    }
+                    isCreatingWatchSession = false;
                 }
             } catch (err) {
                 console.error(err);
                 alert("Error creating session.");
+                if (startBtn) {
+                    startBtn.disabled = false;
+                    startBtn.style.opacity = '';
+                    startBtn.style.pointerEvents = '';
+                    startBtn.innerHTML = originalText;
+                }
+                isCreatingWatchSession = false;
             }
         }
 

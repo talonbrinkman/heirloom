@@ -15,8 +15,8 @@ RUN apt-get update && apt-get install -y \
 # Copy the requirements file into the container
 COPY requirements.txt .
 
-# Install the Python libraries (we use standard install for this first test)
-RUN pip install --no-cache-dir -r requirements.txt
+# Install the Python libraries including WebSocket support for Uvicorn
+RUN pip install --no-cache-dir "uvicorn[standard]" websockets wsproto && pip install --no-cache-dir -r requirements.txt
 
 # Copy the actual application code into the container
 COPY ./app ./app

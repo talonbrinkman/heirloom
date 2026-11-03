@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, create_engine, Session, select, text
-from .models import User, VolumePath, Profile, WatchHistory, Watchlist, Artist, Album, Track, Playlist, PlaylistTrack
+from .models import User, UserSession, VolumePath, Profile, WatchHistory, Watchlist, Artist, Album, Track, Playlist, PlaylistTrack
 
 # This is critical: We are saving the database inside the /config folder.
 # Because of your Docker volume mount, this will actually be saved to your desktop!
@@ -68,6 +68,10 @@ def create_db_and_tables():
             session.exec(text("ALTER TABLE tvshow ADD COLUMN season INTEGER"))
             session.exec(text("ALTER TABLE tvshow ADD COLUMN episode INTEGER"))
             session.exec(text("ALTER TABLE tvshow ADD COLUMN season_poster_filename VARCHAR"))
+        except Exception:
+            session.rollback()
+        try:
+            session.exec(text("ALTER TABLE tvshow ADD COLUMN thumbnail_filename VARCHAR"))
             session.commit()
         except Exception:
             session.rollback()
@@ -452,6 +456,8 @@ def create_db_and_tables():
             "CREATE INDEX IF NOT EXISTS ix_watchhistory_last_watched ON watchhistory (last_watched)",
             "CREATE INDEX IF NOT EXISTS ix_album_year ON album (year)",
             "CREATE INDEX IF NOT EXISTS ix_track_year ON track (year)",
+            "CREATE INDEX IF NOT EXISTS ix_usersession_token ON usersession (session_token)",
+            "CREATE INDEX IF NOT EXISTS ix_usersession_user_id ON usersession (user_id)",
         ]
         for idx_sql in indexes:
             try:
