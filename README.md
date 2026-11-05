@@ -111,7 +111,7 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
    ```
 
 6. **Access the application:**
-   Open your browser and navigate to `http://localhost:8000`. The first user to register will automatically become the system admin.
+   Open your browser and navigate to `http://localhost:42069`. The first user to register will automatically become the system admin.
 
 ## 📖 Usage
 

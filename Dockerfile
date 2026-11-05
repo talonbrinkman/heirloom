@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir "uvicorn[standard]" websockets wsproto && pip ins
 COPY ./app ./app
 
 # Expose the port that Uvicorn (FastAPI) runs on
-EXPOSE 8000
+EXPOSE 42069
 
 # Start the web server with live reloading enabled
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "42069", "--reload"]

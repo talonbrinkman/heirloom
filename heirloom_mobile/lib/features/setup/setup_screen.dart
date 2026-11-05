@@ -107,7 +107,7 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
                 controller: _urlController,
                 decoration: const InputDecoration(
                   labelText: 'Server URL',
-                  hintText: 'http://192.168.1.x:8000',
+                  hintText: 'http://192.168.1.x:42069',
                   prefixIcon: Icon(LucideIcons.link),
                 ),
                 keyboardType: TextInputType.url,
