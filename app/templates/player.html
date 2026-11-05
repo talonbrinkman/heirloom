@@ -108,18 +108,13 @@
     <!-- "Are You Still Watching?" Prompt Modal -->
     <div id="stillWatchingModal" class="player-prompt-overlay" style="display: none;">
         <div class="player-prompt-card">
-            <div class="player-prompt-icon">
-                <i data-lucide="help-circle"></i>
-            </div>
             <h2 class="player-prompt-title">Are you still watching?</h2>
             <p class="player-prompt-desc" id="stillWatchingDesc">Playback was paused after consecutive unprompted episodes to save your progress.</p>
             <div class="player-prompt-actions">
                 <button type="button" class="btn btn-primary" id="stillWatchingResumeBtn" onclick="confirmStillWatching()">
                     <i data-lucide="play" fill="currentColor"></i> Continue Watching
                 </button>
-                <button type="button" class="btn btn-secondary" onclick="exitPlayer()">
-                    <i data-lucide="x"></i> Exit
-                </button>
+                <button type="button" class="btn btn-secondary" onclick="exitPlayer()">Exit</button>
             </div>
         </div>
     </div>
@@ -127,18 +122,13 @@
     <!-- Sleep Timer Modal -->
     <div id="sleepTimerModal" class="player-prompt-overlay" style="display: none;">
         <div class="player-prompt-card">
-            <div class="player-prompt-icon">
-                <i data-lucide="moon"></i>
-            </div>
             <h2 class="player-prompt-title">Sleep Timer Activated</h2>
             <p class="player-prompt-desc">Playback has been paused to save your spot.</p>
             <div class="player-prompt-actions">
                 <button type="button" class="btn btn-primary" onclick="dismissSleepModal(true)">
-                    <i data-lucide="play" fill="currentColor"></i> Resume Playback
+                    <i data-lucide="play" fill="currentColor"></i> Continue Watching
                 </button>
-                <button type="button" class="btn btn-secondary" onclick="exitPlayer()">
-                    <i data-lucide="x"></i> Exit
-                </button>
+                <button type="button" class="btn btn-secondary" onclick="exitPlayer()">Exit</button>
             </div>
         </div>
     </div>
