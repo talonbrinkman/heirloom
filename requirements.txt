@@ -12,3 +12,4 @@ Pillow
 psutil
 httpx
 mutagen
+numpy

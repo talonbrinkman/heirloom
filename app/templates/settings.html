@@ -993,7 +993,7 @@
                     </select>
                 </div>
 
-                <div class="mb-10">
+                <div class="mb-20">
                     <label style="font-weight: 600; display: block; margin-bottom: 6px;">Real-Time HDR to SDR Tone Mapping</label>
                     <p style="color: #ccc; font-size: 0.9em;" class="mb-10">Automatically maps high dynamic range colors (BT.2020 PQ / HLG / HDR10) into standard dynamic range (BT.709 SDR) when transcoding to eliminate washed-out, grayish colors on non-HDR displays.</p>
                     <select name="hdr_tonemapping" id="hdr_tonemapping" class="select-input w-100 m-0" onchange="autoSaveTranscodeSettings()">
@@ -1004,6 +1004,15 @@
                         <option value="linear" {% if hdr_tonemapping == 'linear' %}selected{% endif %}>Linear (Perceptually Linear Stretch)</option>
                         <option value="gamma" {% if hdr_tonemapping == 'gamma' %}selected{% endif %}>Gamma (Contrast Preservation)</option>
                         <option value="clip" {% if hdr_tonemapping == 'clip' %}selected{% endif %}>Clip (Hard Clip Luminance)</option>
+                    </select>
+                </div>
+
+                <div class="mb-10">
+                    <label style="font-weight: 600; display: block; margin-bottom: 6px;">Automated Intro & Outro Detection</label>
+                    <p style="color: #ccc; font-size: 0.9em;" class="mb-10">Automatically analyzes audio across episodes in a season using acoustic fingerprinting and silence detection to identify theme songs and ending credits when chapter markers are missing.</p>
+                    <select name="auto_intro_detection" id="auto_intro_detection" class="select-input w-100 m-0" onchange="autoSaveTranscodeSettings()">
+                        <option value="true" {% if auto_intro_detection == 'true' or auto_intro_detection is none or auto_intro_detection == 'on' or auto_intro_detection == '1' %}selected{% endif %}>On</option>
+                        <option value="false" {% if auto_intro_detection == 'false' or auto_intro_detection == 'off' or auto_intro_detection == '0' %}selected{% endif %}>Off</option>
                     </select>
                 </div>
             </form>

@@ -56,11 +56,27 @@
     function handleMediaLinkClick(e) {
         if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
 
-        const link = e.target.closest('a');
-        if (!link || !link.href) return;
+        // Skip if event was cancelled or prevented by another handler
+        if (e.defaultPrevented) return;
 
-        // Skip anchor jump links, downloads, javascript: links
-        if (link.target === '_blank' || link.hasAttribute('download')) return;
+        const link = e.target.closest('a');
+        if (!link) return;
+
+        // Skip non-navigating links: anchors, void, javascript, empty
+        const rawHref = (link.getAttribute('href') || '').trim();
+        if (!rawHref || rawHref === '#' || rawHref.startsWith('#') || rawHref.startsWith('javascript:')) {
+            return;
+        }
+
+        // Skip anchor jump links, downloads, new tabs, and explicit ignore flags
+        if (link.target === '_blank' || link.hasAttribute('download') || link.dataset.noLoader !== undefined) {
+            return;
+        }
+
+        // Skip clicks originating from dropdown toggles, buttons, or modals
+        if (link.closest('#inboxBtn, .inbox, .inbox-menu, #inboxMenu, .dropdown-menu, .modal-overlay, .profile-header-btn')) {
+            return;
+        }
 
         let url;
         try {
@@ -71,18 +87,23 @@
 
         if (url.origin !== window.location.origin) return;
 
+        // Skip if staying on the same page (e.g. hash change or self link)
+        if (url.pathname === window.location.pathname && (url.search === window.location.search || !rawHref.includes('?'))) {
+            return;
+        }
+
         const path = url.pathname;
 
         if (path.startsWith('/series/')) {
             let title = decodeURIComponent(path.replace('/series/', '').split('?')[0]);
-            showMediaLoader(title ? `Loading "${title}"` : 'Loading Series...', 'Fetching episodes and series information');
+            showMediaLoader(title ? `Loading ${title}` : 'Loading Series...', 'Fetching episodes and series details');
         } else if (path.startsWith('/movie/')) {
-            showMediaLoader('Loading Movie...', 'Fetching movie details and versions');
+            showMediaLoader(title ? `Loading ${title}` : 'Loading Movie...', 'Fetching movie details');
         }
     }
 
-    // Initialize listeners
-    document.addEventListener('click', handleMediaLinkClick, { capture: true });
+    // Initialize listeners (bubbling phase so handlers calling preventDefault are respected)
+    document.addEventListener('click', handleMediaLinkClick);
 
     // Handle bfcache (back/forward cache) when user returns to page
     window.addEventListener('pageshow', function () {

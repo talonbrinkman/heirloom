@@ -1680,7 +1680,7 @@ async def async_enrich_tv_show(title: str):
         with _enrich_lock:
             _enriching_tv.discard(title)
 
-def get_related_movies(session: Session, movie: Movie, rating_level: int = 0, limit: int = 15) -> list[Movie]:
+def get_related_movies(session: Session, movie: Movie, rating_level: int = 0, limit: int = 20) -> list[Movie]:
     """
     Returns up to limit related movies based on collection, genres, director, and cast,
     filtered by parental rating and deduplicated across editions/versions.
@@ -1754,7 +1754,7 @@ def get_related_movies(session: Session, movie: Movie, rating_level: int = 0, li
     return [item[3] for item in scored[:limit]]
 
 
-def get_related_shows(session: Session, show: TVShow, rating_level: int = 0, limit: int = 15) -> list[TVShow]:
+def get_related_shows(session: Session, show: TVShow, rating_level: int = 0, limit: int = 20) -> list[TVShow]:
     """
     Returns up to limit related TV shows based on collection, genres, director, and cast,
     filtered by parental rating and grouped into unified series representations.
@@ -1877,7 +1877,7 @@ def get_recently_watching(
     rating_level: int = 0,
     is_kids: bool = False,
     is_html: bool = False,
-    limit: int = 15
+    limit: int = 20
 ) -> list[dict]:
     r_level = rating_level if rating_level is not None and rating_level > 0 else (2 if is_kids else 0)
     hist_query = select(WatchHistory).where(WatchHistory.user_id == current_user.id)
@@ -2371,28 +2371,66 @@ def root(
 
     # High performance: SQL-level filtering and pagination instead of loading the entire library
     if current_user.movies_access:
-        m_q = select(Movie)
+        subq = select(func.max(Movie.id))
         if rating_level == 1:
-            m_q = m_q.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+            subq = subq.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
         elif rating_level >= 2:
-            m_q = m_q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
-        raw_recent_movies = session.exec(m_q.order_by(Movie.id.desc()).limit(45)).all()
-        recent_movies = process_movie_versions(raw_recent_movies)[:15]
+            subq = subq.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+        subq = subq.group_by(func.coalesce(Movie.tmdb_id, func.lower(Movie.title)))
+        m_q = select(Movie).where(Movie.id.in_(subq)).order_by(Movie.id.desc()).limit(30)
+        raw_recent_movies = session.exec(m_q).all()
+        recent_movies = process_movie_versions(raw_recent_movies)[:20]
     else:
         recent_movies = []
 
     if current_user.tv_access:
-        t_q = select(TVShow)
+        subq_stmt = select(func.max(TVShow.id).label('max_id'), func.count(TVShow.id).label('ep_count'))
         if rating_level == 1:
-            t_q = t_q.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+            subq_stmt = subq_stmt.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
         elif rating_level >= 2:
-            t_q = t_q.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
-        tv_shows_raw = session.exec(t_q.order_by(TVShow.id.desc()).limit(80)).all()
+            subq_stmt = subq_stmt.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+        subq = subq_stmt.group_by(func.lower(TVShow.title)).subquery()
+
+        q = select(TVShow, subq.c.ep_count).join(subq, TVShow.id == subq.c.max_id).order_by(TVShow.id.desc()).limit(20)
+        recent_tv_raw = session.exec(q).all()
+        import os
+        recent_tv = []
+        for t_obj, count in recent_tv_raw:
+            t = {
+                "id": t_obj.id,
+                "title": t_obj.title,
+                "year": t_obj.year,
+                "poster_filename": t_obj.poster_filename,
+                "file_path": t_obj.file_path,
+                "episode_name": "",
+                "media_type": "tv",
+                "item": t_obj
+            }
+            if count > 1:
+                t['year'] = f"{count} Episodes"
+            else:
+                m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', t['file_path'])
+                if m:
+                    s_num = int(m.group(1))
+                    e_num = int(m.group(2))
+                    enc_title = urllib.parse.quote(t_obj.title)
+                    s_link = f'<a href="/series/{enc_title}?season={s_num}">S{s_num}</a>'
+                    e_link = f'<a href="/series/{enc_title}?ep={t_obj.id}">E{e_num}</a>'
+                    base = f"{s_link} • {e_link}"
+                    filename = os.path.splitext(os.path.basename(t['file_path']))[0]
+                    name_match = re.search(r'[Ss]\d+\s*[-_]?\s*[Ee]?\d+[ \-]*(.+)', filename, re.IGNORECASE)
+                    if name_match and name_match.group(1).strip():
+                        ep_title = name_match.group(1).strip()
+                        ep_link = f'<a href="/series/{enc_title}?ep={t_obj.id}">{ep_title}</a>'
+                        t['year'] = f"{base}<br>{ep_link}"
+                    else:
+                        t['year'] = base
+            recent_tv.append(t)
     else:
-        tv_shows_raw = []
+        recent_tv = []
 
     if current_user.photos_access:
-        photo_q = select(Photo).where(~Photo.file_path.like("%#recycle%")).order_by(Photo.id.desc()).limit(15)
+        photo_q = select(Photo).where(~Photo.file_path.like("%#recycle%")).order_by(Photo.id.desc()).limit(20)
         recent_photos = session.exec(photo_q).all()
     else:
         recent_photos = []
@@ -2400,57 +2438,9 @@ def root(
     recent_albums = []
     if current_user.music_access:
         try:
-            recent_albums = session.exec(select(Album).order_by(Album.id.desc()).limit(15)).all()
+            recent_albums = session.exec(select(Album).order_by(Album.id.desc()).limit(20)).all()
         except Exception:
             recent_albums = []
-    
-    # Format raw episodes for the dashboard and group adjacent ones
-    import os
-    recent_tv_groups = []
-    for t_obj in tv_shows_raw:
-        if not recent_tv_groups:
-            recent_tv_groups.append({"item": t_obj, "count": 1})
-        elif recent_tv_groups[-1]["item"].title == t_obj.title:
-            recent_tv_groups[-1]["count"] += 1
-        else:
-            if len(recent_tv_groups) >= 15:
-                break
-            recent_tv_groups.append({"item": t_obj, "count": 1})
-            
-    recent_tv = []
-    for g in recent_tv_groups[:15]:
-        t_obj = g["item"]
-        count = g["count"]
-        t = {
-            "id": t_obj.id,
-            "title": t_obj.title,
-            "year": t_obj.year,
-            "poster_filename": t_obj.poster_filename,
-            "file_path": t_obj.file_path,
-            "episode_name": "",
-            "media_type": "tv",
-            "item": t_obj
-        }
-        if count > 1:
-            t['year'] = f"{count} Episodes"
-        else:
-            m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', t['file_path'])
-            if m:
-                s_num = int(m.group(1))
-                e_num = int(m.group(2))
-                enc_title = urllib.parse.quote(t_obj.title)
-                s_link = f'<a href="/series/{enc_title}?season={s_num}">S{s_num}</a>'
-                e_link = f'<a href="/series/{enc_title}?ep={t_obj.id}">E{e_num}</a>'
-                base = f"{s_link} • {e_link}"
-                filename = os.path.splitext(os.path.basename(t['file_path']))[0]
-                name_match = re.search(r'[Ss]\d+\s*[-_]?\s*[Ee]?\d+[ \-]*(.+)', filename, re.IGNORECASE)
-                if name_match and name_match.group(1).strip():
-                    ep_title = name_match.group(1).strip()
-                    ep_link = f'<a href="/series/{enc_title}?ep={t_obj.id}">{ep_title}</a>'
-                    t['year'] = f"{base}<br>{ep_link}"
-                else:
-                    t['year'] = base
-        recent_tv.append(t)
     
     if prof_id:
         watchlist_db = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))).all()
@@ -2472,7 +2462,7 @@ def root(
                     continue
                 watchlist.append({"db_id": w.id, "item": item, "media_type": w.media_type})
 
-    history = get_recently_watching(session, current_user, prof_id, rating_level=rating_level, is_html=True, limit=15)
+    history = get_recently_watching(session, current_user, prof_id, rating_level=rating_level, is_html=True, limit=20)
     
     user_watchlist_movies = [w.item_id for w in watchlist_db if w.media_type == 'movie']
     user_watchlist_tv = [w.item_id for w in watchlist_db if w.media_type == 'tv']
@@ -2513,7 +2503,7 @@ def root(
                 cand_m_q = cand_m_q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
             if watched_movie_ids:
                 cand_m_q = cand_m_q.where(Movie.id.not_in(list(watched_movie_ids)[:500]))
-            cand_movies = session.exec(cand_m_q.order_by(Movie.rating.desc().nullslast()).limit(20)).all()
+            cand_movies = session.exec(cand_m_q.order_by(Movie.rating.desc().nullslast()).limit(30)).all()
             for m in cand_movies:
                 recommended.append({"item": {"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year}, "media_type": "movie"})
 
@@ -2524,14 +2514,14 @@ def root(
                 cand_tv_q = cand_tv_q.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
             elif rating_level >= 2:
                 cand_tv_q = cand_tv_q.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
-            cand_shows_raw = session.exec(cand_tv_q.order_by(TVShow.rating.desc().nullslast()).limit(40)).all()
+            cand_shows_raw = session.exec(cand_tv_q.order_by(TVShow.rating.desc().nullslast()).limit(60)).all()
             cand_shows = process_tv_shows(cand_shows_raw)
             for s in cand_shows:
                 if s.title.strip().lower() not in watched_tv_titles:
                     recommended.append({"item": {"id": s.id, "title": s.title, "poster_filename": s.poster_filename, "year": getattr(s, 'year', '')}, "media_type": "tv"})
             
         random.shuffle(recommended)
-        recommended = recommended[:15]
+        recommended = recommended[:20]
 
     user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
 
@@ -3076,56 +3066,48 @@ def api_dashboard(
     prof_id = current_profile.id if current_profile else None
     
     if current_user.movies_access:
-        m_q = select(Movie)
+        subq = select(func.max(Movie.id))
         if rating_level == 1:
-            m_q = m_q.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+            subq = subq.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
         elif rating_level >= 2:
-            m_q = m_q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
-        raw_movies = session.exec(m_q.order_by(Movie.id.desc()).limit(45)).all()
-        recent_movies = [{"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year} for m in process_movie_versions(raw_movies)[:15]]
+            subq = subq.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+        subq = subq.group_by(func.coalesce(Movie.tmdb_id, func.lower(Movie.title)))
+        m_q = select(Movie).where(Movie.id.in_(subq)).order_by(Movie.id.desc()).limit(30)
+        raw_movies = session.exec(m_q).all()
+        recent_movies = [{"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year} for m in process_movie_versions(raw_movies)[:20]]
     else:
         recent_movies = []
     
     if current_user.tv_access:
-        t_q = select(TVShow)
+        subq_stmt = select(func.max(TVShow.id).label('max_id'), func.count(TVShow.id).label('ep_count'))
         if rating_level == 1:
-            t_q = t_q.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+            subq_stmt = subq_stmt.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
         elif rating_level >= 2:
-            t_q = t_q.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
-        tv_shows_raw = session.exec(t_q.order_by(TVShow.id.desc()).limit(80)).all()
+            subq_stmt = subq_stmt.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+        subq = subq_stmt.group_by(func.lower(TVShow.title)).subquery()
+
+        q = select(TVShow, subq.c.ep_count).join(subq, TVShow.id == subq.c.max_id).order_by(TVShow.id.desc()).limit(20)
+        recent_tv_raw = session.exec(q).all()
+        import os, re
+        recent_tv = []
+        for t_obj, count in recent_tv_raw:
+            t = {
+                "id": t_obj.id,
+                "title": t_obj.title,
+                "year": t_obj.year,
+                "poster_filename": t_obj.poster_filename,
+                "file_path": t_obj.file_path,
+            }
+            if count > 1:
+                t['year'] = f"{count} Episodes"
+            else:
+                m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', t['file_path'] or '')
+                if m:
+                    base = f"S{int(m.group(1))} E{int(m.group(2))}"
+                    t['year'] = base
+            recent_tv.append(t)
     else:
-        tv_shows_raw = []
-    
-    import os, re
-    recent_tv_groups = []
-    for t_obj in tv_shows_raw:
-        if not recent_tv_groups:
-            recent_tv_groups.append({"item": t_obj, "count": 1})
-        elif recent_tv_groups[-1]["item"].title == t_obj.title:
-            recent_tv_groups[-1]["count"] += 1
-        else:
-            if len(recent_tv_groups) >= 15: break
-            recent_tv_groups.append({"item": t_obj, "count": 1})
-            
-    recent_tv = []
-    for g in recent_tv_groups[:15]:
-        t_obj = g["item"]
-        count = g["count"]
-        t = {
-            "id": t_obj.id,
-            "title": t_obj.title,
-            "year": t_obj.year,
-            "poster_filename": t_obj.poster_filename,
-            "file_path": t_obj.file_path,
-        }
-        if count > 1:
-            t['year'] = f"{count} Episodes"
-        else:
-            m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', t['file_path'])
-            if m:
-                base = f"S{int(m.group(1))} E{int(m.group(2))}"
-                t['year'] = base
-        recent_tv.append(t)
+        recent_tv = []
         
     if prof_id:
         watchlist_db = session.exec(select(Watchlist).where(Watchlist.user_id == current_user.id).where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))).all()
@@ -3157,7 +3139,7 @@ def api_dashboard(
                         item['year'] = f"S{int(m.group(1))} E{int(m.group(2))}"
                 watchlist.append({"item": item, "media_type": w.media_type})
         
-    history = get_recently_watching(session, current_user, prof_id, rating_level=rating_level, is_html=False, limit=15)
+    history = get_recently_watching(session, current_user, prof_id, rating_level=rating_level, is_html=False, limit=20)
 
     import random
     from collections import Counter
@@ -3195,7 +3177,7 @@ def api_dashboard(
                 cand_m_q = cand_m_q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
             if watched_movie_ids:
                 cand_m_q = cand_m_q.where(Movie.id.not_in(list(watched_movie_ids)[:500]))
-            cand_movies = session.exec(cand_m_q.order_by(Movie.rating.desc().nullslast()).limit(20)).all()
+            cand_movies = session.exec(cand_m_q.order_by(Movie.rating.desc().nullslast()).limit(30)).all()
             for m in cand_movies:
                 recommended.append({"item": {"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year}, "media_type": "movie"})
 
@@ -3206,17 +3188,17 @@ def api_dashboard(
                 cand_tv_q = cand_tv_q.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
             elif rating_level >= 2:
                 cand_tv_q = cand_tv_q.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
-            cand_shows_raw = session.exec(cand_tv_q.order_by(TVShow.rating.desc().nullslast()).limit(40)).all()
+            cand_shows_raw = session.exec(cand_tv_q.order_by(TVShow.rating.desc().nullslast()).limit(60)).all()
             cand_shows = process_tv_shows(cand_shows_raw)
             for s in cand_shows:
                 if s.title.strip().lower() not in watched_tv_titles:
                     recommended.append({"item": {"id": s.id, "title": s.title, "poster_filename": s.poster_filename, "year": getattr(s, 'year', '')}, "media_type": "tv"})
             
         random.shuffle(recommended)
-        recommended = recommended[:15]
+        recommended = recommended[:20]
 
     if current_user.photos_access:
-        photo_q = select(Photo).where(~Photo.file_path.like("%#recycle%")).order_by(Photo.date_added.desc()).limit(15)
+        photo_q = select(Photo).where(~Photo.file_path.like("%#recycle%")).order_by(Photo.date_added.desc()).limit(20)
         photos = session.exec(photo_q).all()
         recent_photos = [{
             "id": p.id,
@@ -3954,18 +3936,20 @@ def library_view(
             total_count = len(collections)
         elif current_view == "recommended":
             watched_movie_ids, _, _ = get_user_watched_status(session, current_user.id, prof_id)
-            q_rec = select(Movie)
+            subq = select(func.max(Movie.id)).group_by(func.coalesce(Movie.tmdb_id, func.lower(Movie.title)))
+            q_rec = select(Movie).where(Movie.id.in_(subq))
             if rating_level == 1:
                 q_rec = q_rec.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
             elif rating_level >= 2:
                 q_rec = q_rec.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
-            all_rec_movies = session.exec(q_rec.order_by(Movie.id.desc()).limit(100)).all()
+            raw_movies = session.exec(q_rec.order_by(Movie.id.desc()).limit(150)).all()
+            all_rec_movies = process_movie_versions(raw_movies)
             rated = [m for m in all_rec_movies if m.rating is not None]
             rated.sort(key=lambda m: m.rating or 0, reverse=True)
-            top_rated_items = rated[:15]
-            recently_added = sorted(all_rec_movies, key=lambda m: m.id or 0, reverse=True)[:15]
-            recently_released = sorted(all_rec_movies, key=get_release_year, reverse=True)[:15]
-            recommended_items = [m for m in all_rec_movies if m.id not in watched_movie_ids][:15] or all_rec_movies[:15]
+            top_rated_items = rated[:20]
+            recently_added = sorted(all_rec_movies, key=lambda m: m.id or 0, reverse=True)[:20]
+            recently_released = sorted(all_rec_movies, key=get_release_year, reverse=True)[:20]
+            recommended_items = [m for m in all_rec_movies if m.id not in watched_movie_ids][:20] or all_rec_movies[:20]
             total_count = len(recommended_items)
         else: # view == "library" (fast SQL count without full table deserialization)
             q_count = select(func.count(func.distinct(func.coalesce(Movie.tmdb_id, Movie.title))))
@@ -4004,18 +3988,20 @@ def library_view(
             total_count = len(collections)
         elif current_view == "recommended":
             _, _, watched_tv_titles = get_user_watched_status(session, current_user.id, prof_id)
-            q_rec = select(TVShow)
+            subq = select(func.max(TVShow.id)).group_by(func.lower(TVShow.title))
+            q_rec = select(TVShow).where(TVShow.id.in_(subq))
             if rating_level == 1:
                 q_rec = q_rec.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
             elif rating_level >= 2:
                 q_rec = q_rec.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
-            rec_shows = process_tv_shows(session.exec(q_rec.order_by(TVShow.id.desc()).limit(150)).all())
+            raw_shows = session.exec(q_rec.order_by(TVShow.id.desc()).limit(200)).all()
+            rec_shows = process_tv_shows(raw_shows)
             rated = [s for s in rec_shows if s.rating is not None]
             rated.sort(key=lambda s: s.rating or 0, reverse=True)
-            top_rated_items = rated[:15]
-            recently_added = sorted(rec_shows, key=lambda s: s.id or 0, reverse=True)[:15]
-            recently_released = sorted(rec_shows, key=get_release_year, reverse=True)[:15]
-            recommended_items = [s for s in rec_shows if s.title.strip().lower() not in watched_tv_titles][:15] or rec_shows[:15]
+            top_rated_items = rated[:20]
+            recently_added = sorted(rec_shows, key=lambda s: s.id or 0, reverse=True)[:20]
+            recently_released = sorted(rec_shows, key=get_release_year, reverse=True)[:20]
+            recommended_items = [s for s in rec_shows if s.title.strip().lower() not in watched_tv_titles][:20] or rec_shows[:20]
             total_count = len(recommended_items)
         else: # view == "library" (fast SQL count without full table deserialization)
             q_count = select(func.count(func.distinct(TVShow.title)))
@@ -4323,7 +4309,7 @@ def movie_view(
 
     user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
 
-    related_movies = get_related_movies(session, movie, rating_level=rating_level, limit=15)
+    related_movies = get_related_movies(session, movie, rating_level=rating_level, limit=20)
 
     wl_m_q = select(Watchlist.item_id).where(Watchlist.user_id == current_user.id, Watchlist.media_type == 'movie')
     if prof_id:
@@ -4686,7 +4672,7 @@ def series_view(
 
     user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
 
-    related_shows = get_related_shows(session, selected_episode, rating_level=rating_level, limit=15)
+    related_shows = get_related_shows(session, selected_episode, rating_level=rating_level, limit=20)
 
     wl_t_q = select(Watchlist.item_id).where(Watchlist.user_id == current_user.id, Watchlist.media_type == 'tv')
     if prof_id:
@@ -5988,6 +5974,10 @@ async def play_video(
             item.credits_end = cred_e
             session.add(item)
             session.commit()
+        else:
+            from .intro_detection import is_auto_intro_detection_enabled, queue_media_intro_detection
+            if is_auto_intro_detection_enabled(session):
+                queue_media_intro_detection(media_type, item.id, item.file_path, duration)
 
     token = request.query_params.get("token", "")
     sync_initial_time = 0.0
@@ -8212,10 +8202,14 @@ async def view_settings(
                 hdr_tonemapping = "hable"
         else:
             hdr_tonemapping = "hable"
+
+        auto_intro_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "auto_intro_detection")).first()
+        auto_intro_detection = auto_intro_cfg.value if auto_intro_cfg else "true"
     else:
         mounted_volumes = {"movie": False, "tv": False, "photo": False, "music": False}
         theaudiodb_key = ""
         hdr_tonemapping = "hable"
+        auto_intro_detection = "true"
     
     rewind_seconds = current_profile.rewind_seconds if (current_profile and current_profile.rewind_seconds is not None) else (current_user.rewind_seconds or 0)
     default_audio_lang = (current_profile.default_audio_lang if (current_profile and current_profile.default_audio_lang) else (current_user.default_audio_lang or "eng")) or "eng"
@@ -8229,7 +8223,7 @@ async def view_settings(
         "is_admin": is_admin, "can_change_password": can_change_password,
         "invites": invites, "users": users, "volume_paths": volume_paths, "mounted_volumes": mounted_volumes,
         "host_url": host_url, "remote_url": remote_url, "tmdb_key": tmdb_key, "theaudiodb_key": theaudiodb_key,
-        "hw_accel_profile": hw_accel_profile, "hdr_tonemapping": hdr_tonemapping, "rewind_seconds": rewind_seconds, "default_audio_lang": default_audio_lang, "default_subtitle_lang": default_subtitle_lang, "available_languages": AVAILABLE_LANGUAGES,
+        "hw_accel_profile": hw_accel_profile, "hdr_tonemapping": hdr_tonemapping, "auto_intro_detection": auto_intro_detection, "rewind_seconds": rewind_seconds, "default_audio_lang": default_audio_lang, "default_subtitle_lang": default_subtitle_lang, "available_languages": AVAILABLE_LANGUAGES,
         "auto_pause_episodes": auto_pause_episodes
     })
 
@@ -8238,6 +8232,7 @@ async def save_transcoding_settings(
     request: Request,
     hw_accel_profile: str = Form("auto"),
     hdr_tonemapping: str = Form("hable"),
+    auto_intro_detection: str = Form("true"),
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
@@ -8264,8 +8259,22 @@ async def save_transcoding_settings(
         hdr_cfg.value = hdr_val
         session.add(hdr_cfg)
 
+    intro_val = "true" if str(auto_intro_detection).strip().lower() in ("true", "1", "on", "yes", "enabled") else "false"
+    intro_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "auto_intro_detection")).first()
+    if not intro_cfg:
+        intro_cfg = SystemConfig(key="auto_intro_detection", value=intro_val)
+        session.add(intro_cfg)
+    else:
+        intro_cfg.value = intro_val
+        session.add(intro_cfg)
+
     session.commit()
-    return JSONResponse({"status": "ok", "hdr_tonemapping": hdr_val, "hw_accel_profile": hw_accel_profile.strip()})
+    return JSONResponse({
+        "status": "ok",
+        "hdr_tonemapping": hdr_val,
+        "hw_accel_profile": hw_accel_profile.strip(),
+        "auto_intro_detection": intro_val
+    })
 
 @app.post("/settings/change_password")
 async def change_password(

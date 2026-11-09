@@ -1578,15 +1578,25 @@
 
         progressContainer.addEventListener('mousemove', (e) => handleScrubMove(e.clientX));
 
+        progressContainer.addEventListener('touchstart', (e) => {
+            if (e.touches && e.touches.length > 0) {
+                if (progressHoverTooltip) progressHoverTooltip.style.opacity = '1';
+                handleScrubMove(e.touches[0].clientX);
+            }
+            if (typeof showOverlay === 'function') showOverlay();
+        }, { passive: true });
+
         progressContainer.addEventListener('touchmove', (e) => {
             if (e.touches && e.touches.length > 0) {
                 if (progressHoverTooltip) progressHoverTooltip.style.opacity = '1';
                 handleScrubMove(e.touches[0].clientX);
             }
+            if (typeof showOverlay === 'function') showOverlay();
         }, { passive: true });
 
         progressContainer.addEventListener('touchend', () => {
             if (progressHoverTooltip) progressHoverTooltip.style.opacity = '';
+            if (typeof showOverlay === 'function') showOverlay();
         });
 
         progressContainer.addEventListener('click', (e) => {
@@ -1787,6 +1797,7 @@
             localStorage.setItem('player_audio_{{ media_type }}_{{ item.id }}', trackIdx);
             loadVideoSource();
             document.getElementById('settingsMenu').classList.remove('show');
+            if (typeof showOverlay === 'function') showOverlay();
         }
 
         // Resolution Switch
@@ -1909,7 +1920,19 @@
 
         function toggleSettings(event) {
             event.stopPropagation();
-            document.getElementById('settingsMenu').classList.toggle('show');
+            const sm = document.getElementById('settingsMenu');
+            if (sm) {
+                sm.classList.toggle('show');
+                if (sm.classList.contains('show')) {
+                    if (typeof hideTimeout !== 'undefined') {
+                        clearTimeout(hideTimeout);
+                    }
+                } else {
+                    if (typeof showOverlay === 'function') {
+                        showOverlay();
+                    }
+                }
+            }
         }
 
 
@@ -2435,6 +2458,12 @@
         let lastMouseX = -1;
         let lastMouseY = -1;
         let suppressMouseMoveUntil = 0;
+        let lastTouchTime = 0;
+
+        function isSettingsOpen() {
+            const sm = document.getElementById('settingsMenu');
+            return sm && sm.classList.contains('show');
+        }
 
         function isOverlayVisible() {
             if (!overlay) return false;
@@ -2447,7 +2476,14 @@
             overlay.classList.remove('overlay-hidden');
             document.body.style.cursor = 'default';
             clearTimeout(hideTimeout);
+            // If the settings menu is currently open, keep controls and settings visible indefinitely
+            if (isSettingsOpen()) {
+                return;
+            }
             hideTimeout = setTimeout(() => {
+                if (isSettingsOpen()) {
+                    return;
+                }
                 if (!video.paused) {
                     hideOverlay();
                 }
@@ -2456,12 +2492,12 @@
 
         function hideOverlay() {
             if (!overlay) return;
+            // Never auto-hide while the settings menu is open
+            if (isSettingsOpen()) return;
             clearTimeout(hideTimeout);
             overlay.style.opacity = '0';
             overlay.classList.add('overlay-hidden');
             document.body.style.cursor = 'none';
-            const settingsMenu = document.getElementById('settingsMenu');
-            if (settingsMenu) settingsMenu.classList.remove('show');
         }
 
         function toggleOverlay(e) {
@@ -2470,6 +2506,7 @@
             if (settingsMenu && settingsMenu.classList.contains('show')) {
                 if (!e.target.closest('.settings-container')) {
                     settingsMenu.classList.remove('show');
+                    showOverlay();
                     return;
                 }
             }
@@ -2478,12 +2515,13 @@
             if (e && e.target) {
                 if (e.target.closest('button, a, input, select, textarea, .progress-container, #progressContainer, .dropdown-menu, .settings-container, .skip-marker-btn, google-cast-launcher, #sessionEndedOverlay, #inboxMenu, #profileDropdownMenu, .player-prompt-overlay, .player-prompt-card')) {
                     markUserActive();
+                    showOverlay();
                     return;
                 }
             }
 
             // Suppress mousemove triggers momentarily so the click doesn't get immediately undone by mouse jitter
-            suppressMouseMoveUntil = Date.now() + 400;
+            suppressMouseMoveUntil = Date.now() + 500;
 
             if (isOverlayVisible()) {
                 hideOverlay();
@@ -2492,7 +2530,40 @@
             }
         }
 
+        // Track touch events on mobile to suppress synthetic mousemove from instantly flipping the overlay
+        window.addEventListener('touchstart', (e) => {
+            lastTouchTime = Date.now();
+            markUserActive();
+            if (e.target && e.target.closest('.player-controls, .settings-container, .player-header')) {
+                showOverlay();
+            }
+        }, { passive: true });
+
+        window.addEventListener('touchmove', (e) => {
+            lastTouchTime = Date.now();
+            if (e.target && e.target.closest('.player-controls, .settings-container, .player-header')) {
+                showOverlay();
+            }
+        }, { passive: true });
+
+        window.addEventListener('touchend', () => {
+            lastTouchTime = Date.now();
+        }, { passive: true });
+
+        // Ensure scrolling inside the settings menu never triggers an overlay hide
+        const settingsMenuEl = document.getElementById('settingsMenu');
+        if (settingsMenuEl) {
+            ['scroll', 'touchstart', 'touchmove'].forEach(evt => {
+                settingsMenuEl.addEventListener(evt, () => {
+                    markUserActive();
+                    clearTimeout(hideTimeout);
+                }, { passive: true });
+            });
+        }
+
         document.addEventListener('mousemove', (e) => {
+            // Ignore synthetic mousemove events from touch taps on mobile
+            if (Date.now() - lastTouchTime < 1000) return;
             if (Date.now() < suppressMouseMoveUntil) return;
             if (lastMouseX === -1 || Math.abs(e.clientX - lastMouseX) > 2 || Math.abs(e.clientY - lastMouseY) > 2) {
                 lastMouseX = e.clientX;

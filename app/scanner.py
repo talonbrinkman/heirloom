@@ -2072,6 +2072,25 @@ class ScannerManager:
                         except Exception as e:
                             print(f"[Scanner] Failed enriching TV logo for {s_title}: {e}")
 
+            # 4B-3. Queue automated intro/outro detection for scanned TV seasons
+            if new_shows and not self._abort_event.is_set():
+                try:
+                    from .intro_detection import is_auto_intro_detection_enabled, queue_season_intro_detection
+                    if is_auto_intro_detection_enabled():
+                        def _queue_scanned_tv_intros():
+                            with Session(engine) as session:
+                                seasons_to_check = session.exec(
+                                    select(TVShow.title, TVShow.season)
+                                    .where(TVShow.intro_start == None)
+                                    .distinct()
+                                ).all()
+                                for s_title, s_num in seasons_to_check:
+                                    if s_title and s_num is not None:
+                                        queue_season_intro_detection(s_title, s_num)
+                        asyncio.create_task(asyncio.to_thread(_queue_scanned_tv_intros))
+                except Exception as e:
+                    print(f"[Scanner] Error queueing automated intro detection: {e}")
+
             # 4C. Scan Photos & Home Videos
             batch_photos = []
             for full_path, file, root, photo_dir in new_photos:

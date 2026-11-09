@@ -434,6 +434,7 @@ button.play-btn svg,
 button.play-btn i,
 a.play-btn svg,
 a.play-btn i {
+    width: 1em;
     height: 1em;
     aspect-ratio: 1;
 }
@@ -493,7 +494,6 @@ select {
     line-height: 1.5;
     box-sizing: border-box;
     font-weight: 600;
-    line-height: 1.5;
 }
 
 input:focus,
@@ -1501,7 +1501,6 @@ body.has-backdrop {
 
 .series-logo {
     width: 100%;
-    max-width: 100%;
     height: auto;
     max-width: 300px;
     object-fit: contain;
@@ -1552,6 +1551,11 @@ body.has-backdrop {
 .info-details h3 {
     font-size: 1em;
     margin-bottom: 15px;
+}
+
+.info-details .play-btn {
+    padding: var(--padding) calc(var(--padding) * 2);
+    font-size: 1rem;
 }
 
 .info-details button span,
@@ -1622,7 +1626,6 @@ body.has-backdrop {
 .info-actions form {
     margin: 0;
     padding: 0;
-    display: inline-flex;
     display: contents;
     flex-shrink: 0;
 }
@@ -1867,6 +1870,7 @@ body.has-backdrop {
     align-items: center;
     gap: var(--gap);
     flex: 1;
+    overflow-x: scroll;
 }
 
 .controls-left {
@@ -2289,13 +2293,10 @@ video::-webkit-media-text-track-display,
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 16px;
-    background: rgba(22, 22, 26, 0.85);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 16px;
-    padding: 28px 40px;
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
-    max-width: 90vw;
+    gap: var(--gap);
+    background: var(--surface);
+    border-radius: var(--radius);
+    padding: calc(var(--padding) * 2);
 }
 
 .media-nav-title {
@@ -3703,15 +3704,6 @@ video::-webkit-media-text-track-display,
         aspect-ratio: 2 / 3;
     }
 
-    .grid-row .photo-poster-container,
-    .grid-row .music-poster-container,
-    .grid-row .photo-card .poster-container,
-    .grid-row .music-card .poster-container {
-        width: 100%;
-        height: auto;
-        aspect-ratio: 1 / 1 !important;
-    }
-
     .grid-row .media-title,
     .grid-row .media-year {
         max-width: 100%;
@@ -3848,19 +3840,6 @@ video::-webkit-media-text-track-display,
         flex-shrink: 0;
     }
 
-    .info-actions form {
-        margin: 0;
-        padding: 0;
-        display: inline-flex;
-        display: contents;
-        flex-shrink: 0;
-    }
-
-    .info-details .play-btn {
-        padding: var(--padding) calc(var(--padding) * 2);
-        font-size: 1rem;
-    }
-
     .info-actions .play-btn {
         aspect-ratio: 1;
         width: 2.5em;
@@ -3902,107 +3881,6 @@ video::-webkit-media-text-track-display,
         font-size: 0.85rem;
         flex-shrink: 0;
     }
-
-    /* Video Player Mobile Controls - Shared inside max-width 768px */
-    .player-controls {
-        padding: 10px 12px 18px 12px;
-    }
-
-    .player-header {
-        padding: var(--padding);
-    }
-
-    .player-title {
-        font-size: 1.1rem;
-    }
-
-    .player-subtitle {
-        font-size: 0.82rem;
-    }
-
-    .controls-row {
-        display: flex;
-        flex-direction: row;
-        gap: var(--gap);
-        justify-content: space-between;
-        align-items: center;
-        width: 100%;
-    }
-
-    .controls-left {
-        order: 1;
-        flex: 0 0 auto;
-        margin-bottom: 0;
-    }
-
-    .time-display {
-        font-size: 12px;
-        text-align: left;
-        letter-spacing: 0.02em;
-    }
-
-    .controls-center {
-        position: fixed;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%) scale(1.25);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 8px;
-        z-index: 60;
-    }
-
-    .controls-right {
-        order: 3;
-        flex: 0 0 auto;
-        gap: 6px;
-    }
-
-    .volume-container {
-        display: none !important;
-        /* Mobile hardware buttons handle volume */
-    }
-
-    .control-btn,
-    button.control-btn,
-    a.control-btn {
-        width: 2.8em;
-        height: 2.8em;
-        aspect-ratio: 1 / 1;
-        flex-shrink: 0;
-        align-self: center;
-    }
-
-    .player-close-btn,
-    a.player-close-btn {
-        width: 2.5rem;
-        height: 2.5rem;
-        aspect-ratio: 1;
-        flex-shrink: 0;
-        align-self: flex-start;
-    }
-
-    .play-btn-large,
-    button.play-btn-large {
-        width: 3.6em;
-        height: 3.6em;
-        aspect-ratio: 1 / 1;
-        flex-shrink: 0;
-        align-self: center;
-    }
-
-    .play-btn-large svg,
-    .play-btn-large i {
-        width: 1.5em;
-        height: 1.5em;
-    }
-
-    .skip-marker-btn {
-        padding: 8px 14px;
-        font-size: 0.85rem;
-    }
-
 
     /* Server Dashboard */
     .server-dashboard-container {
@@ -4327,29 +4205,35 @@ video::-webkit-media-text-track-display,
 }
 
 /* ==========================================================================
-   Video Player Mobile Controls (Landscape Phones & Mobile App)
-   Ensures controls are centered dead in the middle of the screen when horizontal
+   Video Player Mobile Controls (Portrait, Landscape Phones & Mobile App)
+   Ensures touch-friendly controls and centered play/skip dead in middle of screen
    ========================================================================== */
-@media (orientation: landscape) and (max-height: 550px),
+@media (max-width: 768px),
+       (orientation: landscape) and (max-height: 550px),
        (hover: none) and (pointer: coarse) and (orientation: landscape) and (max-height: 600px),
        (max-width: 1024px) and (orientation: landscape) and (max-height: 550px) {
-    .player-controls {
+    .player-controls,
+    body.is-mobile .player-controls {
         padding: 10px 12px 18px 12px;
     }
 
-    .player-header {
+    .player-header,
+    body.is-mobile .player-header {
         padding: var(--padding);
     }
 
-    .player-title {
+    .player-title,
+    body.is-mobile .player-title {
         font-size: 1.1rem;
     }
 
-    .player-subtitle {
+    .player-subtitle,
+    body.is-mobile .player-subtitle {
         font-size: 0.82rem;
     }
 
-    .controls-row {
+    .controls-row,
+    body.is-mobile .controls-row {
         display: flex;
         flex-direction: row;
         gap: var(--gap);
@@ -4358,24 +4242,26 @@ video::-webkit-media-text-track-display,
         width: 100%;
     }
 
-    .controls-left {
+    .controls-left,
+    body.is-mobile .controls-left {
         order: 1;
         flex: 0 0 auto;
         margin-bottom: 0;
     }
 
-    .time-display {
+    .time-display,
+    body.is-mobile .time-display {
         font-size: 12px;
         text-align: left;
         letter-spacing: 0.02em;
     }
 
-    .controls-center {
-        font-size: 150%;
+    .controls-center,
+    body.is-mobile .controls-center {
         position: fixed;
         top: 50%;
         left: 50%;
-        transform: translate(-50%, -50%);
+        transform: translate(-50%, -50%) scale(1.25);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -4383,46 +4269,52 @@ video::-webkit-media-text-track-display,
         z-index: 60;
     }
 
-    .controls-right {
+    .controls-right,
+    body.is-mobile .controls-right {
         order: 3;
         flex: 0 0 auto;
         gap: 6px;
     }
 
-    .volume-container {
+    .volume-container,
+    body.is-mobile .volume-container {
         display: none !important;
         /* Mobile hardware buttons handle volume */
     }
 
     .control-btn,
     button.control-btn,
-    a.control-btn {
-        width: 2.8em;
-        height: 2.8em;
+    a.control-btn,
+    .player-close-btn,
+    a.player-close-btn,
+    body.is-mobile .control-btn,
+    body.is-mobile button.control-btn,
+    body.is-mobile a.control-btn,
+    body.is-mobile .player-close-btn,
+    body.is-mobile a.player-close-btn {
+        width: 3.2em;
+        height: 3.2em;
         aspect-ratio: 1 / 1;
         flex-shrink: 0;
         align-self: center;
     }
 
-    .player-close-btn,
-    a.player-close-btn {
-        width: 2.8em;
-        height: 2.8em;
-        aspect-ratio: 1 / 1;
-        flex-shrink: 0;
-        align-self: flex-start;
-    }
-
     .control-btn svg,
     .control-btn i,
     .player-close-btn svg,
-    .player-close-btn i {
+    .player-close-btn i,
+    body.is-mobile .control-btn svg,
+    body.is-mobile .control-btn i,
+    body.is-mobile .player-close-btn svg,
+    body.is-mobile .player-close-btn i {
         width: 1.25em;
         height: 1.25em;
     }
 
     .play-btn-large,
-    button.play-btn-large {
+    button.play-btn-large,
+    body.is-mobile .play-btn-large,
+    body.is-mobile button.play-btn-large {
         width: 3.6em;
         height: 3.6em;
         aspect-ratio: 1 / 1;
@@ -4431,107 +4323,18 @@ video::-webkit-media-text-track-display,
     }
 
     .play-btn-large svg,
-    .play-btn-large i {
+    .play-btn-large i,
+    body.is-mobile .play-btn-large svg,
+    body.is-mobile .play-btn-large i {
         width: 1.5em;
         height: 1.5em;
     }
 
-    .skip-marker-btn {
+    .skip-marker-btn,
+    body.is-mobile .skip-marker-btn {
         padding: 8px 14px;
         font-size: 0.85rem;
     }
-}
-
-body.is-mobile .player-controls {
-    padding: 10px 12px 18px 12px;
-}
-body.is-mobile .player-header {
-    padding: var(--padding);
-}
-body.is-mobile .player-title {
-    font-size: 1.1rem;
-}
-body.is-mobile .player-subtitle {
-    font-size: 0.82rem;
-}
-body.is-mobile .controls-row {
-    display: flex;
-    flex-direction: row;
-    gap: var(--gap);
-    justify-content: space-between;
-    align-items: center;
-    width: 100%;
-}
-body.is-mobile .controls-left {
-    order: 1;
-    flex: 0 0 auto;
-    margin-bottom: 0;
-}
-body.is-mobile .time-display {
-    font-size: 12px;
-    text-align: left;
-    letter-spacing: 0.02em;
-}
-body.is-mobile .controls-center {
-    font-size: 150%;
-    position: fixed;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    z-index: 60;
-}
-body.is-mobile .controls-right {
-    order: 3;
-    flex: 0 0 auto;
-    gap: 6px;
-}
-body.is-mobile .volume-container {
-    display: none !important;
-}
-body.is-mobile .control-btn,
-body.is-mobile button.control-btn,
-body.is-mobile a.control-btn {
-    width: 2.8em;
-    height: 2.8em;
-    aspect-ratio: 1 / 1;
-    flex-shrink: 0;
-    align-self: center;
-}
-body.is-mobile .player-close-btn,
-body.is-mobile a.player-close-btn {
-    width: 2.8em;
-    height: 2.8em;
-    aspect-ratio: 1 / 1;
-    flex-shrink: 0;
-    align-self: flex-start;
-}
-body.is-mobile .control-btn svg,
-body.is-mobile .control-btn i,
-body.is-mobile .player-close-btn svg,
-body.is-mobile .player-close-btn i {
-    width: 1.25em;
-    height: 1.25em;
-}
-body.is-mobile .play-btn-large,
-body.is-mobile button.play-btn-large {
-    width: 3.6em;
-    height: 3.6em;
-    aspect-ratio: 1 / 1;
-    flex-shrink: 0;
-    align-self: center;
-}
-body.is-mobile .play-btn-large svg,
-body.is-mobile .play-btn-large i {
-    width: 1.5em;
-    height: 1.5em;
-}
-body.is-mobile .skip-marker-btn {
-    padding: 8px 14px;
-    font-size: 0.85rem;
 }
 
 /* Extra breakpoint for compact mobile screens (max-width: 480px) */
@@ -5464,7 +5267,6 @@ body.has-active-player .main-content {
 }
 
 .queue-item {
-    transition: 0.2s;
     display: flex;
     align-items: center;
     justify-content: space-between;
