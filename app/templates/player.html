@@ -105,6 +105,11 @@
     </div>
     {% endif %}
 
+    <div id="aspectToast" class="sync-action-toast">
+        <i data-lucide="proportions" style="width: 16px; height: 16px;"></i>
+        <span id="aspectToastText"></span>
+    </div>
+
     <!-- "Are You Still Watching?" Prompt Modal -->
     <div id="stillWatchingModal" class="player-prompt-overlay" style="display: none;">
         <div class="player-prompt-card">
@@ -1859,6 +1864,33 @@
         }
 
         // Aspect Ratio
+        let aspectToastTimeout = null;
+        function showAspectToast(aspect) {
+            const toast = document.getElementById('aspectToast');
+            const toastText = document.getElementById('aspectToastText');
+            if (!toast || !toastText) return;
+
+            const labels = { contain: 'Fit', cover: 'Fill', fill: 'Stretch' };
+            toastText.textContent = `Aspect Ratio: ${labels[aspect] || aspect}`;
+
+            toast.style.display = 'flex';
+            requestAnimationFrame(() => {
+                toast.classList.add('show');
+            });
+
+            if (aspectToastTimeout) {
+                clearTimeout(aspectToastTimeout);
+            }
+            aspectToastTimeout = setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => {
+                    if (!toast.classList.contains('show')) {
+                        toast.style.display = 'none';
+                    }
+                }, 300);
+            }, 1500);
+        }
+
         function setAspectRatio(aspect) {
             document.querySelectorAll('.aspect-btn').forEach(b => b.classList.remove('active'));
             const activeBtn = document.querySelector(`.aspect-btn[data-aspect="${aspect}"]`);
@@ -1878,7 +1910,9 @@
             const aspects = ['contain', 'cover', 'fill'];
             const current = video.style.objectFit || localStorage.getItem('player_aspect') || 'contain';
             const nextIndex = (aspects.indexOf(current) + 1) % aspects.length;
-            setAspectRatio(aspects[nextIndex]);
+            const nextAspect = aspects[nextIndex];
+            setAspectRatio(nextAspect);
+            showAspectToast(nextAspect);
         }
 
         // Volume
@@ -2458,6 +2492,7 @@
         let lastMouseX = -1;
         let lastMouseY = -1;
         let suppressMouseMoveUntil = 0;
+        let suppressOverlayClickUntil = 0;
         let lastTouchTime = 0;
 
         function isSettingsOpen() {
@@ -2501,6 +2536,8 @@
         }
 
         function toggleOverlay(e) {
+            if (Date.now() < suppressOverlayClickUntil) return;
+
             // Dismiss settings menu if open and user clicked outside settings
             const settingsMenu = document.getElementById('settingsMenu');
             if (settingsMenu && settingsMenu.classList.contains('show')) {
@@ -2549,6 +2586,79 @@
         window.addEventListener('touchend', () => {
             lastTouchTime = Date.now();
         }, { passive: true });
+
+        // Mobile pinch-to-change aspect ratio (pinch out: Fit -> Fill -> Stretch, pinch in: Stretch -> Fill -> Fit)
+        let isPinching = false;
+        let pinchStartDist = 0;
+        let pinchHandled = false;
+
+        function getTouchDistance(t1, t2) {
+            return Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+        }
+
+        document.addEventListener('touchstart', (e) => {
+            if (!video || video.style.display === 'none') return;
+            if (e.touches.length === 2) {
+                if (e.target && e.target.closest('.dropdown-menu, .settings-container, .player-prompt-overlay, #sessionEndedOverlay, .progress-container')) {
+                    return;
+                }
+                isPinching = true;
+                pinchHandled = false;
+                pinchStartDist = getTouchDistance(e.touches[0], e.touches[1]);
+            } else {
+                isPinching = false;
+            }
+        }, { passive: true });
+
+        document.addEventListener('touchmove', (e) => {
+            if (!isPinching || e.touches.length !== 2) return;
+            e.preventDefault();
+            if (pinchHandled) return;
+
+            const currentDist = getTouchDistance(e.touches[0], e.touches[1]);
+            const delta = currentDist - pinchStartDist;
+            const ratio = pinchStartDist > 0 ? currentDist / pinchStartDist : 1;
+            const aspects = ['contain', 'cover', 'fill'];
+            const current = video.style.objectFit || localStorage.getItem('player_aspect') || 'contain';
+            const currentIndex = Math.max(0, aspects.indexOf(current));
+
+            if (delta > 35 && ratio > 1.15) {
+                const nextIndex = Math.min(aspects.length - 1, currentIndex + 1);
+                const nextAspect = aspects[nextIndex];
+                if (nextIndex !== currentIndex) {
+                    setAspectRatio(nextAspect);
+                }
+                showAspectToast(nextAspect);
+                pinchHandled = true;
+            } else if (delta < -35 && ratio < 0.85) {
+                const prevIndex = Math.max(0, currentIndex - 1);
+                const prevAspect = aspects[prevIndex];
+                if (prevIndex !== currentIndex) {
+                    setAspectRatio(prevAspect);
+                }
+                showAspectToast(prevAspect);
+                pinchHandled = true;
+            }
+        }, { passive: false });
+
+        function endPinch(e) {
+            if (isPinching && (!e.touches || e.touches.length < 2)) {
+                isPinching = false;
+                suppressOverlayClickUntil = Date.now() + 400;
+            }
+        }
+        document.addEventListener('touchend', endPinch, { passive: true });
+        document.addEventListener('touchcancel', endPinch, { passive: true });
+
+        // Prevent iOS Safari native pinch-zoom gesture on the player
+        ['gesturestart', 'gesturechange'].forEach(evt => {
+            document.addEventListener(evt, (e) => {
+                if (e.target && e.target.closest('.dropdown-menu, .player-prompt-overlay, #sessionEndedOverlay')) {
+                    return;
+                }
+                e.preventDefault();
+            }, { passive: false });
+        });
 
         // Ensure scrolling inside the settings menu never triggers an overlay hide
         const settingsMenuEl = document.getElementById('settingsMenu');

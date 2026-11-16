@@ -97,6 +97,145 @@
             }
         }
 
+        function escapeHtml(str) {
+            return String(str ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function renderVolumeList(volumePaths) {
+            const list = document.getElementById('volumeList');
+            if (!list) return;
+            if (!volumePaths || volumePaths.length === 0) {
+                list.innerHTML = '<li>No volume paths configured.</li>';
+                return;
+            }
+            list.innerHTML = volumePaths.map(vp => {
+                const badgeClass = vp.exists ? 'badge-active' : 'badge-inactive';
+                const badgeTitle = vp.exists ? 'Active' : 'Inactive';
+                const badgeIcon = vp.exists ? 'check' : 'x';
+                return `
+                <li class="list-item volume-list-item" data-media-type="${escapeHtml(vp.raw_media_type)}" data-volume-id="${escapeHtml(vp.id)}">
+                    <div class="flex gap-10 align-center volume-info">
+                        <span class="code-text ${badgeClass}" style="text-transform: uppercase;" title="${badgeTitle}">
+                            <i data-lucide="${badgeIcon}"></i>
+                            ${escapeHtml(vp.media_type)}
+                        </span>
+                        <strong>${escapeHtml(vp.display_path)}</strong>
+                    </div>
+                    <form action="/settings/delete_volume/${encodeURIComponent(vp.id)}" method="post" class="m-0 volume-delete-form" onsubmit="submitDeleteVolumeForm(event)">
+                        <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i> Delete</button>
+                    </form>
+                </li>`;
+            }).join('');
+            if (window.lucide) lucide.createIcons();
+        }
+
+        function updatePermissionToggles(mountedVolumes) {
+            if (!mountedVolumes) return;
+            document.querySelectorAll('[data-volume-type]').forEach(el => {
+                const type = el.getAttribute('data-volume-type');
+                el.style.display = mountedVolumes[type] ? '' : 'none';
+            });
+        }
+
+        function selectNextUnaddedMediaType() {
+            const pathInput = document.getElementById('pathInput');
+            const mediaTypes = [
+                { type: 'movie', label: 'Movies' },
+                { type: 'tv', label: 'TV Shows' },
+                { type: 'photo', label: 'Photos' },
+                { type: 'music', label: 'Music' }
+            ];
+            const defaultType = mediaTypes.find(m => !isMediaTypeAdded(m.type)) || mediaTypes[0];
+            if (defaultType.type !== document.getElementById('mediaTypeInput')?.value) {
+                selectMediaType(defaultType.type, defaultType.label, null, true);
+            } else if (pathInput && !pathInput.value.trim() && !isMediaTypeAdded(defaultType.type)) {
+                fetch('/api/suggest_volume_path?media_type=' + encodeURIComponent(defaultType.type))
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data && data.suggested_path && pathInput && !pathInput.value.trim()) {
+                            pathInput.value = data.suggested_path;
+                        }
+                    }).catch(() => {});
+            }
+        }
+
+        async function submitAddVolumeForm(event) {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const btn = form.querySelector('.volume-add-btn') || form.querySelector('button[type="submit"]');
+            if (!btn || btn.disabled) return;
+
+            const origHTML = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<i data-lucide="loader" class="spinner"></i> Adding...';
+            if (window.lucide) lucide.createIcons();
+
+            try {
+                const res = await fetch(form.action, {
+                    method: form.method || 'POST',
+                    headers: { 'Accept': 'application/json' },
+                    body: new FormData(form)
+                });
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+                const data = await res.json();
+                renderVolumeList(data.volume_paths);
+                updatePermissionToggles(data.mounted_volumes);
+                const pathInput = document.getElementById('pathInput');
+                if (pathInput) pathInput.value = '';
+                selectNextUnaddedMediaType();
+            } catch (err) {
+                console.error('Failed to add volume:', err);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = origHTML;
+                if (window.lucide) lucide.createIcons();
+            }
+        }
+
+        async function submitDeleteVolumeForm(event) {
+            event.preventDefault();
+            const form = event.currentTarget;
+            if (!confirm('Remove this volume path? Missing media will be removed from library.')) {
+                return;
+            }
+            const btn = form.querySelector('button[type="submit"]');
+            if (!btn || btn.disabled) return;
+
+            const origHTML = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<i data-lucide="loader" class="spinner"></i> Deleting...';
+            if (window.lucide) lucide.createIcons();
+
+            try {
+                const res = await fetch(form.action, {
+                    method: form.method || 'POST',
+                    headers: { 'Accept': 'application/json' }
+                });
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+                const data = await res.json();
+                renderVolumeList(data.volume_paths);
+                updatePermissionToggles(data.mounted_volumes);
+                const pathInput = document.getElementById('pathInput');
+                if (pathInput && !pathInput.value.trim()) {
+                    selectNextUnaddedMediaType();
+                }
+            } catch (err) {
+                console.error('Failed to delete volume:', err);
+                btn.disabled = false;
+                btn.innerHTML = origHTML;
+                if (window.lucide) lucide.createIcons();
+            }
+        }
+
         function togglePasswordVisibility() {
             toggleVisibility('newPasswordInput', 'togglePasswordBtn');
         }
@@ -438,24 +577,7 @@
 
             // Auto-detect matching volume path for default selection: default to first unadded media type
             const pathInput = document.getElementById('pathInput');
-            const mediaTypes = [
-                { type: 'movie', label: 'Movies' },
-                { type: 'tv', label: 'TV Shows' },
-                { type: 'photo', label: 'Photos' },
-                { type: 'music', label: 'Music' }
-            ];
-            const defaultType = mediaTypes.find(m => !isMediaTypeAdded(m.type)) || mediaTypes[0];
-            if (defaultType.type !== 'movie') {
-                selectMediaType(defaultType.type, defaultType.label, null, true);
-            } else if (pathInput && !pathInput.value.trim() && !isMediaTypeAdded('movie')) {
-                fetch('/api/suggest_volume_path?media_type=movie')
-                    .then(r => r.json())
-                    .then(data => {
-                        if (data && data.suggested_path && pathInput && !pathInput.value.trim()) {
-                            pathInput.value = data.suggested_path;
-                        }
-                    }).catch(() => {});
-            }
+            selectNextUnaddedMediaType();
 
             if (pathInput) {
                 pathInput.addEventListener('input', () => autoDetectMediaTypeFromPath(pathInput.value));
@@ -681,7 +803,7 @@
                 </form>
             </div>
 
-            <form action="/settings/add_volume" method="post" class="flex gap-10 align-center mb-20 volume-add-form">
+            <form action="/settings/add_volume" method="post" class="flex gap-10 align-center mb-20 volume-add-form" onsubmit="submitAddVolumeForm(event)">
                 <div class="flex-1 flex gap-10 align-center volume-input-browse-group">
                     <input type="text" name="path" id="pathInput" placeholder="/media/movies or custom volume path"
                         required class="m-0 flex-1">
@@ -709,9 +831,9 @@
                 <button type="submit" class="btn btn-primary volume-add-btn"><i data-lucide="folder-plus"></i> Add Path</button>
             </form>
 
-            <ul>
+            <ul id="volumeList">
                 {% for vp in volume_paths %}
-                <li class="list-item volume-list-item" data-media-type="{{ vp.raw_media_type }}">
+                <li class="list-item volume-list-item" data-media-type="{{ vp.raw_media_type }}" data-volume-id="{{ vp.id }}">
                     <div class="flex gap-10 align-center volume-info">
                         {% if vp.exists %}
                         <span class="code-text badge-active" style="text-transform: uppercase;" title="Active">
@@ -726,10 +848,8 @@
                         {% endif %}
                         <strong>{{ vp.display_path }}</strong>
                     </div>
-                    <form action="/settings/delete_volume/{{ vp.id }}" method="post" class="m-0 volume-delete-form">
-                        <button type="submit" class="btn btn-danger btn-sm"
-                            onclick="return confirm('Remove this volume path? Missing media will be removed from library.');"><i
-                                data-lucide="trash-2"></i> Delete</button>
+                    <form action="/settings/delete_volume/{{ vp.id }}" method="post" class="m-0 volume-delete-form" onsubmit="submitDeleteVolumeForm(event)">
+                        <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i> Delete</button>
                     </form>
                 </li>
                 {% else %}
@@ -768,30 +888,22 @@
                         <!-- Auto-submit on change removes the need for a button -->
                         <form action="/settings/update_user/{{ u.id }}" method="post" class="m-0 user-permissions-form">
                             <div class="user-permissions-group">
-                                {% if mounted_volumes.movie %}
-                                <label class="toggle-pill"><input type="checkbox" name="movies_access"
+                                <label class="toggle-pill" data-volume-type="movie" {% if not mounted_volumes.movie %}style="display: none;"{% endif %}><input type="checkbox" name="movies_access"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         u.movies_access %}checked{% endif %}>
                                     <span>Movies</span></label>
-                                {% endif %}
-                                {% if mounted_volumes.tv %}
-                                <label class="toggle-pill"><input type="checkbox" name="tv_access"
+                                <label class="toggle-pill" data-volume-type="tv" {% if not mounted_volumes.tv %}style="display: none;"{% endif %}><input type="checkbox" name="tv_access"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.tv_access
                                         %}checked{% endif %}>
                                     <span>TV Shows</span></label>
-                                {% endif %}
-                                {% if mounted_volumes.photo %}
-                                <label class="toggle-pill"><input type="checkbox" name="photos_access"
+                                <label class="toggle-pill" data-volume-type="photo" {% if not mounted_volumes.photo %}style="display: none;"{% endif %}><input type="checkbox" name="photos_access"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         u.photos_access %}checked{% endif %}>
                                     <span>Photos</span></label>
-                                {% endif %}
-                                {% if mounted_volumes.music %}
-                                <label class="toggle-pill"><input type="checkbox" name="music_access"
+                                <label class="toggle-pill" data-volume-type="music" {% if not mounted_volumes.music %}style="display: none;"{% endif %}><input type="checkbox" name="music_access"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         u.music_access %}checked{% endif %}>
                                     <span>Music</span></label>
-                                {% endif %}
                             </div>
                             <div class="user-permissions-group">
                                 <label class="toggle-pill"><input type="checkbox" name="downloads_access"
@@ -833,30 +945,22 @@
                     <div class="user-controls-row">
                         <form action="/settings/update_invite/{{ invite.id }}" method="post" class="m-0 user-permissions-form">
                             <div class="user-permissions-group">
-                                {% if mounted_volumes.movie %}
-                                <label class="toggle-pill"><input type="checkbox" name="movies_access"
+                                <label class="toggle-pill" data-volume-type="movie" {% if not mounted_volumes.movie %}style="display: none;"{% endif %}><input type="checkbox" name="movies_access"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         invite.movies_access %}checked{% endif %}>
                                     <span>Movies</span></label>
-                                {% endif %}
-                                {% if mounted_volumes.tv %}
-                                <label class="toggle-pill"><input type="checkbox" name="tv_access"
+                                <label class="toggle-pill" data-volume-type="tv" {% if not mounted_volumes.tv %}style="display: none;"{% endif %}><input type="checkbox" name="tv_access"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if invite.tv_access
                                         %}checked{% endif %}>
                                     <span>TV Shows</span></label>
-                                {% endif %}
-                                {% if mounted_volumes.photo %}
-                                <label class="toggle-pill"><input type="checkbox" name="photos_access"
+                                <label class="toggle-pill" data-volume-type="photo" {% if not mounted_volumes.photo %}style="display: none;"{% endif %}><input type="checkbox" name="photos_access"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         invite.photos_access %}checked{% endif %}>
                                     <span>Photos</span></label>
-                                {% endif %}
-                                {% if mounted_volumes.music %}
-                                <label class="toggle-pill"><input type="checkbox" name="music_access"
+                                <label class="toggle-pill" data-volume-type="music" {% if not mounted_volumes.music %}style="display: none;"{% endif %}><input type="checkbox" name="music_access"
                                         class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
                                         invite.music_access %}checked{% endif %}>
                                     <span>Music</span></label>
-                                {% endif %}
                             </div>
                             <div class="user-permissions-group">
                                 <label class="toggle-pill"><input type="checkbox" name="downloads_access"
@@ -1025,7 +1129,7 @@
             </form>
         </div>
         <div style="text-align: center; color: #888; font-size: 0.8em; margin-top: 10px;">
-            <strong>v1.8.6</strong>
+            <strong>v1.8.11</strong>
         </div>
     </div>
 

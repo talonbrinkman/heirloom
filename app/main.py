@@ -1565,115 +1565,168 @@ async def async_enrich_movie(movie_id: int):
 
 
 async def async_enrich_tv_show(title: str):
-    """Non-blocking background enrichment of TV show logo, cast photos, and season posters."""
+    """Non-blocking background enrichment of TV show logo, cast photos, season posters, and episode descriptions."""
     with _enrich_lock:
         if title in _enriching_tv:
             return
         _enriching_tv.add(title)
 
+    def _get_ep_se(file_path: str, season: Optional[int], episode: Optional[int]):
+        m = re.search(r'S(\d+)E(\d+)', file_path, re.IGNORECASE)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        m_s = re.search(r'S(\d+)', file_path, re.IGNORECASE)
+        s_val = int(m_s.group(1)) if m_s else season
+        return s_val, episode
+
     try:
-        with Session(engine) as session:
-            eps = session.exec(select(TVShow).where(TVShow.title == title)).all()
-            if not eps:
+        def _load_snapshot():
+            with Session(engine) as session:
+                eps = session.exec(select(TVShow).where(TVShow.title == title)).all()
+                if not eps:
+                    return None
+                rep = eps[0]
+                tmdb_config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
+                tmdb_key = tmdb_config.value if tmdb_config and tmdb_config.value else os.getenv("TMDB_API_KEY")
+                if not tmdb_key:
+                    return None
+
+                tmdb_id = None
+                for e in eps:
+                    if e.poster_filename:
+                        m_match = re.search(r'tv_(\d+)_', e.poster_filename)
+                        if m_match:
+                            tmdb_id = int(m_match.group(1))
+                            break
+
+                season_state = {}
+                for e in eps:
+                    s_val, _ = _get_ep_se(e.file_path, e.season, e.episode)
+                    if s_val is not None:
+                        st = season_state.setdefault(s_val, {"has_sp": False, "needs_ep_plots": False})
+                        if e.season_poster_filename:
+                            st["has_sp"] = True
+                        if not e.episode_plot:
+                            st["needs_ep_plots"] = True
+
+                return {
+                    "tmdb_key": tmdb_key,
+                    "tmdb_id": tmdb_id,
+                    "rep_year": rep.year,
+                    "rep_plot": rep.plot,
+                    "rep_logo": rep.logo_filename,
+                    "season_state": season_state,
+                }
+
+        snap = await asyncio.to_thread(_load_snapshot)
+        if not snap:
+            return
+
+        tmdb_key = snap["tmdb_key"]
+        tmdb_id = snap["tmdb_id"]
+
+        raw_client = httpx.AsyncClient(timeout=10.0) if httpx is not None else None
+        if not raw_client:
+            return
+        client = SafeHTTPClient(raw_client)
+
+        try:
+            if not tmdb_id:
+                s_url = "https://api.themoviedb.org/3/search/tv"
+                params = {"query": title, "api_key": tmdb_key}
+                raw_year = (snap["rep_year"] or "")[:4]
+                if raw_year.isdigit():
+                    params["first_air_date_year"] = raw_year
+                s_res = await client.get(s_url, params=params)
+                if s_res.status_code == 200:
+                    results = s_res.json().get("results", [])
+                    if results:
+                        tmdb_id = results[0].get("id")
+
+            if not tmdb_id:
+                if not snap["rep_logo"]:
+                    def _mark_no_logo():
+                        with Session(engine) as session:
+                            eps = session.exec(select(TVShow).where(TVShow.title == title)).all()
+                            for e in eps:
+                                e.logo_filename = "none"
+                                session.add(e)
+                            session.commit()
+                    await asyncio.to_thread(_mark_no_logo)
                 return
-            rep = eps[0]
 
-            tmdb_config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
-            tmdb_key = tmdb_config.value if tmdb_config and tmdb_config.value else os.getenv("TMDB_API_KEY")
-            if not tmdb_key:
-                return
+            # 1. Fetch additional details (cast with photos, director, genres, logo)
+            cast_str, dir_str, content_rating, genres_str, _, _, _, _, _, logo_filename = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_key)
 
-            tmdb_id = None
-            for e in eps:
-                if e.poster_filename:
-                    m_match = re.search(r'tv_(\d+)_', e.poster_filename)
-                    if m_match:
-                        tmdb_id = int(m_match.group(1))
-                        break
+            show_plot = snap["rep_plot"]
+            if not show_plot:
+                try:
+                    tv_res = await client.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={tmdb_key}", timeout=10.0)
+                    if tv_res.status_code == 200:
+                        show_plot = tv_res.json().get("overview") or show_plot
+                except Exception:
+                    pass
 
-            raw_client = httpx.AsyncClient(timeout=10.0) if httpx is not None else None
-            if not raw_client:
-                return
-            client = SafeHTTPClient(raw_client)
+            # 2. Check missing season posters and episode descriptions across the seasons of this show
+            season_posters = {}
+            episode_plots = {}
+            for s, st in snap["season_state"].items():
+                if not st["has_sp"] or st["needs_ep_plots"]:
+                    try:
+                        s_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s}?api_key={tmdb_key}"
+                        s_res = await client.get(s_url, timeout=10.0)
+                        if s_res.status_code == 200:
+                            s_data = s_res.json()
+                            if not st["has_sp"] and s_data.get("poster_path"):
+                                sp_fn = await async_download_image(client, s_data["poster_path"], f"tv_s{s}", tmdb_id, "poster")
+                                if sp_fn:
+                                    season_posters[s] = sp_fn
+                            for ep_item in s_data.get("episodes") or []:
+                                ep_num = ep_item.get("episode_number")
+                                overview = (ep_item.get("overview") or "").strip()
+                                if ep_num is not None and overview:
+                                    episode_plots[(s, int(ep_num))] = overview
+                    except Exception:
+                        pass
 
-            try:
-                if not tmdb_id:
-                    s_url = "https://api.themoviedb.org/3/search/tv"
-                    params = {"query": title, "api_key": tmdb_key}
-                    raw_year = (rep.year or "")[:4]
-                    if raw_year.isdigit():
-                        params["first_air_date_year"] = raw_year
-                    s_res = await client.get(s_url, params=params)
-                    if s_res.status_code == 200:
-                        results = s_res.json().get("results", [])
-                        if results:
-                            tmdb_id = results[0].get("id")
+            # 3. Commit updates in a short-lived thread-local session
+            def _save_updates():
+                with Session(engine) as session:
+                    eps = session.exec(select(TVShow).where(TVShow.title == title)).all()
+                    for e in eps:
+                        if show_plot and not e.plot:
+                            e.plot = show_plot
 
-                if not tmdb_id:
-                    if not rep.logo_filename:
-                        for e in eps:
+                        if logo_filename and (not e.logo_filename or e.logo_filename == "none"):
+                            e.logo_filename = logo_filename
+                        elif not e.logo_filename:
                             e.logo_filename = "none"
-                            session.add(e)
-                        session.commit()
-                    return
 
-                # 1. Fetch additional details (cast with photos, director, genres, logo)
-                cast_str, dir_str, content_rating, genres_str, _, _, _, _, _, logo_filename = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_key)
+                        if cast_str and (not e.cast or e.cast == "[]" or '"profile_filename": null' in (e.cast or '')):
+                            e.cast = cast_str
 
-                # 2. Check missing season posters across the seasons of this show
-                seasons = set()
-                for e in eps:
-                    m = re.search(r'S(\d+)', e.file_path, re.IGNORECASE)
-                    if m:
-                        seasons.add(int(m.group(1)))
-                    elif e.season is not None:
-                        seasons.add(e.season)
+                        if dir_str and not e.director:
+                            e.director = dir_str
 
-                season_posters = {}
-                for s in seasons:
-                    has_sp = any(e.season_poster_filename for e in eps if ((re.search(r'S(\d+)', e.file_path, re.IGNORECASE) and int(re.search(r'S(\d+)', e.file_path, re.IGNORECASE).group(1)) == s) or e.season == s))
-                    if not has_sp:
-                        try:
-                            s_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s}?api_key={tmdb_key}"
-                            s_res = await client.get(s_url, timeout=10.0)
-                            if s_res.status_code == 200:
-                                s_data = s_res.json()
-                                if s_data.get("poster_path"):
-                                    sp_fn = await async_download_image(client, s_data["poster_path"], f"tv_s{s}", tmdb_id, "poster")
-                                    if sp_fn:
-                                        season_posters[s] = sp_fn
-                        except Exception:
-                            pass
+                        if content_rating and not e.content_rating:
+                            e.content_rating = content_rating
 
-                # 3. Update all episodes
-                for e in eps:
-                    if logo_filename and (not e.logo_filename or e.logo_filename == "none"):
-                        e.logo_filename = logo_filename
-                    elif not e.logo_filename:
-                        e.logo_filename = "none"
+                        if genres_str and not e.genres:
+                            e.genres = genres_str
 
-                    if cast_str and (not e.cast or e.cast == "[]" or '"profile_filename": null' in (e.cast or '')):
-                        e.cast = cast_str
+                        s_num, e_num = _get_ep_se(e.file_path, e.season, e.episode)
+                        if s_num in season_posters and not e.season_poster_filename:
+                            e.season_poster_filename = season_posters[s_num]
+                        if s_num is not None and e_num is not None and (s_num, e_num) in episode_plots and not e.episode_plot:
+                            e.episode_plot = episode_plots[(s_num, e_num)]
 
-                    if dir_str and not e.director:
-                        e.director = dir_str
+                        session.add(e)
+                    session.commit()
 
-                    if content_rating and not e.content_rating:
-                        e.content_rating = content_rating
-
-                    if genres_str and not e.genres:
-                        e.genres = genres_str
-
-                    m = re.search(r'S(\d+)', e.file_path, re.IGNORECASE)
-                    s_num = int(m.group(1)) if m else e.season
-                    if s_num in season_posters and not e.season_poster_filename:
-                        e.season_poster_filename = season_posters[s_num]
-
-                    session.add(e)
-
-                session.commit()
-            finally:
-                await raw_client.aclose()
+            await asyncio.to_thread(_save_updates)
+            invalidate_series_cache(title)
+        finally:
+            await raw_client.aclose()
     except Exception as e:
         print(f"[Enrichment] Error enriching TV show {title}: {e}")
     finally:
@@ -4495,13 +4548,13 @@ def series_view(
         if not shows:
             raise HTTPException(status_code=404, detail="Series not found")
         
-        # Non-blocking background enrichment of missing logo, cast photos, and season posters
+        # Non-blocking background enrichment of missing logo, cast photos, season posters, and episode descriptions
         needs_tv_enrichment = (
             not shows[0].logo_filename or
             not shows[0].cast or
             shows[0].cast == "[]" or
             '"profile_filename": null' in (shows[0].cast or '') or
-            any(not e.season_poster_filename for e in shows)
+            any(not e.season_poster_filename or not e.episode_plot for e in shows)
         )
         if needs_tv_enrichment:
             background_tasks.add_task(async_enrich_tv_show, title)
@@ -4531,7 +4584,7 @@ def series_view(
                 "episode_name": "",
                 "season": 0,
                 "episode": ep_obj.episode,
-                "plot": ep_obj.plot or "",
+                "plot": ep_obj.episode_plot or "",
                 "play_url": f"/play/tv/{ep_obj.id}"
             }
             m = re.search(r'S(\d+)E(\d+)', ep_dict['file_path'], re.IGNORECASE)
@@ -8158,23 +8211,7 @@ async def view_settings(
             scanner_manager.check_scan_necessary()
         invites = session.exec(select(InviteCode).order_by(InviteCode.id.desc())).all()
         users = session.exec(select(User).order_by(User.id)).all()
-        v_paths = session.exec(select(VolumePath).order_by(VolumePath.id)).all()
-        for v in v_paths:
-            display_type = {"movie": "Movies", "tv": "TV Shows", "photo": "Photos", "music": "Music"}.get(v.media_type, v.media_type)
-            volume_paths.append({
-                "id": v.id,
-                "path": v.path,
-                "display_path": v.path,
-                "raw_media_type": v.media_type,
-                "media_type": display_type,
-                "exists": os.path.exists(v.path)
-            })
-        mounted_volumes = {
-            "movie": any(v.media_type == "movie" and os.path.exists(v.path) for v in v_paths),
-            "tv": any(v.media_type == "tv" and os.path.exists(v.path) for v in v_paths),
-            "photo": any(v.media_type == "photo" and os.path.exists(v.path) for v in v_paths),
-            "music": any(v.media_type == "music" and os.path.exists(v.path) for v in v_paths),
-        }
+        v_paths, volume_paths, mounted_volumes = _get_volume_context(session)
         remote_url_config = session.exec(select(SystemConfig).where(SystemConfig.key == "remote_access_url")).first()
         remote_url = remote_url_config.value if remote_url_config else ""
         if remote_url:
@@ -8610,8 +8647,35 @@ async def save_remote_access(
     session.commit()
     return RedirectResponse(url="/settings", status_code=303)
 
+def _get_volume_context(session: Session):
+    """Return ordered volume rows, serialized volume dicts, and mounted flags by media type."""
+    v_paths = session.exec(select(VolumePath).order_by(VolumePath.id)).all()
+    type_labels = {"movie": "Movies", "tv": "TV Shows", "photo": "Photos", "music": "Music"}
+    volume_paths = [
+        {
+            "id": v.id,
+            "path": v.path,
+            "display_path": v.path,
+            "raw_media_type": v.media_type,
+            "media_type": type_labels.get(v.media_type, v.media_type),
+            "exists": os.path.exists(v.path),
+        }
+        for v in v_paths
+    ]
+    mounted_volumes = {
+        key: any(v.media_type == key and os.path.exists(v.path) for v in v_paths)
+        for key in ("movie", "tv", "photo", "music")
+    }
+    return v_paths, volume_paths, mounted_volumes
+
+
+def _wants_json(request: Request) -> bool:
+    return "application/json" in request.headers.get("accept", "").lower()
+
+
 @app.post("/settings/add_volume")
 async def add_volume(
+    request: Request,
     path: str = Form(...),
     media_type: str = Form(...),
     current_user: User = Depends(get_current_user),
@@ -8636,10 +8700,17 @@ async def add_volume(
                 session.commit()
             start_watcher()
             scanner_debouncer.trigger_scan(delay=0.5)
+    elif _wants_json(request):
+        return JSONResponse(status_code=400, content={"status": "error", "detail": "Invalid path or media type"})
+
+    if _wants_json(request):
+        _, volume_paths, mounted_volumes = _get_volume_context(session)
+        return JSONResponse({"status": "ok", "volume_paths": volume_paths, "mounted_volumes": mounted_volumes})
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/delete_volume/{volume_id}")
 async def delete_volume(
+    request: Request,
     volume_id: int,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
@@ -8656,6 +8727,9 @@ async def delete_volume(
             scanner_manager._cleanup_orphans()
         start_watcher()
         scanner_debouncer.trigger_scan(delay=0.5)
+    if _wants_json(request):
+        _, volume_paths, mounted_volumes = _get_volume_context(session)
+        return JSONResponse({"status": "ok", "deleted_id": volume_id, "volume_paths": volume_paths, "mounted_volumes": mounted_volumes})
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/rescan")

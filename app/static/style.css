@@ -296,6 +296,13 @@ button:hover,
     background-color: var(--accent-hover);
 }
 
+button:disabled,
+.btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
 button svg,
 .btn svg {
     width: 16px;
@@ -701,7 +708,7 @@ input[type="checkbox"]:checked {
 
 .carousel-row {
     display: flex;
-    gap: calc(var(--gap) * 2);
+    gap: calc(var(--gap) * 3);
     overflow-x: auto;
     padding: var(--padding);
     scroll-behavior: smooth;
@@ -938,8 +945,8 @@ button.three-dots-btn {
     width: 20%;
     aspect-ratio: 1;
     border-radius: 50%;
-    background: var(--accent);
-    color: #ffffff;
+    background-color: var(--accent);
+    color: var(--text);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -949,8 +956,9 @@ button.three-dots-btn {
 
 .watched-badge svg,
 .watched-badge i {
-    width: 14px;
-    height: 14px;
+    width: 50%;
+    height: 50%;
+    aspect-ratio: 1/1;
     stroke: #ffffff;
     stroke-width: 2.8px;
 }
@@ -1011,6 +1019,11 @@ button.three-dots-btn {
     aspect-ratio: 16 / 9 !important;
     border-radius: var(--radius);
     display: block;
+    transition: filter 0.2s ease;
+}
+
+.episode-poster-container.watched .episode-thumbnail {
+    filter: brightness(0.6);
 }
 
 .episode-card .hover-play {
@@ -1023,10 +1036,10 @@ button.three-dots-btn {
 }
 
 .episode-card .watched-badge {
-    width: 24px;
-    height: 24px;
-    bottom: 8px;
-    right: 8px;
+    width: 10%;
+    aspect-ratio: 1/1;
+    bottom: var(--gap);
+    right: var(--gap);
 }
 
 .episode-card .media-year {
@@ -1078,7 +1091,6 @@ button.three-dots-btn {
 .selected-episode .poster-container,
 .selected-episode .episode-poster-container {
     box-shadow: 0 0 0 3px var(--accent);
-    border-radius: var(--radius);
 }
 
 .selected-episode .media-year span,
@@ -1870,7 +1882,6 @@ body.has-backdrop {
     align-items: center;
     gap: var(--gap);
     flex: 1;
-    overflow-x: scroll;
 }
 
 .controls-left {

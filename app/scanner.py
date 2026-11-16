@@ -594,39 +594,74 @@ def extract_tmdb_trailer_key(videos: list) -> Optional[str]:
 
     return yt_trailers[0].get("key")
 
-async def async_fetch_additional_details(client: Any, tmdb_id: int, media_type: str, api_key: str):
-    """Asynchronously fetches credits, ratings, genres, trailers, and logos from TMDB."""
+async def _tmdb_get(
+    client: Any,
+    url: str,
+    params: Optional[Dict[str, Any]] = None,
+    semaphore: Optional[asyncio.Semaphore] = None,
+    max_retries: int = 3,
+):
+    """Perform an async GET request with optional semaphore and HTTP 429 rate-limit backoff."""
+    res = None
+    for attempt in range(max_retries + 1):
+        try:
+            if semaphore is not None:
+                async with semaphore:
+                    res = await client.get(url, params=params, timeout=10.0)
+            else:
+                res = await client.get(url, params=params, timeout=10.0)
+        except Exception:
+            if attempt < max_retries:
+                await asyncio.sleep(1.0 * (attempt + 1))
+                continue
+            raise
+
+        if res.status_code == 429 and attempt < max_retries:
+            retry_after = res.headers.get("Retry-After") if hasattr(res, "headers") else None
+            try:
+                wait = min(float(retry_after), 10.0) if retry_after else (1.5 * (attempt + 1))
+            except (TypeError, ValueError):
+                wait = 1.5 * (attempt + 1)
+            await asyncio.sleep(wait)
+            continue
+        return res
+    return res
+
+
+async def async_fetch_text_details(
+    client: Any,
+    tmdb_id: int,
+    media_type: str,
+    api_key: str,
+    semaphore: Optional[asyncio.Semaphore] = None,
+):
+    """Fetch TMDB text metadata (credits, ratings, genres, trailers, collection, and image paths) without downloading images."""
     try:
         if media_type == "movie":
             url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}&append_to_response=credits,release_dates,videos,images&include_image_language=en,null"
         else:
             url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}&append_to_response=credits,content_ratings,videos,images&include_image_language=en,null"
-            
-        res = await client.get(url, timeout=10.0)
+
+        res = await _tmdb_get(client, url, semaphore=semaphore)
         if res.status_code == 200:
             data = res.json()
             credits_data = data.get("credits", {})
-            cast_list = []
-            
-            cast_items = credits_data.get("cast", [])[:15]
-            for c in cast_items:
-                profile_filename = None
-                if c.get("profile_path"):
-                    profile_filename = await async_download_image(client, c["profile_path"], "person", c["id"], "profile")
-                
-                cast_list.append({
+            cast_items = [
+                {
+                    "id": c.get("id"),
                     "name": c["name"],
                     "character": c.get("character", ""),
-                    "profile_filename": profile_filename
-                })
-            
+                    "profile_path": c.get("profile_path"),
+                }
+                for c in credits_data.get("cast", [])[:15]
+            ]
+
             directors = [c["name"] for c in credits_data.get("crew", []) if c.get("job") == "Director"]
-            cast_str = json.dumps(cast_list) if cast_list else None
             dir_str = ", ".join(directors) if directors else None
-            
+
             genres = data.get("genres", [])
             genres_str = ", ".join([g.get("name") for g in genres if g.get("name")]) if genres else None
-            
+
             content_rating = None
             if media_type == "movie":
                 release_dates = data.get("release_dates", {}).get("results", [])
@@ -650,24 +685,21 @@ async def async_fetch_additional_details(client: Any, tmdb_id: int, media_type: 
 
             collection_id = None
             collection_name = None
-            collection_poster = None
-            collection_backdrop = None
+            collection_poster_path = None
+            collection_backdrop_path = None
             if media_type == "movie":
                 col_data = data.get("belongs_to_collection")
                 if col_data and isinstance(col_data, dict):
                     collection_id = col_data.get("id")
                     collection_name = col_data.get("name")
-                    if col_data.get("poster_path"):
-                        collection_poster = await async_download_image(client, col_data.get("poster_path"), "collection", collection_id, "poster")
-                    if col_data.get("backdrop_path"):
-                        collection_backdrop = await async_download_image(client, col_data.get("backdrop_path"), "collection", collection_id, "backdrop")
+                    collection_poster_path = col_data.get("poster_path")
+                    collection_backdrop_path = col_data.get("backdrop_path")
 
-            logo_filename = None
+            logo_path = None
             images = data.get("images", {})
             logos = images.get("logos", []) if isinstance(images, dict) else []
             if logos:
                 en_logos = [l for l in logos if l.get("iso_639_1") == "en"]
-                selected_logo = None
                 if en_logos:
                     png_en = [l for l in en_logos if (l.get("file_path") or "").lower().endswith(".png")]
                     selected_logo = png_en[0] if png_en else en_logos[0]
@@ -675,10 +707,54 @@ async def async_fetch_additional_details(client: Any, tmdb_id: int, media_type: 
                     png_logos = [l for l in logos if (l.get("file_path") or "").lower().endswith(".png")]
                     selected_logo = png_logos[0] if png_logos else logos[0]
                 if selected_logo and selected_logo.get("file_path"):
-                    prefix = "tv" if media_type == "tv" else "movie"
-                    logo_filename = await async_download_image(client, selected_logo["file_path"], prefix, tmdb_id, "logo")
-                            
-            return cast_str, dir_str, content_rating, genres_str, trailer_key, collection_id, collection_name, collection_poster, collection_backdrop, logo_filename
+                    logo_path = selected_logo["file_path"]
+
+            image_paths = {
+                "collection_poster": collection_poster_path,
+                "collection_backdrop": collection_backdrop_path,
+                "logo": logo_path,
+            }
+            return cast_items, dir_str, content_rating, genres_str, trailer_key, collection_id, collection_name, image_paths
+    except Exception:
+        pass
+    return [], None, None, None, None, None, None, {}
+
+
+async def async_fetch_additional_details(client: Any, tmdb_id: int, media_type: str, api_key: str):
+    """Asynchronously fetches credits, ratings, genres, trailers, and logos from TMDB."""
+    try:
+        cast_items, dir_str, content_rating, genres_str, trailer_key, collection_id, collection_name, image_paths = (
+            await async_fetch_text_details(client, tmdb_id, media_type, api_key)
+        )
+        if not cast_items and dir_str is None and content_rating is None and genres_str is None and trailer_key is None and collection_id is None and not image_paths:
+            return None, None, None, None, None, None, None, None, None, None
+
+        cast_list = []
+        for c in cast_items:
+            profile_filename = None
+            if c.get("profile_path") and c.get("id") is not None:
+                profile_filename = await async_download_image(client, c["profile_path"], "person", c["id"], "profile")
+            cast_list.append({
+                "name": c["name"],
+                "character": c.get("character", ""),
+                "profile_filename": profile_filename,
+            })
+        cast_str = json.dumps(cast_list) if cast_list else None
+
+        collection_poster = None
+        collection_backdrop = None
+        if media_type == "movie" and collection_id is not None:
+            if image_paths.get("collection_poster"):
+                collection_poster = await async_download_image(client, image_paths["collection_poster"], "collection", collection_id, "poster")
+            if image_paths.get("collection_backdrop"):
+                collection_backdrop = await async_download_image(client, image_paths["collection_backdrop"], "collection", collection_id, "backdrop")
+
+        logo_filename = None
+        if image_paths.get("logo"):
+            prefix = "tv" if media_type == "tv" else "movie"
+            logo_filename = await async_download_image(client, image_paths["logo"], prefix, tmdb_id, "logo")
+
+        return cast_str, dir_str, content_rating, genres_str, trailer_key, collection_id, collection_name, collection_poster, collection_backdrop, logo_filename
     except Exception:
         pass
     return None, None, None, None, None, None, None, None, None, None
@@ -1795,9 +1871,12 @@ class ScannerManager:
             else:
                 yield SafeHTTPClient(None)
 
+        pending_movie_images: List[Dict[str, Any]] = []
+        pending_tv_images: Dict[Tuple[int, str], Dict[str, Any]] = {}
+
         async with get_http_client() as client:
 
-            # 4A. Scan Movies
+            # 4A. Scan Movies (text metadata first; images queued for background download)
             batch_movies = []
             for full_path, file in new_movies:
                 if self._abort_event.is_set() or not self.check_scan_necessary():
@@ -1818,27 +1897,49 @@ class ScannerManager:
                 rating, content_rating, genres_str = None, None, None
                 tmdb_id, trailer_key = None, None
                 col_id, col_name, col_poster, col_backdrop = None, None, None, None
+                logo_filename = None
 
                 if tmdb_api_key:
                     params = {"query": search_title, "api_key": tmdb_api_key}
                     if year:
                         params["year"] = year
                     try:
-                        async with semaphore:
-                            res = await client.get("https://api.themoviedb.org/3/search/movie", params=params)
+                        res = await _tmdb_get(client, "https://api.themoviedb.org/3/search/movie", params=params, semaphore=semaphore)
                         if res.status_code == 200 and res.json().get("results"):
                             results = res.json()["results"]
                             clean_search = re.sub(r'[^a-zA-Z0-9]', '', search_title).lower()
                             data = next((r for r in results if re.sub(r'[^a-zA-Z0-9]', '', r.get("title", "")).lower() == clean_search), results[0])
                             tmdb_id = data.get("id")
                             plot = data.get("overview")
-                            poster_filename = await async_download_image(client, data.get("poster_path"), "movie", tmdb_id, "poster")
-                            backdrop_filename = await async_download_image(client, data.get("backdrop_path"), "movie", tmdb_id, "backdrop")
                             rating = data.get("vote_average")
                             search_title = data.get("title", search_title)
                             year = data.get("release_date", "")[:4]
-                            
-                            cast, director, content_rating, genres_str, trailer_key, col_id, col_name, col_poster, col_backdrop, logo_filename = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_api_key)
+
+                            cast_items, director, content_rating, genres_str, trailer_key, col_id, col_name, image_paths = (
+                                await async_fetch_text_details(client, tmdb_id, "movie", tmdb_api_key, semaphore=semaphore)
+                            )
+                            if cast_items:
+                                cast = json.dumps([
+                                    {
+                                        "name": c["name"],
+                                        "character": c.get("character", ""),
+                                        "profile_filename": None,
+                                    }
+                                    for c in cast_items
+                                ])
+
+                            if tmdb_id is not None:
+                                pending_movie_images.append({
+                                    "file_path": full_path,
+                                    "tmdb_id": tmdb_id,
+                                    "poster_path": data.get("poster_path"),
+                                    "backdrop_path": data.get("backdrop_path"),
+                                    "logo_path": image_paths.get("logo"),
+                                    "collection_id": col_id,
+                                    "collection_poster_path": image_paths.get("collection_poster"),
+                                    "collection_backdrop_path": image_paths.get("collection_backdrop"),
+                                    "cast_items": cast_items,
+                                })
                     except Exception as e:
                         print(f"[Scanner] Movie TMDB lookup failed for {search_title}: {e}")
 
@@ -1921,8 +2022,10 @@ class ScannerManager:
                         except Exception:
                             pass
 
-            # 4B. Scan TV Shows
+            # 4B. Scan TV Shows (text metadata first with per-scan show/season cache; images queued for background download)
             batch_shows = []
+            tv_show_cache: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
+            tv_season_cache: Dict[Tuple[int, int], Optional[str]] = {}
             for full_path, file, root, tv_dir in new_shows:
                 if self._abort_event.is_set() or not self.check_scan_necessary():
                     print("[Scanner] Aborting TV processing loop.")
@@ -1963,41 +2066,83 @@ class ScannerManager:
                 cast, director = None, None
                 rating, content_rating, genres_str = None, None, None
                 season_poster_filename = None
+                logo_filename = None
 
                 if tmdb_api_key:
-                    params = {"query": search_title, "api_key": tmdb_api_key}
-                    if year:
-                        params["first_air_date_year"] = year
-                    try:
-                        async with semaphore:
-                            res = await client.get("https://api.themoviedb.org/3/search/tv", params=params)
-                        if res.status_code == 200 and res.json().get("results"):
-                            results = res.json()["results"]
-                            clean_search = re.sub(r'[^a-zA-Z0-9]', '', search_title).lower()
-                            data = next((r for r in results if re.sub(r'[^a-zA-Z0-9]', '', r.get("name", "")).lower() == clean_search), results[0])
-                            tmdb_id = data.get("id")
-                            plot = data.get("overview")
-                            poster_filename = await async_download_image(client, data.get("poster_path"), "tv", tmdb_id, "poster")
-                            backdrop_filename = await async_download_image(client, data.get("backdrop_path"), "tv", tmdb_id, "backdrop")
-                            rating = data.get("vote_average")
-                            search_title = data.get("name", search_title)
-                            
-                            if not year:
-                                year = data.get("first_air_date", "")[:4]
-                                
-                            cast, director, content_rating, genres_str, _, _, _, _, _, logo_filename = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_api_key)
-                            
-                            if season is not None:
-                                s_res = await client.get(
-                                    f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season}",
-                                    params={"api_key": tmdb_api_key}
+                    cache_key = (search_title.lower(), year)
+                    if cache_key not in tv_show_cache:
+                        params = {"query": search_title, "api_key": tmdb_api_key}
+                        if year:
+                            params["first_air_date_year"] = year
+                        cached_entry = None
+                        try:
+                            res = await _tmdb_get(client, "https://api.themoviedb.org/3/search/tv", params=params, semaphore=semaphore)
+                            if res.status_code == 200 and res.json().get("results"):
+                                results = res.json()["results"]
+                                clean_search = re.sub(r'[^a-zA-Z0-9]', '', search_title).lower()
+                                data = next((r for r in results if re.sub(r'[^a-zA-Z0-9]', '', r.get("name", "")).lower() == clean_search), results[0])
+                                tmdb_id = data.get("id")
+                                resolved_title = data.get("name", search_title)
+                                resolved_year = year or data.get("first_air_date", "")[:4]
+                                cast_items, s_dir, s_cr, s_genres, _, _, _, image_paths = (
+                                    await async_fetch_text_details(client, tmdb_id, "tv", tmdb_api_key, semaphore=semaphore)
                                 )
-                                if s_res.status_code == 200:
-                                    s_data = s_res.json()
-                                    if s_data.get("poster_path"):
-                                        season_poster_filename = await async_download_image(client, s_data["poster_path"], f"tv_s{season}", tmdb_id, "poster")
-                    except Exception as e:
-                        print(f"[Scanner] TV TMDB lookup failed for {search_title}: {e}")
+                                s_cast = json.dumps([
+                                    {
+                                        "name": c["name"],
+                                        "character": c.get("character", ""),
+                                        "profile_filename": None,
+                                    }
+                                    for c in cast_items
+                                ]) if cast_items else None
+                                cached_entry = {
+                                    "tmdb_id": tmdb_id,
+                                    "title": resolved_title,
+                                    "year": resolved_year,
+                                    "plot": data.get("overview"),
+                                    "rating": data.get("vote_average"),
+                                    "cast": s_cast,
+                                    "cast_items": cast_items,
+                                    "director": s_dir,
+                                    "content_rating": s_cr,
+                                    "genres": s_genres,
+                                    "poster_path": data.get("poster_path"),
+                                    "backdrop_path": data.get("backdrop_path"),
+                                    "logo_path": image_paths.get("logo"),
+                                }
+                        except Exception as e:
+                            print(f"[Scanner] TV TMDB lookup failed for {search_title}: {e}")
+                        tv_show_cache[cache_key] = cached_entry
+
+                    show_meta = tv_show_cache.get(cache_key)
+                    if show_meta:
+                        tmdb_id = show_meta["tmdb_id"]
+                        search_title = show_meta["title"]
+                        year = show_meta["year"]
+                        plot = show_meta["plot"]
+                        rating = show_meta["rating"]
+                        cast = show_meta["cast"]
+                        director = show_meta["director"]
+                        content_rating = show_meta["content_rating"]
+                        genres_str = show_meta["genres"]
+
+                        if tmdb_id is not None:
+                            tv_img_key = (tmdb_id, search_title)
+                            if tv_img_key not in pending_tv_images:
+                                pending_tv_images[tv_img_key] = {
+                                    "tmdb_id": tmdb_id,
+                                    "tmdb_api_key": tmdb_api_key,
+                                    "title": search_title,
+                                    "poster_path": show_meta["poster_path"],
+                                    "backdrop_path": show_meta["backdrop_path"],
+                                    "logo_path": show_meta["logo_path"],
+                                    "cast_items": show_meta["cast_items"],
+                                    "seasons": set(),
+                                    "file_paths": [],
+                                }
+                            pending_tv_images[tv_img_key]["file_paths"].append((full_path, season, episode))
+                            if season is not None:
+                                pending_tv_images[tv_img_key]["seasons"].add(season)
 
                 batch_shows.append(TVShow(
                     title=search_title, file_path=full_path, year=year,
@@ -2300,9 +2445,148 @@ class ScannerManager:
                     consolidate_music_artists_and_albums(session)
             await asyncio.to_thread(_post_scan_consolidation)
 
+        if (pending_movie_images or pending_tv_images) and not self._abort_event.is_set():
+            threading.Thread(
+                target=self._run_bg_image_worker,
+                args=(pending_movie_images, list(pending_tv_images.values())),
+                daemon=True,
+            ).start()
+
         with self._lock:
             self.action = "Scan complete"
             self.last_summary = f"Scanned {self.items_scanned} media item(s) successfully."
+
+    def _run_bg_image_worker(self, movie_jobs: List[Dict[str, Any]], tv_jobs: List[Dict[str, Any]]):
+        """Background thread to download movie/TV images after text metadata has been committed."""
+        try:
+            asyncio.run(self._async_download_queued_images(movie_jobs, tv_jobs))
+        except Exception as e:
+            print(f"[Scanner] Background image download error: {e}")
+
+    async def _async_download_queued_images(self, movie_jobs: List[Dict[str, Any]], tv_jobs: List[Dict[str, Any]]):
+        sem = asyncio.Semaphore(4)
+        img_cache: Dict[Tuple[str, str, int, str], Optional[str]] = {}
+
+        async def _cached_dl(client, image_path: Optional[str], prefix: str, tmdb_id: Optional[int], img_type: str) -> Optional[str]:
+            if not image_path or tmdb_id is None:
+                return None
+            key = (image_path, prefix, tmdb_id, img_type)
+            if key in img_cache:
+                return img_cache[key]
+            async with sem:
+                res = await async_download_image(client, image_path, prefix, tmdb_id, img_type)
+            img_cache[key] = res
+            return res
+
+        async def _build_cast_json(client, cast_items: List[Dict[str, Any]]) -> Optional[str]:
+            if not cast_items:
+                return None
+            cast_list = []
+            for c in cast_items:
+                profile_filename = None
+                if c.get("profile_path") and c.get("id") is not None:
+                    profile_filename = await _cached_dl(client, c["profile_path"], "person", c["id"], "profile")
+                cast_list.append({
+                    "name": c["name"],
+                    "character": c.get("character", ""),
+                    "profile_filename": profile_filename,
+                })
+            return json.dumps(cast_list) if cast_list else None
+
+        def _notify_callbacks():
+            for cb in list(getattr(self, "post_scan_callbacks", [])):
+                try:
+                    cb()
+                except Exception:
+                    pass
+
+        if httpx is not None:
+            async with httpx.AsyncClient(timeout=10.0, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)) as raw_client:
+                client = SafeHTTPClient(raw_client)
+                await self._process_bg_image_jobs(client, movie_jobs, tv_jobs, _cached_dl, _build_cast_json, _notify_callbacks)
+        else:
+            client = SafeHTTPClient(None)
+            await self._process_bg_image_jobs(client, movie_jobs, tv_jobs, _cached_dl, _build_cast_json, _notify_callbacks)
+
+    async def _process_bg_image_jobs(self, client, movie_jobs, tv_jobs, _cached_dl, _build_cast_json, _notify_callbacks):
+        for job in movie_jobs:
+            try:
+                tmdb_id = job["tmdb_id"]
+                poster = await _cached_dl(client, job.get("poster_path"), "movie", tmdb_id, "poster")
+                backdrop = await _cached_dl(client, job.get("backdrop_path"), "movie", tmdb_id, "backdrop")
+                logo = await _cached_dl(client, job.get("logo_path"), "movie", tmdb_id, "logo")
+                col_id = job.get("collection_id")
+                col_poster = await _cached_dl(client, job.get("collection_poster_path"), "collection", col_id, "poster") if col_id else None
+                col_backdrop = await _cached_dl(client, job.get("collection_backdrop_path"), "collection", col_id, "backdrop") if col_id else None
+                cast_json = await _build_cast_json(client, job.get("cast_items") or [])
+
+                def _update_movie(fp=job["file_path"], poster=poster, backdrop=backdrop, logo=logo, col_poster=col_poster, col_backdrop=col_backdrop, cast_json=cast_json):
+                    with Session(engine) as session:
+                        m = session.exec(select(Movie).where(Movie.file_path == fp)).first()
+                        if m:
+                            if poster: m.poster_filename = poster
+                            if backdrop: m.backdrop_filename = backdrop
+                            if logo: m.logo_filename = logo
+                            if col_poster: m.collection_poster_filename = col_poster
+                            if col_backdrop: m.collection_backdrop_filename = col_backdrop
+                            if cast_json: m.cast = cast_json
+                            session.add(m)
+                            session.commit()
+                await asyncio.to_thread(_update_movie)
+            except Exception as e:
+                print(f"[Scanner] Background movie image error: {e}")
+
+        for job in tv_jobs:
+            try:
+                tmdb_id = job["tmdb_id"]
+                tmdb_api_key = job.get("tmdb_api_key")
+                poster = await _cached_dl(client, job.get("poster_path"), "tv", tmdb_id, "poster")
+                backdrop = await _cached_dl(client, job.get("backdrop_path"), "tv", tmdb_id, "backdrop")
+                logo = await _cached_dl(client, job.get("logo_path"), "tv", tmdb_id, "logo")
+                cast_json = await _build_cast_json(client, job.get("cast_items") or [])
+                season_files = {}
+                episode_plots = {}
+                if tmdb_api_key:
+                    for s_num in sorted(job.get("seasons") or []):
+                        try:
+                            s_res = await _tmdb_get(
+                                client,
+                                f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s_num}",
+                                params={"api_key": tmdb_api_key},
+                            )
+                            if s_res.status_code == 200:
+                                s_data = s_res.json()
+                                if s_data.get("poster_path"):
+                                    season_files[s_num] = await _cached_dl(client, s_data["poster_path"], f"tv_s{s_num}", tmdb_id, "poster")
+                                for ep_item in s_data.get("episodes") or []:
+                                    ep_num = ep_item.get("episode_number")
+                                    overview = (ep_item.get("overview") or "").strip()
+                                    if ep_num is not None and overview:
+                                        episode_plots[(s_num, int(ep_num))] = overview
+                        except Exception:
+                            pass
+
+                def _update_tv(file_entries=job["file_paths"], poster=poster, backdrop=backdrop, logo=logo, cast_json=cast_json, season_files=season_files, episode_plots=episode_plots):
+                    with Session(engine) as session:
+                        for fp, s_num, e_num in file_entries:
+                            ep = session.exec(select(TVShow).where(TVShow.file_path == fp)).first()
+                            if ep:
+                                if poster: ep.poster_filename = poster
+                                if backdrop: ep.backdrop_filename = backdrop
+                                if logo: ep.logo_filename = logo
+                                if cast_json: ep.cast = cast_json
+                                if s_num is not None and season_files.get(s_num):
+                                    ep.season_poster_filename = season_files[s_num]
+                                if s_num is not None and e_num is not None and (s_num, e_num) in episode_plots:
+                                    ep.episode_plot = episode_plots[(s_num, e_num)]
+                                session.add(ep)
+                        session.commit()
+                await asyncio.to_thread(_update_tv)
+                _notify_callbacks()
+            except Exception as e:
+                print(f"[Scanner] Background TV image error: {e}")
+
+        _notify_callbacks()
 
     async def _commit_music_batch(self, batch_tracks, artists_to_enrich, albums_to_enrich):
         def _commit():

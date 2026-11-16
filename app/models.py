@@ -79,6 +79,7 @@ class TVShow(SQLModel, table=True):
     file_path: str = Field(unique=True)
     year: Optional[str] = Field(default=None, index=True)
     plot: Optional[str] = None
+    episode_plot: Optional[str] = None
     poster_filename: Optional[str] = None
     backdrop_filename: Optional[str] = None
     cast: Optional[str] = None

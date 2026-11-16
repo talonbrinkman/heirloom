@@ -382,6 +382,12 @@ def create_db_and_tables():
         except Exception:
             session.rollback()
 
+        try:
+            session.exec(text("ALTER TABLE tvshow ADD COLUMN episode_plot VARCHAR"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
         # Seed Primary Profiles for existing Users if missing
         try:
             users = session.exec(select(User)).all()

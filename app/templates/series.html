@@ -224,7 +224,7 @@
                         <div class="carousel-row" id="episodesGrid">
                             {% for ep in episodes %}
                             <div class="media-card episode-card {% if selected_ep_id == ep.id %}selected-episode{% endif %}" data-season="{{ ep.season }}" data-episode-id="{{ ep.id }}" onclick="selectEpisode({{ ep.id }})">
-                                <div class="poster-container episode-poster-container">
+                                <div class="poster-container episode-poster-container{% if ep.is_watched %} watched{% endif %}">
                                     <a href="javascript:void(0)" onclick="selectEpisode({{ ep.id }}); return false;">
                                         {% if ep.thumbnail_filename %}
                                         <img src="/metadata/{{ ep.thumbnail_filename }}" class="poster episode-thumbnail" loading="lazy" alt="Episode thumbnail">
@@ -645,6 +645,7 @@
         </script>
         <script src="/static/lucide.min.js"></script>
         <script src="/static/navigation-loader.js"></script>
+        <script src="/static/watch-toggle.js"></script>
         <script>lucide.createIcons();</script>
     
 <script>
