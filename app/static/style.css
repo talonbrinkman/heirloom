@@ -1093,12 +1093,6 @@ button.three-dots-btn {
     box-shadow: 0 0 0 3px var(--accent);
 }
 
-.selected-episode .media-year span,
-.selected-episode .media-year .media-year-line {
-    color: var(--accent) !important;
-}
-
-
 /* ==========================================================================
    7. DROPDOWNS, SEARCH, INBOX
    ========================================================================== */
@@ -1478,8 +1472,6 @@ body.has-backdrop {
 .info-layout {
     display: flex;
     gap: 40px;
-    margin-top: 20px;
-    margin-bottom: 40px;
 }
 
 .info-poster {
@@ -3257,8 +3249,6 @@ video::-webkit-media-text-track-display,
     overflow-x: auto;
     overflow-y: auto;
     border-radius: var(--radius);
-    scrollbar-width: thin;
-    scrollbar-color: var(--surface-hover) transparent;
 }
 
 .history-table-container::-webkit-scrollbar {
@@ -3684,8 +3674,6 @@ video::-webkit-media-text-track-display,
     }
 
     .carousel-row {
-        padding: 10px 4px;
-        gap: 12px;
         justify-content: flex-start !important;
         /* CRITICAL: Never center overflow-x to allow left scrolling */
         -webkit-overflow-scrolling: touch;
@@ -5459,6 +5447,32 @@ body.has-active-player .main-content {
 .music-tab svg {
     width: 1.25em;
     height: 1.25em;
+}
+
+/* Text-only Subnav Bar Variant (e.g. Series Season Tabs) */
+.subnav-bar.subnav-bar-text {
+    gap: calc(var(--gap) * 2);
+    font-weight: 500;
+}
+
+.subnav-bar.subnav-bar-text .subnav-tab {
+    padding: 0 0 6px 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-muted);
+    border-bottom: 2px solid transparent;
+    font-weight: 500;
+}
+
+.subnav-bar.subnav-bar-text .subnav-tab:hover {
+    color: var(--text);
+}
+
+.subnav-bar.subnav-bar-text .subnav-tab.active {
+    color: var(--accent);
+    background: transparent;
+    border-bottom-color: var(--accent);
+    font-weight: 700;
 }
 
 /* Category & Collection Hub Cards */

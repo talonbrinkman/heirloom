@@ -32,7 +32,7 @@ import random
 from collections import defaultdict, Counter
 from datetime import datetime, timezone, timedelta
 from .database import create_db_and_tables, get_session, engine
-from .models import User, UserSession, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile, Artist, Album, Track, Playlist, PlaylistTrack
+from .models import User, UserSession, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile, Artist, Album, Track, Playlist, PlaylistTrack, Person
 from .scanner import METADATA_DIR, scan_media_library, scanner_manager, is_recycle_name, is_recycle_path, download_image, async_download_image, async_fetch_additional_details, SafeHTTPClient, httpx, find_local_trailer, extract_tmdb_trailer_key
 from .watcher import start_watcher, stop_watcher, scanner_debouncer
 from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time, sanitize_vtt_content, get_video_transcode_pipeline, parse_burn_sub_index, get_smart_audio_pipeline, extract_video_frame
@@ -1603,11 +1603,11 @@ async def async_enrich_tv_show(title: str):
                 for e in eps:
                     s_val, _ = _get_ep_se(e.file_path, e.season, e.episode)
                     if s_val is not None:
-                        st = season_state.setdefault(s_val, {"has_sp": False, "needs_ep_plots": False})
+                        st = season_state.setdefault(s_val, {"has_sp": False, "needs_ep_meta": False})
                         if e.season_poster_filename:
                             st["has_sp"] = True
-                        if not e.episode_plot:
-                            st["needs_ep_plots"] = True
+                        if e.episode_plot is None or e.episode_title is None:
+                            st["needs_ep_meta"] = True
 
                 return {
                     "tmdb_key": tmdb_key,
@@ -1667,11 +1667,12 @@ async def async_enrich_tv_show(title: str):
                 except Exception:
                     pass
 
-            # 2. Check missing season posters and episode descriptions across the seasons of this show
+            # 2. Check missing season posters, episode titles, and episode descriptions across the seasons of this show
             season_posters = {}
+            episode_titles = {}
             episode_plots = {}
             for s, st in snap["season_state"].items():
-                if not st["has_sp"] or st["needs_ep_plots"]:
+                if not st["has_sp"] or st["needs_ep_meta"]:
                     try:
                         s_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s}?api_key={tmdb_key}"
                         s_res = await client.get(s_url, timeout=10.0)
@@ -1683,9 +1684,9 @@ async def async_enrich_tv_show(title: str):
                                     season_posters[s] = sp_fn
                             for ep_item in s_data.get("episodes") or []:
                                 ep_num = ep_item.get("episode_number")
-                                overview = (ep_item.get("overview") or "").strip()
-                                if ep_num is not None and overview:
-                                    episode_plots[(s, int(ep_num))] = overview
+                                if ep_num is not None:
+                                    episode_titles[(s, int(ep_num))] = (ep_item.get("name") or "").strip()
+                                    episode_plots[(s, int(ep_num))] = (ep_item.get("overview") or "").strip()
                     except Exception:
                         pass
 
@@ -1717,8 +1718,11 @@ async def async_enrich_tv_show(title: str):
                         s_num, e_num = _get_ep_se(e.file_path, e.season, e.episode)
                         if s_num in season_posters and not e.season_poster_filename:
                             e.season_poster_filename = season_posters[s_num]
-                        if s_num is not None and e_num is not None and (s_num, e_num) in episode_plots and not e.episode_plot:
-                            e.episode_plot = episode_plots[(s_num, e_num)]
+                        if s_num is not None and e_num is not None:
+                            if (s_num, e_num) in episode_titles and e.episode_title is None:
+                                e.episode_title = episode_titles[(s_num, e_num)]
+                            if (s_num, e_num) in episode_plots and e.episode_plot is None:
+                                e.episode_plot = episode_plots[(s_num, e_num)]
 
                         session.add(e)
                     session.commit()
@@ -2025,10 +2029,13 @@ def get_recently_watching(
                     s_link = f'<a href="/series/{enc_title}?season={s_num}">S{s_num}</a>'
                     e_link = f'<a href="/series/{enc_title}?ep={display_item.id}">E{e_num}</a>'
                     base = f"{s_link} • {e_link}"
-                    filename = os.path.splitext(os.path.basename(item['file_path']))[0]
-                    name_match = re.search(r'[Ss]\d+\s*[-_]?\s*[Ee]?\d+[ \-]*(.+)', filename, re.IGNORECASE)
-                    if name_match and name_match.group(1).strip():
-                        ep_title = name_match.group(1).strip()
+                    ep_title = (getattr(display_item, "episode_title", None) or "").strip()
+                    if not ep_title:
+                        filename = os.path.splitext(os.path.basename(item['file_path']))[0]
+                        name_match = re.search(r'[Ss]\d+\s*[-_]?\s*[Ee]?\d+[ \-]*(.+)', filename, re.IGNORECASE)
+                        if name_match and name_match.group(1).strip():
+                            ep_title = name_match.group(1).strip()
+                    if ep_title:
                         ep_link = f'<a href="/series/{enc_title}?ep={display_item.id}">{ep_title}</a>'
                         item['year'] = f"{base}<br>{ep_link}"
                     else:
@@ -2470,10 +2477,13 @@ def root(
                     s_link = f'<a href="/series/{enc_title}?season={s_num}">S{s_num}</a>'
                     e_link = f'<a href="/series/{enc_title}?ep={t_obj.id}">E{e_num}</a>'
                     base = f"{s_link} • {e_link}"
-                    filename = os.path.splitext(os.path.basename(t['file_path']))[0]
-                    name_match = re.search(r'[Ss]\d+\s*[-_]?\s*[Ee]?\d+[ \-]*(.+)', filename, re.IGNORECASE)
-                    if name_match and name_match.group(1).strip():
-                        ep_title = name_match.group(1).strip()
+                    ep_title = (getattr(t_obj, "episode_title", None) or "").strip()
+                    if not ep_title:
+                        filename = os.path.splitext(os.path.basename(t['file_path']))[0]
+                        name_match = re.search(r'[Ss]\d+\s*[-_]?\s*[Ee]?\d+[ \-]*(.+)', filename, re.IGNORECASE)
+                        if name_match and name_match.group(1).strip():
+                            ep_title = name_match.group(1).strip()
+                    if ep_title:
                         ep_link = f'<a href="/series/{enc_title}?ep={t_obj.id}">{ep_title}</a>'
                         t['year'] = f"{base}<br>{ep_link}"
                     else:
@@ -4002,7 +4012,26 @@ def library_view(
             top_rated_items = rated[:20]
             recently_added = sorted(all_rec_movies, key=lambda m: m.id or 0, reverse=True)[:20]
             recently_released = sorted(all_rec_movies, key=get_release_year, reverse=True)[:20]
-            recommended_items = [m for m in all_rec_movies if m.id not in watched_movie_ids][:20] or all_rec_movies[:20]
+
+            genre_counts = Counter()
+            if watched_movie_ids:
+                for wm in session.exec(select(Movie.genres).where(Movie.id.in_(list(watched_movie_ids)[:100]))).all():
+                    if wm:
+                        for g in wm.split(','):
+                            if g.strip():
+                                genre_counts[g.strip().lower()] += 1
+            top_genres = {g for g, _ in genre_counts.most_common(3)}
+
+            rec_pool = [m for m in all_rec_movies if m.id not in watched_movie_ids] or list(all_rec_movies)
+            if top_genres:
+                matched = [m for m in rec_pool if m.genres and any(g.strip().lower() in top_genres for g in m.genres.split(','))]
+                others = [m for m in rec_pool if m not in matched]
+                random.shuffle(matched)
+                random.shuffle(others)
+                recommended_items = (matched + others)[:20]
+            else:
+                random.shuffle(rec_pool)
+                recommended_items = rec_pool[:20]
             total_count = len(recommended_items)
         else: # view == "library" (fast SQL count without full table deserialization)
             q_count = select(func.count(func.distinct(func.coalesce(Movie.tmdb_id, Movie.title))))
@@ -4054,7 +4083,26 @@ def library_view(
             top_rated_items = rated[:20]
             recently_added = sorted(rec_shows, key=lambda s: s.id or 0, reverse=True)[:20]
             recently_released = sorted(rec_shows, key=get_release_year, reverse=True)[:20]
-            recommended_items = [s for s in rec_shows if s.title.strip().lower() not in watched_tv_titles][:20] or rec_shows[:20]
+
+            genre_counts = Counter()
+            if watched_tv_titles:
+                for wt_genres in session.exec(select(TVShow.genres).where(func.lower(TVShow.title).in_(list(watched_tv_titles)[:100]))).all():
+                    if wt_genres:
+                        for g in wt_genres.split(','):
+                            if g.strip():
+                                genre_counts[g.strip().lower()] += 1
+            top_genres = {g for g, _ in genre_counts.most_common(3)}
+
+            rec_pool = [s for s in rec_shows if s.title.strip().lower() not in watched_tv_titles] or list(rec_shows)
+            if top_genres:
+                matched = [s for s in rec_pool if s.genres and any(g.strip().lower() in top_genres for g in s.genres.split(','))]
+                others = [s for s in rec_pool if s not in matched]
+                random.shuffle(matched)
+                random.shuffle(others)
+                recommended_items = (matched + others)[:20]
+            else:
+                random.shuffle(rec_pool)
+                recommended_items = rec_pool[:20]
             total_count = len(recommended_items)
         else: # view == "library" (fast SQL count without full table deserialization)
             q_count = select(func.count(func.distinct(TVShow.title)))
@@ -4548,13 +4596,13 @@ def series_view(
         if not shows:
             raise HTTPException(status_code=404, detail="Series not found")
         
-        # Non-blocking background enrichment of missing logo, cast photos, season posters, and episode descriptions
+        # Non-blocking background enrichment of missing logo, cast photos, season posters, episode titles, and episode descriptions
         needs_tv_enrichment = (
             not shows[0].logo_filename or
             not shows[0].cast or
             shows[0].cast == "[]" or
             '"profile_filename": null' in (shows[0].cast or '') or
-            any(not e.season_poster_filename or not e.episode_plot for e in shows)
+            any(not e.season_poster_filename or e.episode_plot is None or e.episode_title is None for e in shows)
         )
         if needs_tv_enrichment:
             background_tasks.add_task(async_enrich_tv_show, title)
@@ -4604,11 +4652,15 @@ def series_view(
             rt_str = get_runtime_str(ep_obj, session)
             rt_suffix = f" • {rt_str}" if rt_str else ""
             
-            filename = os.path.splitext(os.path.basename(ep_dict['file_path']))[0]
-            name_match = re.search(r'S\d+E\d+[ \-]*(.+)', filename, re.IGNORECASE)
-            
-            if name_match and name_match.group(1).strip():
-                ep_dict['episode_name'] = name_match.group(1).strip()
+            ep_title_val = (getattr(ep_obj, "episode_title", None) or "").strip()
+            if not ep_title_val:
+                filename = os.path.splitext(os.path.basename(ep_dict['file_path']))[0]
+                name_match = re.search(r'S\d+E\d+[ \-]*(.+)', filename, re.IGNORECASE)
+                if name_match and name_match.group(1).strip():
+                    ep_title_val = name_match.group(1).strip()
+
+            if ep_title_val:
+                ep_dict['episode_name'] = ep_title_val
                 ep_dict['season_episode'] = f"{ep_dict['episode_name']} • {base}{rt_suffix}"
             else:
                 ep_dict['season_episode'] = f"{base}{rt_suffix}"
@@ -4820,12 +4872,33 @@ async def person_view(
     combined_credits = None
     tmdb_person_id = None
     target_name = person_str
+    profile_filename = None
+    birthday = None
+    deathday = None
+    place_of_birth = None
+    biography = None
 
-    if tmdb_key and httpx is not None:
+    if person_str.isdigit():
+        db_person = session.exec(select(Person).where(Person.tmdb_id == int(person_str))).first()
+    else:
+        db_person = session.exec(select(Person).where(func.lower(Person.name) == person_str.lower())).first()
+
+    if db_person and db_person.biography is not None and db_person.combined_credits_json is not None:
+        tmdb_person_id = db_person.tmdb_id
+        target_name = db_person.name
+        profile_filename = db_person.profile_filename
+        birthday = db_person.birthday
+        deathday = db_person.deathday
+        place_of_birth = db_person.place_of_birth
+        biography = db_person.biography or None
         try:
-            raw_client = httpx.AsyncClient(timeout=10.0)
-            client = SafeHTTPClient(raw_client)
-
+            combined_credits = json.loads(db_person.combined_credits_json)
+        except Exception:
+            combined_credits = {}
+    elif tmdb_key and httpx is not None:
+        raw_client = httpx.AsyncClient(timeout=10.0)
+        client = SafeHTTPClient(raw_client)
+        try:
             if person_str.isdigit():
                 tmdb_person_id = int(person_str)
             else:
@@ -4844,27 +4917,42 @@ async def person_view(
                     person_data = p_res.json()
                     target_name = person_data.get("name") or target_name
                     combined_credits = person_data.get("combined_credits", {})
+                    birthday = person_data.get("birthday")
+                    deathday = person_data.get("deathday")
+                    place_of_birth = person_data.get("place_of_birth")
+                    biography = person_data.get("biography") or None
+
+                    if person_data.get("profile_path"):
+                        profile_path = person_data["profile_path"]
+                        profile_filename = f"person_{tmdb_person_id}_profile.jpg"
+                        target_file = os.path.join(METADATA_DIR, profile_filename)
+                        if not os.path.exists(target_file):
+                            img_url = f"https://image.tmdb.org/t/p/w600_and_h900_bestv2{profile_path}"
+                            img_res = await client.get(img_url)
+                            if img_res.status_code == 200:
+                                os.makedirs(METADATA_DIR, exist_ok=True)
+                                with open(target_file, "wb") as f:
+                                    f.write(img_res.content)
+
+                    rec = db_person or session.exec(select(Person).where(Person.tmdb_id == tmdb_person_id)).first()
+                    if not rec:
+                        rec = Person(tmdb_id=tmdb_person_id, name=target_name)
+                    rec.tmdb_id = tmdb_person_id
+                    rec.name = target_name
+                    rec.biography = (biography or "").strip()
+                    rec.birthday = birthday
+                    rec.deathday = deathday
+                    rec.place_of_birth = place_of_birth
+                    if profile_filename:
+                        rec.profile_filename = profile_filename
+                    rec.combined_credits_json = json.dumps(combined_credits or {})
+                    rec.updated_at = datetime.now(timezone.utc)
+                    session.add(rec)
+                    session.commit()
         except Exception:
             pass
-
-    # Profile picture resolution
-    profile_filename = None
-    if person_data and person_data.get("profile_path") and tmdb_person_id:
-        profile_path = person_data["profile_path"]
-        profile_filename = f"person_{tmdb_person_id}_profile.jpg"
-        target_file = os.path.join(METADATA_DIR, profile_filename)
-        if not os.path.exists(target_file) and tmdb_key:
-            try:
-                img_url = f"https://image.tmdb.org/t/p/w600_and_h900_bestv2{profile_path}"
-                raw_client = httpx.AsyncClient(timeout=10.0)
-                client = SafeHTTPClient(raw_client)
-                img_res = await client.get(img_url)
-                if img_res.status_code == 200:
-                    os.makedirs(METADATA_DIR, exist_ok=True)
-                    with open(target_file, "wb") as f:
-                        f.write(img_res.content)
-            except Exception:
-                pass
+        finally:
+            await raw_client.aclose()
 
     # Fallback to local DB cast profile picture if not found
     if not profile_filename or not os.path.exists(os.path.join(METADATA_DIR, profile_filename)):
@@ -4884,11 +4972,7 @@ async def person_view(
                 break
 
     # Birthdate / Age / Biography
-    birthday = person_data.get("birthday") if person_data else None
-    deathday = person_data.get("deathday") if person_data else None
     dates_display = format_person_dates(birthday, deathday)
-    place_of_birth = person_data.get("place_of_birth") if person_data else None
-    biography = person_data.get("biography") if person_data else None
 
     # Collect TMDB IDs & titles from credits
     tmdb_movie_ids = set()
@@ -5970,10 +6054,14 @@ async def play_video(
         m = re.search(r'S(\d+)E(\d+)', item.file_path, re.IGNORECASE)
         if m: 
             season_episode = f"S{int(m.group(1))} • E{int(m.group(2))}"
-            filename = os.path.splitext(os.path.basename(item.file_path))[0]
-            name_match = re.search(r'S\d+E\d+[ \-]*(.+)', filename, re.IGNORECASE)
-            if name_match and name_match.group(1).strip():
-                season_episode += f"<br>{name_match.group(1).strip()}"
+            ep_title_val = (getattr(item, "episode_title", None) or "").strip()
+            if not ep_title_val:
+                filename = os.path.splitext(os.path.basename(item.file_path))[0]
+                name_match = re.search(r'S\d+E\d+[ \-]*(.+)', filename, re.IGNORECASE)
+                if name_match and name_match.group(1).strip():
+                    ep_title_val = name_match.group(1).strip()
+            if ep_title_val:
+                season_episode += f"<br>{ep_title_val}"
                 
         series_episodes = session.exec(select(TVShow).where(func.lower(TVShow.title) == item.title.strip().lower())).all()
         sorted_eps = sorted(series_episodes, key=get_tv_episode_sort_key)
@@ -8583,13 +8671,21 @@ async def fix_media_match(
 
             seasons = {ep.season for ep in episodes if ep.season is not None}
             season_posters = {}
+            episode_titles = {}
+            episode_plots = {}
             for s in seasons:
                 try:
                     s_res = await client.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s}", params={"api_key": tmdb_key})
                     if s_res.status_code == 200:
-                        s_poster_path = s_res.json().get("poster_path")
+                        s_json = s_res.json()
+                        s_poster_path = s_json.get("poster_path")
                         if s_poster_path:
                             season_posters[s] = await async_download_image(client, s_poster_path, f"tv_s{s}", tmdb_id, "poster")
+                        for ep_item in s_json.get("episodes") or []:
+                            ep_num = ep_item.get("episode_number")
+                            if ep_num is not None:
+                                episode_titles[(s, int(ep_num))] = (ep_item.get("name") or "").strip()
+                                episode_plots[(s, int(ep_num))] = (ep_item.get("overview") or "").strip()
                 except Exception:
                     pass
 
@@ -8614,6 +8710,11 @@ async def fix_media_match(
                     ep.genres = genres_str
                 if ep.season in season_posters and season_posters[ep.season]:
                     ep.season_poster_filename = season_posters[ep.season]
+                if ep.season is not None and ep.episode is not None:
+                    if (ep.season, ep.episode) in episode_titles:
+                        ep.episode_title = episode_titles[(ep.season, ep.episode)]
+                    if (ep.season, ep.episode) in episode_plots:
+                        ep.episode_plot = episode_plots[(ep.season, ep.episode)]
                 session.add(ep)
 
             session.commit()

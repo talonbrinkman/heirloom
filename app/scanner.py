@@ -18,7 +18,7 @@ except ImportError:
 from sqlmodel import Session, select
 from sqlalchemy import func
 from .database import engine
-from .models import Movie, TVShow, Photo, VolumePath, SystemConfig, Artist, Album, Track, Playlist, PlaylistTrack
+from .models import Movie, TVShow, Photo, VolumePath, SystemConfig, Artist, Album, Track, Playlist, PlaylistTrack, Person
 
 def _get_subprocess_priority_kwargs() -> Dict[str, Any]:
     """Returns platform-specific subprocess kwargs to lower process priority for background ffmpeg/ffprobe tasks."""
@@ -379,6 +379,7 @@ def fetch_additional_details(tmdb_id: int, media_type: str, api_key: str):
                     profile_filename = download_image(c["profile_path"], "person", c["id"], "profile")
                 
                 cast_list.append({
+                    "id": c.get("id"),
                     "name": c["name"],
                     "character": c.get("character", ""),
                     "profile_filename": profile_filename
@@ -735,6 +736,7 @@ async def async_fetch_additional_details(client: Any, tmdb_id: int, media_type: 
             if c.get("profile_path") and c.get("id") is not None:
                 profile_filename = await async_download_image(client, c["profile_path"], "person", c["id"], "profile")
             cast_list.append({
+                "id": c.get("id"),
                 "name": c["name"],
                 "character": c.get("character", ""),
                 "profile_filename": profile_filename,
@@ -2186,38 +2188,7 @@ class ScannerManager:
                 batch_shows.clear()
                 await asyncio.sleep(0.15)
 
-            # 4B-2. Enrich existing TV shows with missing logo_filename if TMDB API key is available
-            if tmdb_api_key and not self._abort_event.is_set():
-                def _get_unenriched_shows():
-                    with Session(engine) as session:
-                        return session.exec(
-                            select(TVShow.title, TVShow.poster_filename).where(
-                                TVShow.logo_filename == None,
-                                TVShow.poster_filename != None
-                            ).distinct()
-                        ).all()
-                unenriched_shows = await asyncio.to_thread(_get_unenriched_shows)
-                for s_title, s_poster in unenriched_shows:
-                    if self._abort_event.is_set() or not self.check_scan_necessary():
-                        break
-                    m = re.search(r'tv_(\d+)_', s_poster or '')
-                    if m:
-                        s_tmdb_id = int(m.group(1))
-                        try:
-                            _, _, _, _, _, _, _, _, _, l_filename = await async_fetch_additional_details(client, s_tmdb_id, "tv", tmdb_api_key)
-                            if l_filename:
-                                def _save_show_logo(title=s_title, l_fn=l_filename):
-                                    with Session(engine) as session:
-                                        eps = session.exec(select(TVShow).where(TVShow.title == title)).all()
-                                        for ep in eps:
-                                            ep.logo_filename = l_fn
-                                            session.add(ep)
-                                        session.commit()
-                                await asyncio.to_thread(_save_show_logo)
-                        except Exception as e:
-                            print(f"[Scanner] Failed enriching TV logo for {s_title}: {e}")
-
-            # 4B-3. Queue automated intro/outro detection for scanned TV seasons
+            # 4B-2. Queue automated intro/outro detection for scanned TV seasons
             if new_shows and not self._abort_event.is_set():
                 try:
                     from .intro_detection import is_auto_intro_detection_enabled, queue_season_intro_detection
@@ -2445,10 +2416,10 @@ class ScannerManager:
                     consolidate_music_artists_and_albums(session)
             await asyncio.to_thread(_post_scan_consolidation)
 
-        if (pending_movie_images or pending_tv_images) and not self._abort_event.is_set():
+        if (pending_movie_images or pending_tv_images or tmdb_api_key) and not self._abort_event.is_set():
             threading.Thread(
                 target=self._run_bg_image_worker,
-                args=(pending_movie_images, list(pending_tv_images.values())),
+                args=(pending_movie_images, list(pending_tv_images.values()), tmdb_api_key),
                 daemon=True,
             ).start()
 
@@ -2456,14 +2427,14 @@ class ScannerManager:
             self.action = "Scan complete"
             self.last_summary = f"Scanned {self.items_scanned} media item(s) successfully."
 
-    def _run_bg_image_worker(self, movie_jobs: List[Dict[str, Any]], tv_jobs: List[Dict[str, Any]]):
-        """Background thread to download movie/TV images after text metadata has been committed."""
+    def _run_bg_image_worker(self, movie_jobs: List[Dict[str, Any]], tv_jobs: List[Dict[str, Any]], tmdb_api_key: Optional[str] = None):
+        """Background thread to download images and backfill missing metadata after file scanning completes."""
         try:
-            asyncio.run(self._async_download_queued_images(movie_jobs, tv_jobs))
+            asyncio.run(self._async_download_queued_images(movie_jobs, tv_jobs, tmdb_api_key))
         except Exception as e:
-            print(f"[Scanner] Background image download error: {e}")
+            print(f"[Scanner] Background image/metadata worker error: {e}")
 
-    async def _async_download_queued_images(self, movie_jobs: List[Dict[str, Any]], tv_jobs: List[Dict[str, Any]]):
+    async def _async_download_queued_images(self, movie_jobs: List[Dict[str, Any]], tv_jobs: List[Dict[str, Any]], tmdb_api_key: Optional[str] = None):
         sem = asyncio.Semaphore(4)
         img_cache: Dict[Tuple[str, str, int, str], Optional[str]] = {}
 
@@ -2487,6 +2458,7 @@ class ScannerManager:
                 if c.get("profile_path") and c.get("id") is not None:
                     profile_filename = await _cached_dl(client, c["profile_path"], "person", c["id"], "profile")
                 cast_list.append({
+                    "id": c.get("id"),
                     "name": c["name"],
                     "character": c.get("character", ""),
                     "profile_filename": profile_filename,
@@ -2504,6 +2476,8 @@ class ScannerManager:
             async with httpx.AsyncClient(timeout=10.0, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)) as raw_client:
                 client = SafeHTTPClient(raw_client)
                 await self._process_bg_image_jobs(client, movie_jobs, tv_jobs, _cached_dl, _build_cast_json, _notify_callbacks)
+                if tmdb_api_key and not self._abort_event.is_set():
+                    await self._backfill_missing_metadata(client, tmdb_api_key, _cached_dl, _build_cast_json, _notify_callbacks)
         else:
             client = SafeHTTPClient(None)
             await self._process_bg_image_jobs(client, movie_jobs, tv_jobs, _cached_dl, _build_cast_json, _notify_callbacks)
@@ -2545,6 +2519,7 @@ class ScannerManager:
                 logo = await _cached_dl(client, job.get("logo_path"), "tv", tmdb_id, "logo")
                 cast_json = await _build_cast_json(client, job.get("cast_items") or [])
                 season_files = {}
+                episode_titles = {}
                 episode_plots = {}
                 if tmdb_api_key:
                     for s_num in sorted(job.get("seasons") or []):
@@ -2560,13 +2535,13 @@ class ScannerManager:
                                     season_files[s_num] = await _cached_dl(client, s_data["poster_path"], f"tv_s{s_num}", tmdb_id, "poster")
                                 for ep_item in s_data.get("episodes") or []:
                                     ep_num = ep_item.get("episode_number")
-                                    overview = (ep_item.get("overview") or "").strip()
-                                    if ep_num is not None and overview:
-                                        episode_plots[(s_num, int(ep_num))] = overview
+                                    if ep_num is not None:
+                                        episode_titles[(s_num, int(ep_num))] = (ep_item.get("name") or "").strip()
+                                        episode_plots[(s_num, int(ep_num))] = (ep_item.get("overview") or "").strip()
                         except Exception:
                             pass
 
-                def _update_tv(file_entries=job["file_paths"], poster=poster, backdrop=backdrop, logo=logo, cast_json=cast_json, season_files=season_files, episode_plots=episode_plots):
+                def _update_tv(file_entries=job["file_paths"], poster=poster, backdrop=backdrop, logo=logo, cast_json=cast_json, season_files=season_files, episode_titles=episode_titles, episode_plots=episode_plots):
                     with Session(engine) as session:
                         for fp, s_num, e_num in file_entries:
                             ep = session.exec(select(TVShow).where(TVShow.file_path == fp)).first()
@@ -2577,8 +2552,11 @@ class ScannerManager:
                                 if cast_json: ep.cast = cast_json
                                 if s_num is not None and season_files.get(s_num):
                                     ep.season_poster_filename = season_files[s_num]
-                                if s_num is not None and e_num is not None and (s_num, e_num) in episode_plots:
-                                    ep.episode_plot = episode_plots[(s_num, e_num)]
+                                if s_num is not None and e_num is not None:
+                                    if (s_num, e_num) in episode_titles:
+                                        ep.episode_title = episode_titles[(s_num, e_num)]
+                                    if (s_num, e_num) in episode_plots:
+                                        ep.episode_plot = episode_plots[(s_num, e_num)]
                                 session.add(ep)
                         session.commit()
                 await asyncio.to_thread(_update_tv)
@@ -2587,6 +2565,431 @@ class ScannerManager:
                 print(f"[Scanner] Background TV image error: {e}")
 
         _notify_callbacks()
+
+    async def _backfill_missing_metadata(self, client, tmdb_api_key: str, _cached_dl, _build_cast_json, _notify_callbacks):
+        """Backfills missing TV, Movie, and Person (cast biography) metadata across existing library items."""
+        if not hasattr(self, "_bg_backfill_lock"):
+            self._bg_backfill_lock = threading.Lock()
+        if not self._bg_backfill_lock.acquire(blocking=False):
+            return
+
+        def _extract_se(ep_obj):
+            m = re.search(r'S(\d+)E(\d+)', ep_obj.file_path or '', re.IGNORECASE)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+            m_s = re.search(r'S(\d+)', ep_obj.file_path or '', re.IGNORECASE)
+            s_val = int(m_s.group(1)) if m_s else ep_obj.season
+            return s_val, ep_obj.episode
+
+        try:
+            # 1. Backfill existing TV shows (show details, logos, cast, season posters, episode titles & descriptions)
+            def _find_tv_titles_needing_metadata():
+                with Session(engine) as session:
+                    all_eps = session.exec(select(TVShow)).all()
+                    titles = []
+                    seen = set()
+                    for ep in all_eps:
+                        t = ep.title
+                        if t in seen:
+                            continue
+                        missing_cast = not ep.cast or ep.cast == "[]" or '"profile_filename": null' in (ep.cast or '') or '"id":' not in (ep.cast or '')
+                        needs = (
+                            not ep.logo_filename or
+                            missing_cast or
+                            not ep.director or
+                            not ep.genres or
+                            not ep.content_rating or
+                            not ep.plot or
+                            not ep.poster_filename or
+                            not ep.backdrop_filename or
+                            not ep.season_poster_filename or
+                            ep.episode_title is None or
+                            ep.episode_plot is None
+                        )
+                        if needs:
+                            seen.add(t)
+                            titles.append(t)
+                    return titles
+
+            tv_titles = await asyncio.to_thread(_find_tv_titles_needing_metadata)
+            for s_title in tv_titles:
+                if self._abort_event.is_set():
+                    break
+                try:
+                    def _get_tv_snap(title=s_title):
+                        with Session(engine) as session:
+                            eps = session.exec(select(TVShow).where(TVShow.title == title)).all()
+                            if not eps:
+                                return None
+                            rep = eps[0]
+                            tmdb_id = None
+                            for e in eps:
+                                if e.poster_filename:
+                                    mm = re.search(r'tv_(\d+)_', e.poster_filename)
+                                    if mm:
+                                        tmdb_id = int(mm.group(1))
+                                        break
+                            season_state = {}
+                            for e in eps:
+                                s_num, _ = _extract_se(e)
+                                if s_num is not None:
+                                    st = season_state.setdefault(s_num, {"has_sp": False, "needs_ep_meta": False})
+                                    if e.season_poster_filename:
+                                        st["has_sp"] = True
+                                    if e.episode_title is None or e.episode_plot is None:
+                                        st["needs_ep_meta"] = True
+                            return {
+                                "year": rep.year,
+                                "tmdb_id": tmdb_id,
+                                "needs_show_core": any(not e.plot or not e.poster_filename or not e.backdrop_filename or e.rating is None for e in eps),
+                                "needs_details": any(
+                                    not e.logo_filename or not e.cast or e.cast == "[]" or
+                                    '"profile_filename": null' in (e.cast or '') or '"id":' not in (e.cast or '') or
+                                    not e.director or not e.genres or not e.content_rating
+                                    for e in eps
+                                ),
+                                "season_state": season_state,
+                            }
+
+                    snap = await asyncio.to_thread(_get_tv_snap)
+                    if not snap:
+                        continue
+
+                    tmdb_id = snap["tmdb_id"]
+                    if not tmdb_id:
+                        params = {"query": s_title, "api_key": tmdb_api_key}
+                        raw_year = (snap["year"] or "")[:4]
+                        if raw_year.isdigit():
+                            params["first_air_date_year"] = raw_year
+                        s_res = await _tmdb_get(client, "https://api.themoviedb.org/3/search/tv", params=params)
+                        if s_res.status_code == 200:
+                            results = s_res.json().get("results") or []
+                            if results:
+                                tmdb_id = results[0].get("id")
+
+                    if not tmdb_id:
+                        def _mark_tv_no_logo(title=s_title):
+                            with Session(engine) as session:
+                                for e in session.exec(select(TVShow).where(TVShow.title == title)).all():
+                                    if not e.logo_filename:
+                                        e.logo_filename = "none"
+                                    if e.episode_title is None:
+                                        e.episode_title = ""
+                                    if e.episode_plot is None:
+                                        e.episode_plot = ""
+                                    session.add(e)
+                                session.commit()
+                        await asyncio.to_thread(_mark_tv_no_logo)
+                        continue
+
+                    show_plot = show_rating = show_poster = show_backdrop = None
+                    if snap["needs_show_core"]:
+                        tv_res = await _tmdb_get(client, f"https://api.themoviedb.org/3/tv/{tmdb_id}", params={"api_key": tmdb_api_key})
+                        if tv_res.status_code == 200:
+                            tv_d = tv_res.json()
+                            show_plot = tv_d.get("overview")
+                            show_rating = tv_d.get("vote_average")
+                            if tv_d.get("poster_path"):
+                                show_poster = await _cached_dl(client, tv_d["poster_path"], "tv", tmdb_id, "poster")
+                            if tv_d.get("backdrop_path"):
+                                show_backdrop = await _cached_dl(client, tv_d["backdrop_path"], "tv", tmdb_id, "backdrop")
+
+                    cast_json = dir_str = content_rating = genres_str = logo_fn = None
+                    if snap["needs_details"]:
+                        cast_items, dir_str, content_rating, genres_str, _, _, _, img_paths = await async_fetch_text_details(client, tmdb_id, "tv", tmdb_api_key)
+                        cast_json = await _build_cast_json(client, cast_items)
+                        if img_paths.get("logo"):
+                            logo_fn = await _cached_dl(client, img_paths["logo"], "tv", tmdb_id, "logo")
+
+                    season_files = {}
+                    episode_titles = {}
+                    episode_plots = {}
+                    for s_num, st in snap["season_state"].items():
+                        if not st["has_sp"] or st["needs_ep_meta"]:
+                            try:
+                                s_res = await _tmdb_get(client, f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s_num}", params={"api_key": tmdb_api_key})
+                                if s_res.status_code == 200:
+                                    s_data = s_res.json()
+                                    if not st["has_sp"] and s_data.get("poster_path"):
+                                        season_files[s_num] = await _cached_dl(client, s_data["poster_path"], f"tv_s{s_num}", tmdb_id, "poster")
+                                    for ep_item in s_data.get("episodes") or []:
+                                        ep_num = ep_item.get("episode_number")
+                                        if ep_num is not None:
+                                            episode_titles[(s_num, int(ep_num))] = (ep_item.get("name") or "").strip()
+                                            episode_plots[(s_num, int(ep_num))] = (ep_item.get("overview") or "").strip()
+                            except Exception:
+                                pass
+
+                    def _save_tv_backfill(
+                        title=s_title, show_plot=show_plot, show_rating=show_rating, show_poster=show_poster,
+                        show_backdrop=show_backdrop, cast_json=cast_json, dir_str=dir_str,
+                        content_rating=content_rating, genres_str=genres_str, logo_fn=logo_fn,
+                        season_files=season_files, episode_titles=episode_titles, episode_plots=episode_plots,
+                        checked_seasons=set(k for k, v in snap["season_state"].items() if v["needs_ep_meta"])
+                    ):
+                        with Session(engine) as session:
+                            for e in session.exec(select(TVShow).where(TVShow.title == title)).all():
+                                if show_plot and not e.plot: e.plot = show_plot
+                                if show_rating is not None and e.rating is None: e.rating = show_rating
+                                if show_poster and not e.poster_filename: e.poster_filename = show_poster
+                                if show_backdrop and not e.backdrop_filename: e.backdrop_filename = show_backdrop
+                                if logo_fn and (not e.logo_filename or e.logo_filename == "none"):
+                                    e.logo_filename = logo_fn
+                                elif not e.logo_filename:
+                                    e.logo_filename = "none"
+                                if cast_json and (not e.cast or e.cast == "[]" or '"profile_filename": null' in (e.cast or '') or '"id":' not in (e.cast or '')):
+                                    e.cast = cast_json
+                                if dir_str and not e.director: e.director = dir_str
+                                if content_rating and not e.content_rating: e.content_rating = content_rating
+                                if genres_str and not e.genres: e.genres = genres_str
+
+                                s_num, e_num = _extract_se(e)
+                                if s_num in season_files and season_files[s_num] and not e.season_poster_filename:
+                                    e.season_poster_filename = season_files[s_num]
+                                if s_num is not None and e_num is not None:
+                                    if (s_num, e_num) in episode_titles and e.episode_title is None:
+                                        e.episode_title = episode_titles[(s_num, e_num)]
+                                    elif s_num in checked_seasons and e.episode_title is None:
+                                        e.episode_title = ""
+                                    if (s_num, e_num) in episode_plots and e.episode_plot is None:
+                                        e.episode_plot = episode_plots[(s_num, e_num)]
+                                    elif s_num in checked_seasons and e.episode_plot is None:
+                                        e.episode_plot = ""
+                                session.add(e)
+                            session.commit()
+
+                    await asyncio.to_thread(_save_tv_backfill)
+                    _notify_callbacks()
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    print(f"[Scanner] TV backfill error for {s_title}: {e}")
+
+            # 2. Backfill existing Movies missing metadata
+            def _find_movies_needing_metadata():
+                with Session(engine) as session:
+                    movies = session.exec(select(Movie)).all()
+                    res = []
+                    for m in movies:
+                        missing_cast = not m.cast or m.cast == "[]" or '"profile_filename": null' in (m.cast or '') or '"id":' not in (m.cast or '')
+                        missing_col_img = bool(m.collection_id) and (not m.collection_poster_filename or not m.collection_backdrop_filename)
+                        needs = (
+                            not m.tmdb_id or
+                            not m.plot or
+                            not m.poster_filename or
+                            not m.backdrop_filename or
+                            not m.logo_filename or
+                            missing_cast or
+                            not m.director or
+                            m.rating is None or
+                            not m.genres or
+                            not m.content_rating or
+                            not m.trailer_key or
+                            missing_col_img
+                        )
+                        if needs:
+                            res.append({
+                                "id": m.id,
+                                "title": m.title,
+                                "year": m.year,
+                                "tmdb_id": m.tmdb_id,
+                                "needs_core": (not m.plot or not m.poster_filename or not m.backdrop_filename or m.rating is None),
+                                "needs_details": (not m.logo_filename or missing_cast or not m.director or not m.genres or not m.content_rating or not m.trailer_key or not m.collection_id or missing_col_img),
+                            })
+                    return res
+
+            movie_snaps = await asyncio.to_thread(_find_movies_needing_metadata)
+            movie_tmdb_cache: Dict[int, Dict[str, Any]] = {}
+            for ms in movie_snaps:
+                if self._abort_event.is_set():
+                    break
+                try:
+                    tmdb_id = ms["tmdb_id"]
+                    if not tmdb_id:
+                        params = {"query": ms["title"], "api_key": tmdb_api_key}
+                        raw_year = (ms["year"] or "")[:4]
+                        if raw_year.isdigit():
+                            params["year"] = raw_year
+                        s_res = await _tmdb_get(client, "https://api.themoviedb.org/3/search/movie", params=params)
+                        if s_res.status_code == 200:
+                            results = s_res.json().get("results") or []
+                            if results:
+                                tmdb_id = results[0].get("id")
+
+                    if not tmdb_id:
+                        def _mark_movie_no_logo(mid=ms["id"]):
+                            with Session(engine) as session:
+                                m = session.get(Movie, mid)
+                                if m and not m.logo_filename:
+                                    m.logo_filename = "none"
+                                    session.add(m)
+                                    session.commit()
+                        await asyncio.to_thread(_mark_movie_no_logo)
+                        continue
+
+                    cached = movie_tmdb_cache.get(tmdb_id)
+                    if cached is None:
+                        cached = {}
+                        if ms["needs_core"]:
+                            m_res = await _tmdb_get(client, f"https://api.themoviedb.org/3/movie/{tmdb_id}", params={"api_key": tmdb_api_key})
+                            if m_res.status_code == 200:
+                                md = m_res.json()
+                                cached["plot"] = md.get("overview")
+                                cached["rating"] = md.get("vote_average")
+                                cached["poster"] = await _cached_dl(client, md.get("poster_path"), "movie", tmdb_id, "poster")
+                                cached["backdrop"] = await _cached_dl(client, md.get("backdrop_path"), "movie", tmdb_id, "backdrop")
+                        if ms["needs_details"]:
+                            cast_items, dir_str, cr, genres_str, trailer_key, col_id, col_name, img_paths = await async_fetch_text_details(client, tmdb_id, "movie", tmdb_api_key)
+                            cached["cast_json"] = await _build_cast_json(client, cast_items)
+                            cached["director"] = dir_str
+                            cached["content_rating"] = cr
+                            cached["genres"] = genres_str
+                            cached["trailer_key"] = trailer_key
+                            cached["collection_id"] = col_id
+                            cached["collection_name"] = col_name
+                            cached["logo"] = await _cached_dl(client, img_paths.get("logo"), "movie", tmdb_id, "logo") if img_paths.get("logo") else None
+                            if col_id:
+                                cached["col_poster"] = await _cached_dl(client, img_paths.get("collection_poster"), "collection", col_id, "poster") if img_paths.get("collection_poster") else None
+                                cached["col_backdrop"] = await _cached_dl(client, img_paths.get("collection_backdrop"), "collection", col_id, "backdrop") if img_paths.get("collection_backdrop") else None
+                        movie_tmdb_cache[tmdb_id] = cached
+
+                    def _save_movie_backfill(mid=ms["id"], tid=tmdb_id, c=cached):
+                        with Session(engine) as session:
+                            m = session.get(Movie, mid)
+                            if not m:
+                                return
+                            if not m.tmdb_id: m.tmdb_id = tid
+                            if c.get("plot") and not m.plot: m.plot = c["plot"]
+                            if c.get("rating") is not None and m.rating is None: m.rating = c["rating"]
+                            if c.get("poster") and not m.poster_filename: m.poster_filename = c["poster"]
+                            if c.get("backdrop") and not m.backdrop_filename: m.backdrop_filename = c["backdrop"]
+                            if c.get("logo") and (not m.logo_filename or m.logo_filename == "none"):
+                                m.logo_filename = c["logo"]
+                            elif not m.logo_filename:
+                                m.logo_filename = "none"
+                            if c.get("cast_json") and (not m.cast or m.cast == "[]" or '"profile_filename": null' in (m.cast or '') or '"id":' not in (m.cast or '')):
+                                m.cast = c["cast_json"]
+                            if c.get("director") and not m.director: m.director = c["director"]
+                            if c.get("content_rating") and not m.content_rating: m.content_rating = c["content_rating"]
+                            if c.get("genres") and not m.genres: m.genres = c["genres"]
+                            if c.get("trailer_key") and not m.trailer_key: m.trailer_key = c["trailer_key"]
+                            if c.get("collection_id") and not m.collection_id: m.collection_id = c["collection_id"]
+                            if c.get("collection_name") and not m.collection_name: m.collection_name = c["collection_name"]
+                            if c.get("col_poster") and not m.collection_poster_filename: m.collection_poster_filename = c["col_poster"]
+                            if c.get("col_backdrop") and not m.collection_backdrop_filename: m.collection_backdrop_filename = c["col_backdrop"]
+                            session.add(m)
+                            session.commit()
+
+                    await asyncio.to_thread(_save_movie_backfill)
+                    _notify_callbacks()
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    print(f"[Scanner] Movie backfill error for {ms['title']}: {e}")
+
+            # 3. Backfill Cast Member Biographies (Person table)
+            def _find_missing_people():
+                with Session(engine) as session:
+                    cast_map: Dict[str, Optional[int]] = {}
+                    for cast_str in list(session.exec(select(Movie.cast).where(Movie.cast != None)).all()) + list(session.exec(select(TVShow.cast).where(TVShow.cast != None)).all()):
+                        if not cast_str or not cast_str.startswith("["):
+                            continue
+                        try:
+                            for entry in json.loads(cast_str):
+                                name = (entry.get("name") or "").strip()
+                                if not name:
+                                    continue
+                                key = name.lower()
+                                pid = entry.get("id")
+                                if key not in cast_map or (cast_map[key] is None and pid is not None):
+                                    cast_map[key] = (name, pid)
+                        except Exception:
+                            pass
+
+                    existing_people = session.exec(select(Person)).all()
+                    done_names = set()
+                    done_ids = set()
+                    for p in existing_people:
+                        if p.biography is not None and p.combined_credits_json is not None:
+                            done_names.add(p.name.strip().lower())
+                            if p.tmdb_id is not None:
+                                done_ids.add(p.tmdb_id)
+
+                    missing = []
+                    for key, val in cast_map.items():
+                        name, pid = val
+                        if key in done_names or (pid is not None and pid in done_ids):
+                            continue
+                        missing.append((name, pid))
+                    return missing
+
+            missing_people = await asyncio.to_thread(_find_missing_people)
+            for p_name, p_tmdb_id in missing_people:
+                if self._abort_event.is_set():
+                    break
+                try:
+                    tid = p_tmdb_id
+                    if not tid:
+                        s_res = await _tmdb_get(client, "https://api.themoviedb.org/3/search/person", params={"query": p_name, "api_key": tmdb_api_key})
+                        if s_res.status_code == 200:
+                            results = s_res.json().get("results") or []
+                            if results:
+                                tid = results[0].get("id")
+
+                    if not tid:
+                        def _save_empty_person(name=p_name):
+                            with Session(engine) as session:
+                                existing = session.exec(select(Person).where(func.lower(Person.name) == name.lower())).first()
+                                if not existing:
+                                    session.add(Person(name=name, biography="", combined_credits_json="{}", updated_at=datetime.now(timezone.utc)))
+                                    session.commit()
+                        await asyncio.to_thread(_save_empty_person)
+                        continue
+
+                    p_res = await _tmdb_get(
+                        client,
+                        f"https://api.themoviedb.org/3/person/{tid}",
+                        params={"api_key": tmdb_api_key, "append_to_response": "combined_credits"},
+                    )
+                    if p_res.status_code != 200:
+                        continue
+                    pdata = p_res.json()
+                    prof_fn = None
+                    if pdata.get("profile_path"):
+                        prof_fn = await _cached_dl(client, pdata["profile_path"], "person", tid, "profile")
+
+                    credits_json = json.dumps(pdata.get("combined_credits") or {})
+                    resolved_name = (pdata.get("name") or p_name).strip()
+                    bio = (pdata.get("biography") or "").strip()
+
+                    def _upsert_person(
+                        tid=tid, name=resolved_name, bio=bio,
+                        birthday=pdata.get("birthday"), deathday=pdata.get("deathday"),
+                        pob=pdata.get("place_of_birth"), prof_fn=prof_fn, credits_json=credits_json
+                    ):
+                        with Session(engine) as session:
+                            rec = session.exec(select(Person).where(Person.tmdb_id == tid)).first()
+                            if not rec:
+                                rec = session.exec(select(Person).where(func.lower(Person.name) == name.lower())).first()
+                            if not rec:
+                                rec = Person(tmdb_id=tid, name=name)
+                            rec.tmdb_id = tid
+                            rec.name = name
+                            rec.biography = bio
+                            rec.birthday = birthday
+                            rec.deathday = deathday
+                            rec.place_of_birth = pob
+                            if prof_fn:
+                                rec.profile_filename = prof_fn
+                            rec.combined_credits_json = credits_json
+                            rec.updated_at = datetime.now(timezone.utc)
+                            session.add(rec)
+                            session.commit()
+
+                    await asyncio.to_thread(_upsert_person)
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    print(f"[Scanner] Person backfill error for {p_name}: {e}")
+        finally:
+            self._bg_backfill_lock.release()
 
     async def _commit_music_batch(self, batch_tracks, artists_to_enrich, albums_to_enrich):
         def _commit():

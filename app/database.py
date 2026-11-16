@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, create_engine, Session, select, text
-from .models import User, UserSession, VolumePath, Profile, WatchHistory, Watchlist, Artist, Album, Track, Playlist, PlaylistTrack
+from .models import User, UserSession, VolumePath, Profile, WatchHistory, Watchlist, Artist, Album, Track, Playlist, PlaylistTrack, Person
 
 # This is critical: We are saving the database inside the /config folder.
 # Because of your Docker volume mount, this will actually be saved to your desktop!
@@ -384,6 +384,12 @@ def create_db_and_tables():
 
         try:
             session.exec(text("ALTER TABLE tvshow ADD COLUMN episode_plot VARCHAR"))
+            session.commit()
+        except Exception:
+            session.rollback()
+
+        try:
+            session.exec(text("ALTER TABLE tvshow ADD COLUMN episode_title VARCHAR"))
             session.commit()
         except Exception:
             session.rollback()

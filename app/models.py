@@ -79,6 +79,7 @@ class TVShow(SQLModel, table=True):
     file_path: str = Field(unique=True)
     year: Optional[str] = Field(default=None, index=True)
     plot: Optional[str] = None
+    episode_title: Optional[str] = None
     episode_plot: Optional[str] = None
     poster_filename: Optional[str] = None
     backdrop_filename: Optional[str] = None
@@ -231,3 +232,15 @@ class PasswordResetRequest(SQLModel, table=True):
     status: str = Field(default="pending")  # pending, approved, denied, used
     token: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class Person(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    tmdb_id: Optional[int] = Field(default=None, index=True, unique=True)
+    name: str = Field(index=True)
+    biography: Optional[str] = None
+    birthday: Optional[str] = None
+    deathday: Optional[str] = None
+    place_of_birth: Optional[str] = None
+    profile_filename: Optional[str] = None
+    combined_credits_json: Optional[str] = None
+    updated_at: Optional[datetime] = Field(default=None)

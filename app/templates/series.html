@@ -184,99 +184,99 @@
                                 {% endif %}
                             </div>
                         </div>
-                        
-                        {% if cast_list %}
+
                         <div class="mt-20">
-                            <strong style="color: var(--text-primary); display: block; margin-bottom: 15px;">Cast</strong>
-                            <div class="cast-row">
-                                {% for actor in cast_list %}
-                                <a href="/person/{{ actor.name | urlencode }}" class="cast-member" style="text-decoration: none; color: inherit;">
-                                    {% if actor.profile_filename %}
-                                    <img src="/metadata/{{ actor.profile_filename }}" class="cast-avatar">
+                            <div class="subnav-bar subnav-bar-text" id="seasonTabs">
+                                {% for s in seasons %}
+                                    {% if s == 0 %}
+                                    <div class="subnav-tab" data-season="0" onclick="selectSeason(0)">Specials</div>
                                     {% else %}
-                                    <div class="cast-avatar placeholder-avatar"><i data-lucide="user"></i></div>
+                                    <div class="subnav-tab" data-season="{{ s }}" onclick="selectSeason({{ s }})">Season {{ s }}</div>
                                     {% endif %}
-                                    <div class="cast-name">{{ actor.name }}</div>
-                                    {% if actor.character %}
-                                    <div class="cast-character">{{ actor.character }}</div>
-                                    {% endif %}
-                                </a>
                                 {% endfor %}
                             </div>
+
+                            <div class="carousel-container">
+                                <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
+                                <div class="carousel-row" id="episodesGrid">
+                                    {% for ep in episodes %}
+                                    <div class="media-card episode-card {% if selected_ep_id == ep.id %}selected-episode{% endif %}" data-season="{{ ep.season }}" data-episode-id="{{ ep.id }}" onclick="selectEpisode({{ ep.id }})">
+                                        <div class="poster-container episode-poster-container{% if ep.is_watched %} watched{% endif %}">
+                                            <a href="javascript:void(0)" onclick="selectEpisode({{ ep.id }}); return false;">
+                                                {% if ep.thumbnail_filename %}
+                                                <img src="/metadata/{{ ep.thumbnail_filename }}" class="poster episode-thumbnail" loading="lazy" alt="Episode thumbnail">
+                                                {% else %}
+                                                <img src="/thumbnail/tv/{{ ep.id }}" class="poster episode-thumbnail" loading="lazy" alt="Episode thumbnail">
+                                                {% endif %}
+                                            </a>
+                                            <a href="/play/tv/{{ ep.id }}" class="icon-btn hover-play" onclick="event.stopPropagation()">
+                                                <i data-lucide="play" fill="currentColor"></i>
+                                            </a>
+                                            <button class="icon-btn three-dots-btn" onclick="toggleMenu(event, 'menu-ep-{{ ep.id }}')">
+                                                <i data-lucide="more-vertical" fill="white"></i>
+                                            </button>
+                                            {% if ep.is_watched %}
+                                            <div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>
+                                            {% endif %}
+                                            <div class="dropdown-menu" id="menu-ep-{{ ep.id }}" onclick="event.stopPropagation()">
+                                                {% if ep.is_watched %}
+                                                <form action="/history/mark_unwatched/tv/{{ ep.id }}?scope=episode" method="post">
+                                                    <button type="submit">Mark as Unwatched</button>
+                                                </form>
+                                                {% else %}
+                                                <form action="/history/mark_watched/tv/{{ ep.id }}?scope=episode" method="post">
+                                                    <button type="submit">Mark as Watched</button>
+                                                </form>
+                                                {% endif %}
+                                                {% if user.watch_together_access %}
+                                                <button type="button" onclick="openWatchTogether('tv', {{ ep.id }})">Watch Together</button>
+                                                {% endif %}
+                                                {% if user.downloads_access %}
+                                                <form action="/download/tv/{{ ep.id }}" method="get">
+                                                    <button type="submit">Download</button>
+                                                </form>
+                                                {% endif %}
+                                                {% if user.is_admin %}
+                                                <button type="button" class="fix-match-btn" data-media-type="tv" data-item-id="{{ ep.id }}" data-title="{{ title }}" data-year="{{ series.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                        <div class="media-year" title="{{ ep.season_episode }}">
+                                            <a href="javascript:void(0)" onclick="selectEpisode({{ ep.id }}); return false;">
+                                                {% for part in ep.season_episode.replace('<br>', ' • ').split(' • ') %}
+                                                <span class="media-year-line">{% if 'Season ' in part and ' Episode ' in part %}Episode {{ part.split(' Episode ')[1] }}{% else %}{{ part }}{% endif %}</span>
+                                                {% endfor %}
+                                            </a>
+                                        </div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
+                            </div>
                         </div>
-                        {% endif %}
                     </div>
                 </div>
 
+                {% if cast_list %}
                 <div class="card">
-                    <div class="subnav-bar" id="seasonTabs" style="margin-bottom: 20px;">
-                        {% for s in seasons %}
-                            {% if s == 0 %}
-                            <div class="subnav-tab" data-season="0" onclick="selectSeason(0)">Specials</div>
+                    <h2>Cast</h2>
+                    <div class="cast-row">
+                        {% for actor in cast_list %}
+                        <a href="/person/{{ actor.name | urlencode }}" class="cast-member" style="text-decoration: none; color: inherit;">
+                            {% if actor.profile_filename %}
+                            <img src="/metadata/{{ actor.profile_filename }}" class="cast-avatar">
                             {% else %}
-                            <div class="subnav-tab" data-season="{{ s }}" onclick="selectSeason({{ s }})">Season {{ s }}</div>
+                            <div class="cast-avatar placeholder-avatar"><i data-lucide="user"></i></div>
                             {% endif %}
+                            <div class="cast-name">{{ actor.name }}</div>
+                            {% if actor.character %}
+                            <div class="cast-character">{{ actor.character }}</div>
+                            {% endif %}
+                        </a>
                         {% endfor %}
                     </div>
-
-                    <div class="carousel-container">
-                        <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
-                        <div class="carousel-row" id="episodesGrid">
-                            {% for ep in episodes %}
-                            <div class="media-card episode-card {% if selected_ep_id == ep.id %}selected-episode{% endif %}" data-season="{{ ep.season }}" data-episode-id="{{ ep.id }}" onclick="selectEpisode({{ ep.id }})">
-                                <div class="poster-container episode-poster-container{% if ep.is_watched %} watched{% endif %}">
-                                    <a href="javascript:void(0)" onclick="selectEpisode({{ ep.id }}); return false;">
-                                        {% if ep.thumbnail_filename %}
-                                        <img src="/metadata/{{ ep.thumbnail_filename }}" class="poster episode-thumbnail" loading="lazy" alt="Episode thumbnail">
-                                        {% else %}
-                                        <img src="/thumbnail/tv/{{ ep.id }}" class="poster episode-thumbnail" loading="lazy" alt="Episode thumbnail">
-                                        {% endif %}
-                                    </a>
-                                    <a href="/play/tv/{{ ep.id }}" class="icon-btn hover-play" onclick="event.stopPropagation()">
-                                        <i data-lucide="play" fill="currentColor"></i>
-                                    </a>
-                                    <button class="icon-btn three-dots-btn" onclick="toggleMenu(event, 'menu-ep-{{ ep.id }}')">
-                                        <i data-lucide="more-vertical" fill="white"></i>
-                                    </button>
-                                    {% if ep.is_watched %}
-                                    <div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>
-                                    {% endif %}
-                                    <div class="dropdown-menu" id="menu-ep-{{ ep.id }}" onclick="event.stopPropagation()">
-                                        {% if ep.is_watched %}
-                                        <form action="/history/mark_unwatched/tv/{{ ep.id }}?scope=episode" method="post">
-                                            <button type="submit">Mark as Unwatched</button>
-                                        </form>
-                                        {% else %}
-                                        <form action="/history/mark_watched/tv/{{ ep.id }}?scope=episode" method="post">
-                                            <button type="submit">Mark as Watched</button>
-                                        </form>
-                                        {% endif %}
-                                        {% if user.watch_together_access %}
-                                        <button type="button" onclick="openWatchTogether('tv', {{ ep.id }})">Watch Together</button>
-                                        {% endif %}
-                                        {% if user.downloads_access %}
-                                        <form action="/download/tv/{{ ep.id }}" method="get">
-                                            <button type="submit">Download</button>
-                                        </form>
-                                        {% endif %}
-                                        {% if user.is_admin %}
-                                        <button type="button" class="fix-match-btn" data-media-type="tv" data-item-id="{{ ep.id }}" data-title="{{ title }}" data-year="{{ series.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
-                                        {% endif %}
-                                    </div>
-                                </div>
-                                <div class="media-year" title="{{ ep.season_episode }}">
-                                    <a href="javascript:void(0)" onclick="selectEpisode({{ ep.id }}); return false;">
-                                        {% for part in ep.season_episode.replace('<br>', ' • ').split(' • ') %}
-                                        <span class="media-year-line">{% if 'Season ' in part and ' Episode ' in part %}Episode {{ part.split(' Episode ')[1] }}{% else %}{{ part }}{% endif %}</span>
-                                        {% endfor %}
-                                    </a>
-                                </div>
-                            </div>
-                            {% endfor %}
-                        </div>
-                        <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
-                    </div>
                 </div>
+                {% endif %}
 
                 {% if related_shows %}
                 <div class="card mt-20">
