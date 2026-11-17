@@ -73,8 +73,9 @@
             return;
         }
 
-        // Skip clicks originating from dropdown toggles, buttons, or modals
-        if (link.closest('#inboxBtn, .inbox, .inbox-menu, #inboxMenu, .dropdown-menu, .modal-overlay, .profile-header-btn')) {
+        // Skip clicks originating from dropdown toggles, buttons, or modals (but allow search bar results)
+        const inSearchResults = Boolean(link.closest('#searchResults, .search-results'));
+        if (!inSearchResults && link.closest('#inboxBtn, .inbox, .inbox-menu, #inboxMenu, .dropdown-menu, .modal-overlay, .profile-header-btn')) {
             return;
         }
 
@@ -94,11 +95,47 @@
 
         const path = url.pathname;
 
+        function extractTitleFromLink() {
+            const dataTitle = (link.dataset.title || '').trim();
+            if (dataTitle) return dataTitle;
+
+            const searchTitle = link.closest('.search-result')?.querySelector('strong')?.textContent?.trim();
+            if (searchTitle) return searchTitle;
+
+            const cardTitle = link.closest('.media-card')?.querySelector('.media-title')?.textContent?.trim();
+            if (cardTitle) return cardTitle;
+
+            const imgAlt = link.querySelector('img')?.getAttribute('alt')?.trim();
+            if (imgAlt) return imgAlt;
+
+            const text = link.textContent?.trim();
+            if (text) return text;
+
+            if (path.startsWith('/series/')) {
+                return decodeURIComponent(path.replace('/series/', '').split('?')[0]);
+            }
+            if (path.startsWith('/person/')) {
+                return decodeURIComponent(path.replace('/person/', '').split('?')[0]);
+            }
+            return '';
+        }
+
+        const title = extractTitleFromLink();
+
         if (path.startsWith('/series/')) {
-            let title = decodeURIComponent(path.replace('/series/', '').split('?')[0]);
             showMediaLoader(title ? `Loading ${title}` : 'Loading Series...', 'Fetching episodes and series details');
         } else if (path.startsWith('/movie/')) {
             showMediaLoader(title ? `Loading ${title}` : 'Loading Movie...', 'Fetching movie details');
+        } else if (inSearchResults) {
+            if (path.startsWith('/person/')) {
+                showMediaLoader(title ? `Loading ${title}` : 'Loading Person...', 'Fetching person details');
+            } else if (path.startsWith('/album/')) {
+                showMediaLoader(title ? `Loading ${title}` : 'Loading Album...', 'Fetching album details');
+            } else if (path.startsWith('/artist/')) {
+                showMediaLoader(title ? `Loading ${title}` : 'Loading Artist...', 'Fetching artist details');
+            } else if (path.startsWith('/photo/')) {
+                showMediaLoader(title ? `Loading ${title}` : 'Loading Photo...', 'Fetching photo details');
+            }
         }
     }
 

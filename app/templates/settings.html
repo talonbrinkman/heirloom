@@ -142,6 +142,152 @@
             });
         }
 
+        function _renderPermissionTogglePills(actionUrl, item, mountedVolumes) {
+            const mv = mountedVolumes || {};
+            const pill = (name, label, checked, volumeType) => {
+                const volAttr = volumeType ? ` data-volume-type="${volumeType}"${mv[volumeType] ? '' : ' style="display: none;"'}` : '';
+                return `<label class="toggle-pill"${volAttr}><input type="checkbox" name="${name}" class="hidden-checkbox" onchange="submitUserForm(this.form)"${checked ? ' checked' : ''}><span>${label}</span></label>`;
+            };
+            return `
+                <div class="user-controls-row">
+                    <form action="${escapeHtml(actionUrl)}" method="post" class="m-0 user-permissions-form">
+                        <div class="user-permissions-group">
+                            ${pill('movies_access', 'Movies', item.movies_access, 'movie')}
+                            ${pill('tv_access', 'TV Shows', item.tv_access, 'tv')}
+                            ${pill('photos_access', 'Photos', item.photos_access, 'photo')}
+                            ${pill('music_access', 'Music', item.music_access, 'music')}
+                        </div>
+                        <div class="user-permissions-group">
+                            ${pill('downloads_access', 'Downloads', item.downloads_access)}
+                            ${pill('watch_together_access', 'Watch Together', item.watch_together_access)}
+                            ${pill('can_manage_profiles', 'Household Profiles', item.can_manage_profiles)}
+                        </div>
+                    </form>
+                </div>`;
+        }
+
+        function renderUsersAndInvites(users, invites, hostUrl, mountedVolumes) {
+            const list = document.getElementById('userInviteList');
+            if (!list) return;
+
+            const userHtml = (users || []).map(u => `
+                <li class="list-item user-list-item">
+                    <div class="user-header-row align-center">
+                        <div class="user-name-label">
+                            <strong>${escapeHtml(u.username)}</strong>${u.is_admin ? ' <span style="color: var(--text-muted); font-size: 0.85em; font-weight: normal;">(Admin)</span>' : ''}
+                        </div>
+                        ${!u.is_admin ? `
+                        <form action="/settings/delete_user/${encodeURIComponent(u.id)}" method="post" class="m-0 user-delete-form" onsubmit="submitDeleteUserForm(event)">
+                            <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i> Delete</button>
+                        </form>` : ''}
+                    </div>
+                    ${!u.is_admin ? _renderPermissionTogglePills(`/settings/update_user/${encodeURIComponent(u.id)}`, u, mountedVolumes) : ''}
+                </li>`).join('');
+
+            const cleanHost = String(hostUrl || '').replace(/\/+$/, '');
+            const inviteHtml = (invites || []).map(inv => {
+                const inviteUrl = `${cleanHost}/register?invite=${encodeURIComponent(inv.code)}`;
+                return `
+                <li class="list-item invite-list-item">
+                    <div class="user-header-row align-center">
+                        <div class="invite-info">
+                            <strong>Pending User Invitation</strong>
+                            <div class="share-link">Expires ${escapeHtml(inv.expires_at)} (Code: ${escapeHtml(inv.code)})</div>
+                        </div>
+                        <div class="flex gap-10 align-center invite-actions">
+                            <button type="button" class="btn btn-secondary btn-sm" data-invite-url="${escapeHtml(inviteUrl)}"
+                                onclick="copyToClipboard(this.dataset.inviteUrl, this)"><i data-lucide="copy"></i> Copy Link</button>
+                            <form action="/settings/delete_invite/${encodeURIComponent(inv.id)}" method="post" class="m-0 invite-delete-form" onsubmit="submitDeleteInviteForm(event)">
+                                <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i> Delete</button>
+                            </form>
+                        </div>
+                    </div>
+                    ${_renderPermissionTogglePills(`/settings/update_invite/${encodeURIComponent(inv.id)}`, inv, mountedVolumes)}
+                </li>`;
+            }).join('');
+
+            list.innerHTML = userHtml + inviteHtml;
+            if (window.lucide) lucide.createIcons();
+        }
+
+        async function submitAddUserForm(event) {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const hiddenRemote = document.getElementById('hiddenRemoteUrl');
+            const remoteInput = document.getElementById('remoteUrlInput');
+            if (hiddenRemote && remoteInput) {
+                hiddenRemote.value = remoteInput.value;
+            }
+
+            const btn = form.querySelector('button[type="submit"]');
+            if (!btn || btn.disabled) return;
+
+            const origHTML = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<i data-lucide="loader" class="spinner"></i> Adding...';
+            if (window.lucide) lucide.createIcons();
+
+            try {
+                const res = await fetch(form.action, {
+                    method: form.method || 'POST',
+                    headers: { 'Accept': 'application/json' },
+                    body: new FormData(form)
+                });
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+                const data = await res.json();
+                renderUsersAndInvites(data.users, data.invites, data.host_url, data.mounted_volumes);
+            } catch (err) {
+                console.error('Failed to add user invitation:', err);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = origHTML;
+                if (window.lucide) lucide.createIcons();
+            }
+        }
+
+        async function submitDeleteUserForm(event) {
+            event.preventDefault();
+            const form = event.currentTarget;
+            if (!confirm('Delete this user?')) {
+                return;
+            }
+            await _submitDeleteUserOrInvite(form, 'Failed to delete user:');
+        }
+
+        async function submitDeleteInviteForm(event) {
+            event.preventDefault();
+            await _submitDeleteUserOrInvite(event.currentTarget, 'Failed to delete invitation:');
+        }
+
+        async function _submitDeleteUserOrInvite(form, errPrefix) {
+            const btn = form.querySelector('button[type="submit"]');
+            if (!btn || btn.disabled) return;
+
+            const origHTML = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<i data-lucide="loader" class="spinner"></i> Deleting...';
+            if (window.lucide) lucide.createIcons();
+
+            try {
+                const res = await fetch(form.action, {
+                    method: form.method || 'POST',
+                    headers: { 'Accept': 'application/json' }
+                });
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+                const data = await res.json();
+                renderUsersAndInvites(data.users, data.invites, data.host_url, data.mounted_volumes);
+            } catch (err) {
+                console.error(errPrefix, err);
+                btn.disabled = false;
+                btn.innerHTML = origHTML;
+                if (window.lucide) lucide.createIcons();
+            }
+        }
+
         function selectNextUnaddedMediaType() {
             const pathInput = document.getElementById('pathInput');
             const mediaTypes = [
@@ -861,14 +1007,13 @@
         <div class="card">
             <div class="card-header">
                 <h2 class="m-0">Users & Invitations</h2>
-                <form action="/settings/generate_invite" method="post" class="m-0"
-                    onsubmit="document.getElementById('hiddenRemoteUrl').value = document.getElementById('remoteUrlInput').value">
+                <form action="/settings/generate_invite" method="post" class="m-0" onsubmit="submitAddUserForm(event)">
                     <input type="hidden" name="remote_url" id="hiddenRemoteUrl">
                     <button type="submit" class="btn btn-primary btn-sm"><i data-lucide="user-plus"></i> Add
                         User</button>
                 </form>
             </div>
-            <ul>
+            <ul id="userInviteList">
                 {% for u in users %}
                 <li class="list-item user-list-item">
                     <div class="user-header-row align-center">
@@ -876,9 +1021,8 @@
                             <strong>{{ u.username }}</strong> {% if u.is_admin %}<span style="color: var(--text-muted); font-size: 0.85em; font-weight: normal;">(Admin)</span>{% endif %}
                         </div>
                         {% if not u.is_admin %}
-                        <form action="/settings/delete_user/{{ u.id }}" method="post" class="m-0 user-delete-form">
-                            <button type="submit" class="btn btn-danger btn-sm"
-                                onclick="return confirm('Delete this user?');"><i data-lucide="trash-2"></i>
+                        <form action="/settings/delete_user/{{ u.id }}" method="post" class="m-0 user-delete-form" onsubmit="submitDeleteUserForm(event)">
+                            <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i>
                                 Delete</button>
                         </form>
                         {% endif %}
@@ -934,9 +1078,10 @@
                         </div>
                         <div class="flex gap-10 align-center invite-actions">
                             <button type="button" class="btn btn-secondary btn-sm"
-                                onclick="copyToClipboard('{{ host_url }}/register?invite={{ invite.code }}', this)"><i
+                                data-invite-url="{{ host_url }}/register?invite={{ invite.code }}"
+                                onclick="copyToClipboard(this.dataset.inviteUrl, this)"><i
                                     data-lucide="copy"></i> Copy Link</button>
-                            <form action="/settings/delete_invite/{{ invite.id }}" method="post" class="m-0">
+                            <form action="/settings/delete_invite/{{ invite.id }}" method="post" class="m-0 invite-delete-form" onsubmit="submitDeleteInviteForm(event)">
                                 <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i>
                                     Delete</button>
                             </form>
@@ -1129,7 +1274,7 @@
             </form>
         </div>
         <div style="text-align: center; color: #888; font-size: 0.8em; margin-top: 10px;">
-            <strong>v1.8.15</strong>
+            <strong>v1.8.22</strong>
         </div>
     </div>
 

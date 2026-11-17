@@ -64,23 +64,25 @@
             <div class="main-content">
                 <div class="info-layout">
                     {% if movie.poster_filename %}
-                    <img src="/metadata/{{ movie.poster_filename }}" class="info-poster">
+                    <img src="/metadata/{{ movie.poster_filename }}" class="info-poster" id="moviePoster">
                     {% else %}
-                    <div class="info-poster" class="bg-dark flex align-center justify-center placeholder-poster">No Poster</div>
+                    <div class="info-poster bg-dark flex align-center justify-center placeholder-poster" id="moviePoster">No Poster</div>
                     {% endif %}
                     
                     <div class="info-details">
                         <!-- Row 1: Title (or Logo if present) -->
-                        {% if movie.logo_filename and movie.logo_filename != 'none' %}
-                        <div class="series-logo-container mb-15">
-                            <img src="/metadata/{{ movie.logo_filename }}" alt="{{ movie.title }}" class="series-logo">
+                        <div id="movieTitleSlot">
+                            {% if movie.logo_filename and movie.logo_filename != 'none' %}
+                            <div class="series-logo-container mb-15">
+                                <img src="/metadata/{{ movie.logo_filename }}" alt="{{ movie.title }}" class="series-logo">
+                            </div>
+                            {% else %}
+                            <h1 class="info-title m-0 mb-15">{{ movie.title }}</h1>
+                            {% endif %}
                         </div>
-                        {% else %}
-                        <h1 class="info-title m-0 mb-15">{{ movie.title }}</h1>
-                        {% endif %}
 
                         <!-- Row 2: (Rating, Release Date, Genre, Rating) -->
-                        <div class="info-meta-row flex align-center gap-15 mb-15">
+                        <div class="info-meta-row flex align-center gap-15 mb-15" id="movieMetaRow">
                             {% if movie.rating %}
                             <div class="rating-badge flex align-center gap-5">
                                 <i data-lucide="star" fill="var(--rating-gold)" color="var(--rating-gold)" size="18"></i>
@@ -99,18 +101,18 @@
                         </div>
 
                         <!-- Row 4: Description -->
-                        <div class="info-plot mb-15">{{ movie.plot or "No description available." }}</div>
+                        <div class="info-plot mb-15" id="moviePlot">{{ movie.plot or "No description available." }}</div>
                         
-                        <div class="metadata-block">
+                        <div class="metadata-block" id="movieMetadataBlock">
                             {% if movie.director %}
-                            <div class="mb-10"><strong style="color: var(--text-primary);">Director:</strong> 
+                            <div>Directed by 
                                 {% for d in movie.director.split(',') %}
-                                <a href="/person/{{ d.strip() | urlencode }}" class="inline-link" style="color: var(--primary);">{{ d.strip() }}</a>{% if not loop.last %}, {% endif %}
+                                <a href="/person/{{ d.strip() | urlencode }}" class="inline-link">{{ d.strip() }}</a>{% if not loop.last %}, {% endif %}
                                 {% endfor %}
                             </div>
                             {% endif %}
                             {% if movie.collection_name %}
-                            <div class="mb-10"><strong style="color: var(--text-primary);">Part of:</strong> <a href="/library/movie?view=library&collection={{ movie.collection_name | urlencode }}" class="inline-link" style="color: var(--primary);">{{ movie.collection_name }}</a></div>
+                            <div>Part of <a href="/library/movie?view=library&collection={{ movie.collection_name | urlencode }}" class="inline-link">{{ movie.collection_name }}</a></div>
                             {% endif %}
                         </div>
                         
@@ -198,10 +200,9 @@
                             </div>
                         </div>
                         
-                        {% if cast_list %}
-                        <div class="mt-20">
+                        <div class="mt-20" id="movieCastSection" {% if not cast_list %}style="display: none;"{% endif %}>
                             <strong style="color: var(--text-primary); display: block; margin-bottom: 15px;">Cast</strong>
-                            <div class="cast-row">
+                            <div class="cast-row" id="movieCastRow">
                                 {% for actor in cast_list %}
                                 <a href="/person/{{ actor.name | urlencode }}" class="cast-member" style="text-decoration: none; color: inherit;">
                                     {% if actor.profile_filename %}
@@ -217,7 +218,6 @@
                                 {% endfor %}
                             </div>
                         </div>
-                        {% endif %}
                     </div>
                 </div>
 
@@ -701,6 +701,161 @@
         document.addEventListener('click', () => {
             document.querySelectorAll('.dropdown-menu.show').forEach(m => m.classList.remove('show'));
         });
+
+        (function () {
+            const MOVIE_ID = {{ movie.id }};
+            const MOVIE_TITLE = {{ movie.title | tojson }};
+            const NEEDS_TEXT_META = {{ 'true' if needs_text_meta else 'false' }};
+            const NEEDS_IMAGE_META = {{ 'true' if needs_image_meta else 'false' }};
+
+            function escapeHtml(str) {
+                return String(str ?? '')
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
+            }
+
+            function renderCastList(castList) {
+                const section = document.getElementById('movieCastSection');
+                const row = document.getElementById('movieCastRow');
+                if (!section || !row) return;
+                if (!castList || castList.length === 0) {
+                    section.style.display = 'none';
+                    return;
+                }
+                row.innerHTML = castList.map(actor => `
+                    <a href="/person/${encodeURIComponent(actor.name || '')}" class="cast-member" style="text-decoration: none; color: inherit;">
+                        ${actor.profile_filename
+                            ? `<img src="/metadata/${encodeURIComponent(actor.profile_filename)}" class="cast-avatar">`
+                            : `<div class="cast-avatar placeholder-avatar"><i data-lucide="user"></i></div>`}
+                        <div class="cast-name">${escapeHtml(actor.name)}</div>
+                        ${actor.character ? `<div class="cast-character">${escapeHtml(actor.character)}</div>` : ''}
+                    </a>
+                `).join('');
+                section.style.display = '';
+                if (window.lucide) lucide.createIcons();
+            }
+
+            function applyMovieTextMeta(data) {
+                if (!data) return;
+
+                const plotEl = document.getElementById('moviePlot');
+                if (plotEl && data.plot) {
+                    plotEl.textContent = data.plot;
+                }
+
+                const metaRow = document.getElementById('movieMetaRow');
+                if (metaRow) {
+                    const parts = [];
+                    if (data.rating) {
+                        parts.push(`<div class="rating-badge flex align-center gap-5"><i data-lucide="star" fill="var(--rating-gold)" color="var(--rating-gold)" size="18"></i><span>${Number(data.rating).toFixed(1)}</span></div>`);
+                    }
+                    if (data.formatted_year || data.year) {
+                        parts.push(`<span class="meta-year">${escapeHtml(data.formatted_year || data.year)}</span>`);
+                    }
+                    if (data.genres) {
+                        parts.push(`<span class="meta-genres">${escapeHtml(data.genres)}</span>`);
+                    }
+                    if (data.content_rating) {
+                        parts.push(`<span class="content-rating-badge">${escapeHtml(data.content_rating)}</span>`);
+                    }
+                    metaRow.innerHTML = parts.join('');
+                }
+
+                const metaBlock = document.getElementById('movieMetadataBlock');
+                if (metaBlock) {
+                    let html = '';
+                    if (data.director) {
+                        const links = data.director.split(',').map(d => {
+                            const clean = d.trim();
+                            return `<a href="/person/${encodeURIComponent(clean)}" class="inline-link" style="color: var(--primary);">${escapeHtml(clean)}</a>`;
+                        }).join(', ');
+                        html += `<div class="mb-10"><strong style="color: var(--text-primary);">Director:</strong> ${links}</div>`;
+                    }
+                    if (data.collection_name) {
+                        html += `<div class="mb-10"><strong style="color: var(--text-primary);">Part of:</strong> <a href="/library/movie?view=library&collection=${encodeURIComponent(data.collection_name)}" class="inline-link" style="color: var(--primary);">${escapeHtml(data.collection_name)}</a></div>`;
+                    }
+                    metaBlock.innerHTML = html;
+                }
+
+                const verMenu = document.getElementById('movie-version-menu');
+                if (verMenu && Array.isArray(data.movie_versions) && data.movie_versions.length > 1) {
+                    verMenu.innerHTML = data.movie_versions.map(v => `
+                        <button type="button" class="version-menu-item ${v.is_current ? 'active' : ''}" onclick="window.location.href='/play/movie/${v.id}'">
+                            <div class="version-item-header">
+                                <span class="version-resolution">${escapeHtml(v.resolution)}</span>
+                                <span class="version-size">${escapeHtml(v.file_size)}</span>
+                            </div>
+                            <div class="version-filename" title="${escapeHtml(v.filename)}">${escapeHtml(v.filename)}</div>
+                        </button>
+                    `).join('');
+                }
+
+                if (Array.isArray(data.cast_list) && data.cast_list.length > 0) {
+                    renderCastList(data.cast_list);
+                } else if (window.lucide) {
+                    lucide.createIcons();
+                }
+            }
+
+            function applyMovieImageMeta(data) {
+                if (!data) return;
+                if (data.backdrop_filename) {
+                    document.body.classList.add('has-backdrop');
+                    document.body.style.setProperty('--backdrop-url', `url('/metadata/${encodeURIComponent(data.backdrop_filename)}')`);
+                }
+                if (data.poster_filename) {
+                    const posterEl = document.getElementById('moviePoster');
+                    if (posterEl) {
+                        if (posterEl.tagName === 'IMG') {
+                            posterEl.src = `/metadata/${encodeURIComponent(data.poster_filename)}`;
+                        } else {
+                            posterEl.outerHTML = `<img src="/metadata/${encodeURIComponent(data.poster_filename)}" class="info-poster" id="moviePoster">`;
+                        }
+                    }
+                }
+                if (data.logo_filename && data.logo_filename !== 'none') {
+                    const titleSlot = document.getElementById('movieTitleSlot');
+                    if (titleSlot) {
+                        titleSlot.innerHTML = `<div class="series-logo-container mb-15"><img src="/metadata/${encodeURIComponent(data.logo_filename)}" alt="${escapeHtml(MOVIE_TITLE)}" class="series-logo"></div>`;
+                    }
+                }
+                if (Array.isArray(data.cast_list) && data.cast_list.length > 0) {
+                    renderCastList(data.cast_list);
+                }
+            }
+
+            async function runStagedMovieMetadata() {
+                let shouldFetchImages = NEEDS_IMAGE_META;
+                if (NEEDS_TEXT_META) {
+                    try {
+                        const res = await fetch(`/api/movie/${MOVIE_ID}/metadata/text`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            applyMovieTextMeta(data);
+                            shouldFetchImages = Boolean(data.needs_images);
+                        }
+                    } catch (err) {
+                        console.error('Failed to load movie text metadata:', err);
+                    }
+                }
+                if (shouldFetchImages) {
+                    try {
+                        const res = await fetch(`/api/movie/${MOVIE_ID}/metadata/images`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            applyMovieImageMeta(data);
+                        }
+                    } catch (err) {
+                        console.error('Failed to load movie image metadata:', err);
+                    }
+                }
+            }
+
+            document.addEventListener('DOMContentLoaded', runStagedMovieMetadata);
+        })();
     </script>
 
     {% if request.query_params.get('no_trailer') %}

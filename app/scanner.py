@@ -360,22 +360,83 @@ def download_image(image_path: Optional[str], prefix: str, tmdb_id: int, img_typ
             return None
     return filename
 
+def _parse_tmdb_credits(data: dict, media_type: str, limit: int = 15):
+    """Extract normalized cast list and director/creator string from TMDB movie credits or TV aggregate_credits."""
+    if media_type == "movie":
+        credits_data = data.get("credits") or {}
+        cast_items = [
+            {
+                "id": c.get("id"),
+                "name": c["name"],
+                "character": c.get("character", ""),
+                "profile_path": c.get("profile_path"),
+            }
+            for c in (credits_data.get("cast") or [])[:limit]
+            if c.get("name")
+        ]
+        directors = [c["name"] for c in (credits_data.get("crew") or []) if c.get("job") == "Director" and c.get("name")]
+        dir_str = ", ".join(directors) if directors else None
+        return cast_items, dir_str
+
+    agg = data.get("aggregate_credits") or {}
+    raw_cast = agg.get("cast") or (data.get("credits") or {}).get("cast") or []
+    cast_items = []
+    for c in raw_cast[:limit]:
+        if not c.get("name"):
+            continue
+        roles = c.get("roles") or []
+        if roles:
+            top_role = max(roles, key=lambda r: r.get("episode_count") or 0)
+            character = (top_role.get("character") or roles[0].get("character") or "").strip()
+        else:
+            character = (c.get("character") or "").strip()
+        cast_items.append({
+            "id": c.get("id"),
+            "name": c["name"],
+            "character": character,
+            "profile_path": c.get("profile_path"),
+        })
+
+    creators = [c["name"] for c in (data.get("created_by") or []) if c.get("name")]
+    if creators:
+        dir_str = ", ".join(creators)
+    else:
+        agg_crew = agg.get("crew") or []
+        tv_dirs = [
+            (c.get("total_episode_count") or 0, c["name"])
+            for c in agg_crew
+            if c.get("name") and any(j.get("job") == "Director" for j in (c.get("jobs") or []))
+        ]
+        if tv_dirs:
+            tv_dirs.sort(key=lambda x: x[0], reverse=True)
+            dir_str = ", ".join(name for _, name in tv_dirs[:3])
+        else:
+            fallback_dirs = [
+                c["name"]
+                for c in ((data.get("credits") or {}).get("crew") or [])
+                if c.get("job") == "Director" and c.get("name")
+            ]
+            dir_str = ", ".join(fallback_dirs[:3]) if fallback_dirs else None
+
+    return cast_items, dir_str
+
+
 def fetch_additional_details(tmdb_id: int, media_type: str, api_key: str):
     """Synchronous TMDB additional details fetcher (legacy/fallback)."""
     try:
         if media_type == "movie":
             url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}&append_to_response=credits,release_dates,images&include_image_language=en,null"
         else:
-            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}&append_to_response=credits,content_ratings,images&include_image_language=en,null"
+            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}&append_to_response=aggregate_credits,content_ratings,images&include_image_language=en,null"
             
         res = requests.get(url, timeout=10)
         if res.status_code == 200:
             data = res.json()
-            credits_data = data.get("credits", {})
+            cast_items, dir_str = _parse_tmdb_credits(data, media_type, limit=15)
             cast_list = []
-            for c in credits_data.get("cast", [])[:15]:
+            for c in cast_items:
                 profile_filename = None
-                if c.get("profile_path"):
+                if c.get("profile_path") and c.get("id") is not None:
                     profile_filename = download_image(c["profile_path"], "person", c["id"], "profile")
                 
                 cast_list.append({
@@ -385,9 +446,7 @@ def fetch_additional_details(tmdb_id: int, media_type: str, api_key: str):
                     "profile_filename": profile_filename
                 })
             
-            directors = [c["name"] for c in credits_data.get("crew", []) if c.get("job") == "Director"]
             cast_str = json.dumps(cast_list) if cast_list else None
-            dir_str = ", ".join(directors) if directors else None
             
             genres = data.get("genres", [])
             genres_str = ", ".join([g.get("name") for g in genres if g.get("name")]) if genres else None
@@ -641,24 +700,12 @@ async def async_fetch_text_details(
         if media_type == "movie":
             url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}&append_to_response=credits,release_dates,videos,images&include_image_language=en,null"
         else:
-            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}&append_to_response=credits,content_ratings,videos,images&include_image_language=en,null"
+            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}&append_to_response=aggregate_credits,content_ratings,videos,images&include_image_language=en,null"
 
         res = await _tmdb_get(client, url, semaphore=semaphore)
         if res.status_code == 200:
             data = res.json()
-            credits_data = data.get("credits", {})
-            cast_items = [
-                {
-                    "id": c.get("id"),
-                    "name": c["name"],
-                    "character": c.get("character", ""),
-                    "profile_path": c.get("profile_path"),
-                }
-                for c in credits_data.get("cast", [])[:15]
-            ]
-
-            directors = [c["name"] for c in credits_data.get("crew", []) if c.get("job") == "Director"]
-            dir_str = ", ".join(directors) if directors else None
+            cast_items, dir_str = _parse_tmdb_credits(data, media_type, limit=15)
 
             genres = data.get("genres", [])
             genres_str = ", ".join([g.get("name") for g in genres if g.get("name")]) if genres else None
@@ -1856,6 +1903,12 @@ class ScannerManager:
             self.items_scanned = 0
 
         if total_items == 0:
+            if tmdb_api_key and not self._abort_event.is_set():
+                threading.Thread(
+                    target=self._run_bg_image_worker,
+                    args=([], [], tmdb_api_key),
+                    daemon=True,
+                ).start()
             with self._lock:
                 self.action = "Library up to date"
                 self.last_summary = "All media libraries are up to date."
@@ -1923,6 +1976,7 @@ class ScannerManager:
                             if cast_items:
                                 cast = json.dumps([
                                     {
+                                        "id": c.get("id"),
                                         "name": c["name"],
                                         "character": c.get("character", ""),
                                         "profile_filename": None,
@@ -2091,6 +2145,7 @@ class ScannerManager:
                                 )
                                 s_cast = json.dumps([
                                     {
+                                        "id": c.get("id"),
                                         "name": c["name"],
                                         "character": c.get("character", ""),
                                         "profile_filename": None,
@@ -2737,7 +2792,10 @@ class ScannerManager:
                                     e.logo_filename = logo_fn
                                 elif not e.logo_filename:
                                     e.logo_filename = "none"
-                                if cast_json and (not e.cast or e.cast == "[]" or '"profile_filename": null' in (e.cast or '') or '"id":' not in (e.cast or '')):
+                                if cast_json and (
+                                    not e.cast or e.cast == "[]" or '"profile_filename": null' in (e.cast or '') or '"id":' not in (e.cast or '') or
+                                    len(json.loads(cast_json)) > len(json.loads(e.cast))
+                                ):
                                     e.cast = cast_json
                                 if dir_str and not e.director: e.director = dir_str
                                 if content_rating and not e.content_rating: e.content_rating = content_rating
@@ -2899,7 +2957,7 @@ class ScannerManager:
                                     continue
                                 key = name.lower()
                                 pid = entry.get("id")
-                                if key not in cast_map or (cast_map[key] is None and pid is not None):
+                                if key not in cast_map or (cast_map[key][1] is None and pid is not None):
                                     cast_map[key] = (name, pid)
                         except Exception:
                             pass

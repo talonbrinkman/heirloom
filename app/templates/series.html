@@ -64,23 +64,25 @@
             <div class="main-content">
                 <div class="info-layout">
                     {% if series.poster_filename %}
-                    <img src="/metadata/{{ series.poster_filename }}" class="info-poster">
+                    <img src="/metadata/{{ series.poster_filename }}" class="info-poster" id="seriesPoster">
                     {% else %}
-                    <div class="info-poster" class="bg-dark flex align-center justify-center placeholder-poster">No Poster</div>
+                    <div class="info-poster bg-dark flex align-center justify-center placeholder-poster" id="seriesPoster">No Poster</div>
                     {% endif %}
                     
                     <div class="info-details">
                         <!-- Row 1: Logo (if present) or Title -->
-                        {% if series.logo_filename and series.logo_filename != 'none' %}
-                        <div class="series-logo-container mb-15">
-                            <img src="/metadata/{{ series.logo_filename }}" alt="{{ title }}" class="series-logo">
+                        <div id="seriesTitleSlot">
+                            {% if series.logo_filename and series.logo_filename != 'none' %}
+                            <div class="series-logo-container mb-15">
+                                <img src="/metadata/{{ series.logo_filename }}" alt="{{ title }}" class="series-logo">
+                            </div>
+                            {% else %}
+                            <h1 class="info-title m-0 mb-15" style="color: #fff;">{{ title }}</h1>
+                            {% endif %}
                         </div>
-                        {% else %}
-                        <h1 class="info-title m-0 mb-15" style="color: #fff;">{{ title }}</h1>
-                        {% endif %}
 
                         <!-- Row 2: (Rating, Release Date, Genre, Rating) -->
-                        <div class="info-meta-row flex align-center gap-15 mb-15">
+                        <div class="info-meta-row flex align-center gap-15 mb-15" id="seriesMetaRow">
                             {% if series.rating %}
                             <div class="rating-badge flex align-center gap-5">
                                 <i data-lucide="star" fill="var(--rating-gold)" color="var(--rating-gold)" size="18"></i>
@@ -108,15 +110,15 @@
                         <!-- Row 4: Description -->
                         <div class="info-plot mb-15" id="heroPlot">{{ (selected_ep_dict.plot if selected_ep_dict and selected_ep_dict.plot else series.plot) or "No description available." }}</div>
                         
-                        {% if series.director %}
-                        <div class="metadata-block mb-15">
+                        <div class="metadata-block mb-15" id="seriesMetadataBlock" {% if not series.director %}style="display: none;"{% endif %}>
+                            {% if series.director %}
                             <div><strong style="color: var(--text-primary);">Creator/Director:</strong> 
                                 {% for d in series.director.split(',') %}
                                 <a href="/person/{{ d.strip() | urlencode }}" class="inline-link" style="color: var(--primary);">{{ d.strip() }}</a>{% if not loop.last %}, {% endif %}
                                 {% endfor %}
                             </div>
+                            {% endif %}
                         </div>
-                        {% endif %}
                         
                         <div class="info-controls">
                             <a href="{{ resume_link }}" class="play-btn play-main-btn m-0" id="heroPlayBtn">
@@ -257,10 +259,9 @@
                     </div>
                 </div>
 
-                {% if cast_list %}
-                <div class="card">
+                <div class="card" id="seriesCastSection" {% if not cast_list %}style="display: none;"{% endif %}>
                     <h2>Cast</h2>
-                    <div class="cast-row">
+                    <div class="cast-row" id="seriesCastRow">
                         {% for actor in cast_list %}
                         <a href="/person/{{ actor.name | urlencode }}" class="cast-member" style="text-decoration: none; color: inherit;">
                             {% if actor.profile_filename %}
@@ -276,7 +277,6 @@
                         {% endfor %}
                     </div>
                 </div>
-                {% endif %}
 
                 {% if related_shows %}
                 <div class="card mt-20">
@@ -346,7 +346,7 @@
             let currentSeason = -1;
             let currentSelectedEpId = {{ selected_ep_id }};
             const episodesData = {{ episodes | tojson }};
-            const defaultSeriesPlot = {{ (series.plot or "") | tojson }};
+            let defaultSeriesPlot = {{ (series.plot or "") | tojson }};
 
             function scrollToSelectedEpisode(smooth = true) {
                 const selectedEpEl = document.querySelector('.selected-episode');
@@ -971,6 +971,190 @@
                 window.location.href = '/profiles';
             }
         }
+
+        (function () {
+            const SERIES_TITLE = {{ title | tojson }};
+            const NEEDS_TEXT_META = {{ 'true' if needs_text_meta else 'false' }};
+            const NEEDS_IMAGE_META = {{ 'true' if needs_image_meta else 'false' }};
+
+            function escapeHtml(str) {
+                return String(str ?? '')
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
+            }
+
+            function renderSeriesCast(castList) {
+                const section = document.getElementById('seriesCastSection');
+                const row = document.getElementById('seriesCastRow');
+                if (!section || !row) return;
+                if (!castList || castList.length === 0) {
+                    section.style.display = 'none';
+                    return;
+                }
+                row.innerHTML = castList.map(actor => `
+                    <a href="/person/${encodeURIComponent(actor.name || '')}" class="cast-member" style="text-decoration: none; color: inherit;">
+                        ${actor.profile_filename
+                            ? `<img src="/metadata/${encodeURIComponent(actor.profile_filename)}" class="cast-avatar">`
+                            : `<div class="cast-avatar placeholder-avatar"><i data-lucide="user"></i></div>`}
+                        <div class="cast-name">${escapeHtml(actor.name)}</div>
+                        ${actor.character ? `<div class="cast-character">${escapeHtml(actor.character)}</div>` : ''}
+                    </a>
+                `).join('');
+                section.style.display = '';
+                if (window.lucide) lucide.createIcons();
+            }
+
+            function applySeriesTextMeta(data) {
+                if (!data) return;
+                const show = data.show || {};
+
+                if (show.plot) {
+                    defaultSeriesPlot = show.plot;
+                }
+
+                const metaRow = document.getElementById('seriesMetaRow');
+                if (metaRow) {
+                    const parts = [];
+                    if (show.rating) {
+                        parts.push(`<div class="rating-badge flex align-center gap-5"><i data-lucide="star" fill="var(--rating-gold)" color="var(--rating-gold)" size="18"></i><span>${Number(show.rating).toFixed(1)}</span></div>`);
+                    }
+                    if (show.year) {
+                        parts.push(`<span class="meta-year">${escapeHtml(show.year)}</span>`);
+                    }
+                    if (show.genres) {
+                        parts.push(`<span class="meta-genres">${escapeHtml(show.genres)}</span>`);
+                    }
+                    if (show.content_rating) {
+                        parts.push(`<span class="content-rating-badge">${escapeHtml(show.content_rating)}</span>`);
+                    }
+                    metaRow.innerHTML = parts.join('');
+                }
+
+                const metaBlock = document.getElementById('seriesMetadataBlock');
+                if (metaBlock) {
+                    if (show.director) {
+                        const links = show.director.split(',').map(d => {
+                            const clean = d.trim();
+                            return `<a href="/person/${encodeURIComponent(clean)}" class="inline-link" style="color: var(--primary);">${escapeHtml(clean)}</a>`;
+                        }).join(', ');
+                        metaBlock.innerHTML = `<div><strong style="color: var(--text-primary);">Creator/Director:</strong> ${links}</div>`;
+                        metaBlock.style.display = '';
+                    } else {
+                        metaBlock.style.display = 'none';
+                    }
+                }
+
+                if (Array.isArray(data.episodes)) {
+                    const epMap = new Map(data.episodes.map(e => [e.id, e]));
+                    for (const localEp of episodesData) {
+                        const updated = epMap.get(localEp.id);
+                        if (!updated) continue;
+                        localEp.episode_name = updated.episode_name || '';
+                        localEp.season_episode = updated.season_episode || localEp.season_episode;
+                        localEp.plot = updated.plot || '';
+
+                        const card = document.querySelector(`.episode-card[data-episode-id="${localEp.id}"]`);
+                        if (card) {
+                            const yearEl = card.querySelector('.media-year');
+                            if (yearEl) {
+                                yearEl.setAttribute('title', localEp.season_episode || '');
+                                const parts = String(localEp.season_episode || '').replace(/<br>/g, ' • ').split(' • ');
+                                const linesHtml = parts.map(part => {
+                                    const text = (part.includes('Season ') && part.includes(' Episode '))
+                                        ? `Episode ${part.split(' Episode ')[1]}`
+                                        : part;
+                                    return `<span class="media-year-line">${escapeHtml(text)}</span>`;
+                                }).join('');
+                                yearEl.innerHTML = `<a href="javascript:void(0)" onclick="selectEpisode(${localEp.id}); return false;">${linesHtml}</a>`;
+                            }
+                        }
+                    }
+
+                    // Refresh hero episode indicator & plot for the currently selected episode
+                    const curEp = episodesData.find(e => e.id === currentSelectedEpId);
+                    if (curEp) {
+                        const indicatorEl = document.getElementById('heroEpisodeIndicator');
+                        if (indicatorEl) {
+                            let text = '';
+                            if (curEp.episode_name) text += curEp.episode_name + ' • ';
+                            text += 'S' + String(curEp.season).padStart(2, '0') + 'E' + String(curEp.episode || 1).padStart(2, '0');
+                            indicatorEl.textContent = text;
+                            indicatorEl.style.display = 'block';
+                        }
+                        const plotEl = document.getElementById('heroPlot');
+                        if (plotEl) {
+                            plotEl.textContent = curEp.plot || defaultSeriesPlot || 'No description available.';
+                        }
+                    }
+                }
+
+                if (Array.isArray(show.cast_list) && show.cast_list.length > 0) {
+                    renderSeriesCast(show.cast_list);
+                } else if (window.lucide) {
+                    lucide.createIcons();
+                }
+            }
+
+            function applySeriesImageMeta(data) {
+                if (!data) return;
+                if (data.backdrop_filename) {
+                    document.body.classList.add('has-backdrop');
+                    document.body.style.setProperty('--backdrop-url', `url('/metadata/${encodeURIComponent(data.backdrop_filename)}')`);
+                }
+                if (data.poster_filename) {
+                    const posterEl = document.getElementById('seriesPoster');
+                    if (posterEl) {
+                        if (posterEl.tagName === 'IMG') {
+                            posterEl.src = `/metadata/${encodeURIComponent(data.poster_filename)}`;
+                        } else {
+                            posterEl.outerHTML = `<img src="/metadata/${encodeURIComponent(data.poster_filename)}" class="info-poster" id="seriesPoster">`;
+                        }
+                    }
+                }
+                if (data.logo_filename && data.logo_filename !== 'none') {
+                    const titleSlot = document.getElementById('seriesTitleSlot');
+                    if (titleSlot) {
+                        titleSlot.innerHTML = `<div class="series-logo-container mb-15"><img src="/metadata/${encodeURIComponent(data.logo_filename)}" alt="${escapeHtml(SERIES_TITLE)}" class="series-logo"></div>`;
+                    }
+                }
+                if (Array.isArray(data.cast_list) && data.cast_list.length > 0) {
+                    renderSeriesCast(data.cast_list);
+                }
+            }
+
+            async function runStagedSeriesMetadata() {
+                const encodedTitle = encodeURIComponent(SERIES_TITLE);
+                let shouldFetchImages = NEEDS_IMAGE_META;
+                if (NEEDS_TEXT_META) {
+                    try {
+                        const res = await fetch(`/api/series/${encodedTitle}/metadata/text`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            applySeriesTextMeta(data);
+                            shouldFetchImages = Boolean(data.needs_images);
+                        }
+                    } catch (err) {
+                        console.error('Failed to load series text metadata:', err);
+                    }
+                }
+                if (shouldFetchImages) {
+                    try {
+                        const res = await fetch(`/api/series/${encodedTitle}/metadata/images`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            applySeriesImageMeta(data);
+                        }
+                    } catch (err) {
+                        console.error('Failed to load series image metadata:', err);
+                    }
+                }
+            }
+
+            document.addEventListener('DOMContentLoaded', runStagedSeriesMetadata);
+        })();
     </script>
 
 </body>

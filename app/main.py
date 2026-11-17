@@ -9,6 +9,7 @@ except ImportError:
         pass
 
 from fastapi import FastAPI, Depends, Form, Request, HTTPException, Response, WebSocket, WebSocketDisconnect, Query, BackgroundTasks
+import asyncio
 import threading
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,9 +34,9 @@ from collections import defaultdict, Counter
 from datetime import datetime, timezone, timedelta
 from .database import create_db_and_tables, get_session, engine
 from .models import User, UserSession, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile, Artist, Album, Track, Playlist, PlaylistTrack, Person
-from .scanner import METADATA_DIR, scan_media_library, scanner_manager, is_recycle_name, is_recycle_path, download_image, async_download_image, async_fetch_additional_details, SafeHTTPClient, httpx, find_local_trailer, extract_tmdb_trailer_key
+from .scanner import METADATA_DIR, scan_media_library, scanner_manager, is_recycle_name, is_recycle_path, download_image, async_download_image, async_fetch_additional_details, async_fetch_text_details, SafeHTTPClient, httpx, find_local_trailer, extract_tmdb_trailer_key
 from .watcher import start_watcher, stop_watcher, scanner_debouncer
-from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time, sanitize_vtt_content, get_video_transcode_pipeline, parse_burn_sub_index, get_smart_audio_pipeline, extract_video_frame
+from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, get_cached_media_probe, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time, sanitize_vtt_content, get_video_transcode_pipeline, parse_burn_sub_index, get_smart_audio_pipeline, extract_video_frame
 from .hls_manager import hls_manager
 from .trickplay import (
     queue_trickplay_generation,
@@ -1703,7 +1704,10 @@ async def async_enrich_tv_show(title: str):
                         elif not e.logo_filename:
                             e.logo_filename = "none"
 
-                        if cast_str and (not e.cast or e.cast == "[]" or '"profile_filename": null' in (e.cast or '')):
+                        if cast_str and (
+                            not e.cast or e.cast == "[]" or '"profile_filename": null' in (e.cast or '') or
+                            len(_parse_cast_json(cast_str)) > len(_parse_cast_json(e.cast))
+                        ):
                             e.cast = cast_str
 
                         if dir_str and not e.director:
@@ -2401,6 +2405,88 @@ def get_user_watched_status(session: Session, user_id: int, prof_id: Optional[in
             
     return watched_movie_ids, watched_tv_episode_ids, watched_tv_titles
 
+def _build_home_recommended(
+    session: Session,
+    current_user: User,
+    rating_level: int,
+    top_genres: list[str],
+    watched_movie_ids: set[int],
+    watched_tv_titles: set[str],
+    limit: int = 20,
+) -> list[dict]:
+    """Build Home recommendations aiming for a 50/50 movie and TV show split when both have enough candidates."""
+    if not top_genres:
+        return []
+    from sqlmodel import or_
+
+    rec_movies = []
+    if current_user.movies_access:
+        m_filters = [Movie.genres.like(f"%{g}%") for g in top_genres]
+        cand_m_q = select(Movie).where(or_(*m_filters))
+        if rating_level == 1:
+            cand_m_q = cand_m_q.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+        elif rating_level >= 2:
+            cand_m_q = cand_m_q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+        if watched_movie_ids:
+            cand_m_q = cand_m_q.where(Movie.id.not_in(list(watched_movie_ids)[:500]))
+        cand_movies_raw = session.exec(cand_m_q.order_by(Movie.rating.desc().nullslast()).limit(60)).all()
+        cand_movies = process_movie_versions(cand_movies_raw)
+        rec_movies = [
+            {"item": {"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year}, "media_type": "movie"}
+            for m in cand_movies
+        ]
+
+    rec_tv = []
+    if current_user.tv_access:
+        tv_filters = [TVShow.genres.like(f"%{g}%") for g in top_genres]
+        subq = select(func.max(TVShow.id)).where(or_(*tv_filters))
+        if rating_level == 1:
+            subq = subq.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+        elif rating_level >= 2:
+            subq = subq.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+        if watched_tv_titles:
+            subq = subq.where(func.lower(TVShow.title).not_in(list(watched_tv_titles)[:500]))
+        subq = subq.group_by(func.lower(TVShow.title))
+
+        cand_tv_q = select(TVShow).where(TVShow.id.in_(subq)).order_by(TVShow.rating.desc().nullslast()).limit(40)
+        cand_shows = session.exec(cand_tv_q).all()
+        unwatched_shows = [s for s in cand_shows if s.title.strip().lower() not in watched_tv_titles]
+        season_map: dict[str, int] = {}
+        if unwatched_shows:
+            titles_lower = [s.title.strip().lower() for s in unwatched_shows]
+            season_rows = session.exec(
+                select(func.lower(TVShow.title), func.count(func.distinct(TVShow.season)))
+                .where(func.lower(TVShow.title).in_(titles_lower), TVShow.season != None)
+                .group_by(func.lower(TVShow.title))
+            ).all()
+            season_map = {t_low: cnt for t_low, cnt in season_rows if cnt}
+
+        for s in unwatched_shows:
+            base_year = s.year or ""
+            season_count = season_map.get(s.title.strip().lower(), 0)
+            if season_count > 0:
+                season_text = f"{season_count} Season{'s' if season_count > 1 else ''}"
+                disp_year = f"{base_year} • {season_text}" if base_year else season_text
+            else:
+                disp_year = base_year
+            rec_tv.append({"item": {"id": s.id, "title": s.title, "poster_filename": s.poster_filename, "year": disp_year}, "media_type": "tv"})
+
+    random.shuffle(rec_movies)
+    random.shuffle(rec_tv)
+
+    if rec_movies and rec_tv:
+        half = limit // 2
+        movie_count = min(len(rec_movies), half)
+        tv_count = min(len(rec_tv), limit - movie_count)
+        if tv_count < half and len(rec_movies) > movie_count:
+            movie_count = min(len(rec_movies), limit - tv_count)
+        recommended = rec_movies[:movie_count] + rec_tv[:tv_count]
+        random.shuffle(recommended)
+        return recommended
+    if rec_movies:
+        return rec_movies[:limit]
+    return rec_tv[:limit]
+
 def get_available_volumes(session: Session) -> dict[str, bool]:
     volumes = session.exec(select(VolumePath)).all()
     has_movie_vol = any(v.media_type == "movie" and os.path.exists(v.path.strip()) for v in volumes)
@@ -2555,36 +2641,15 @@ def root(
                 for g in item_obj.genres.split(','): genre_counts[g.strip()] += 1
                 
     top_genres = [g for g, _ in genre_counts.most_common(3)]
-    recommended = []
-    if top_genres:
-        if current_user.movies_access:
-            m_filters = [Movie.genres.like(f"%{g}%") for g in top_genres]
-            cand_m_q = select(Movie).where(or_(*m_filters))
-            if rating_level == 1:
-                cand_m_q = cand_m_q.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
-            elif rating_level >= 2:
-                cand_m_q = cand_m_q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
-            if watched_movie_ids:
-                cand_m_q = cand_m_q.where(Movie.id.not_in(list(watched_movie_ids)[:500]))
-            cand_movies = session.exec(cand_m_q.order_by(Movie.rating.desc().nullslast()).limit(30)).all()
-            for m in cand_movies:
-                recommended.append({"item": {"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year}, "media_type": "movie"})
-
-        if current_user.tv_access:
-            tv_filters = [TVShow.genres.like(f"%{g}%") for g in top_genres]
-            cand_tv_q = select(TVShow).where(or_(*tv_filters))
-            if rating_level == 1:
-                cand_tv_q = cand_tv_q.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
-            elif rating_level >= 2:
-                cand_tv_q = cand_tv_q.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
-            cand_shows_raw = session.exec(cand_tv_q.order_by(TVShow.rating.desc().nullslast()).limit(60)).all()
-            cand_shows = process_tv_shows(cand_shows_raw)
-            for s in cand_shows:
-                if s.title.strip().lower() not in watched_tv_titles:
-                    recommended.append({"item": {"id": s.id, "title": s.title, "poster_filename": s.poster_filename, "year": getattr(s, 'year', '')}, "media_type": "tv"})
-            
-        random.shuffle(recommended)
-        recommended = recommended[:20]
+    recommended = _build_home_recommended(
+        session=session,
+        current_user=current_user,
+        rating_level=rating_level,
+        top_genres=top_genres,
+        watched_movie_ids=watched_movie_ids,
+        watched_tv_titles=watched_tv_titles,
+        limit=20,
+    )
 
     user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
 
@@ -3229,36 +3294,15 @@ def api_dashboard(
                 for g in item_obj.genres.split(','): genre_counts[g.strip()] += 1
                 
     top_genres = [g for g, _ in genre_counts.most_common(3)]
-    recommended = []
-    if top_genres:
-        if current_user.movies_access:
-            m_filters = [Movie.genres.like(f"%{g}%") for g in top_genres]
-            cand_m_q = select(Movie).where(or_(*m_filters))
-            if rating_level == 1:
-                cand_m_q = cand_m_q.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
-            elif rating_level >= 2:
-                cand_m_q = cand_m_q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
-            if watched_movie_ids:
-                cand_m_q = cand_m_q.where(Movie.id.not_in(list(watched_movie_ids)[:500]))
-            cand_movies = session.exec(cand_m_q.order_by(Movie.rating.desc().nullslast()).limit(30)).all()
-            for m in cand_movies:
-                recommended.append({"item": {"id": m.id, "title": m.title, "poster_filename": m.poster_filename, "year": m.year}, "media_type": "movie"})
-
-        if current_user.tv_access:
-            tv_filters = [TVShow.genres.like(f"%{g}%") for g in top_genres]
-            cand_tv_q = select(TVShow).where(or_(*tv_filters))
-            if rating_level == 1:
-                cand_tv_q = cand_tv_q.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
-            elif rating_level >= 2:
-                cand_tv_q = cand_tv_q.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
-            cand_shows_raw = session.exec(cand_tv_q.order_by(TVShow.rating.desc().nullslast()).limit(60)).all()
-            cand_shows = process_tv_shows(cand_shows_raw)
-            for s in cand_shows:
-                if s.title.strip().lower() not in watched_tv_titles:
-                    recommended.append({"item": {"id": s.id, "title": s.title, "poster_filename": s.poster_filename, "year": getattr(s, 'year', '')}, "media_type": "tv"})
-            
-        random.shuffle(recommended)
-        recommended = recommended[:20]
+    recommended = _build_home_recommended(
+        session=session,
+        current_user=current_user,
+        rating_level=rating_level,
+        top_genres=top_genres,
+        watched_movie_ids=watched_movie_ids,
+        watched_tv_titles=watched_tv_titles,
+        limit=20,
+    )
 
     if current_user.photos_access:
         photo_q = select(Photo).where(~Photo.file_path.like("%#recycle%")).order_by(Photo.date_added.desc()).limit(20)
@@ -4265,6 +4309,15 @@ def invalidate_movie_cache(movie_id: Optional[int] = None):
         else:
             _MOVIE_CACHE.clear()
 
+def format_runtime_str(runtime_seconds: Optional[int]) -> str:
+    """Format stored runtime seconds without invoking ffprobe."""
+    if not runtime_seconds:
+        return ""
+    m = int(runtime_seconds // 60)
+    if m < 60:
+        return f"{m}min"
+    return f"{m//60}hr {m%60}min"
+
 def get_runtime_str(item, session):
     if hasattr(item, 'runtime') and item.runtime is None:
         if getattr(item, 'file_path', None) and os.path.exists(item.file_path):
@@ -4278,11 +4331,183 @@ def get_runtime_str(item, session):
                 item.runtime = 0
         else:
             item.runtime = 0
-            
-    if not hasattr(item, 'runtime') or not item.runtime: return ""
-    m = int(item.runtime // 60)
-    if m < 60: return f"{m}min"
-    return f"{m//60}hr {m%60}min"
+
+    return format_runtime_str(getattr(item, 'runtime', None))
+
+_PENDING_MOVIE_IMG_META: dict[int, dict] = {}
+_PENDING_TV_IMG_META: dict[str, dict] = {}
+_checked_movie_images: set[int] = set()
+_checked_tv_images: set[str] = set()
+_movie_meta_locks: dict[int, asyncio.Lock] = {}
+_tv_meta_locks: dict[str, asyncio.Lock] = {}
+
+def _get_movie_meta_lock(movie_id: int) -> asyncio.Lock:
+    lock = _movie_meta_locks.get(movie_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _movie_meta_locks[movie_id] = lock
+    return lock
+
+def _get_tv_meta_lock(title_key: str) -> asyncio.Lock:
+    lock = _tv_meta_locks.get(title_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _tv_meta_locks[title_key] = lock
+    return lock
+
+def _get_tmdb_api_key(session: Session) -> str:
+    cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
+    return (cfg.value if cfg and cfg.value else os.getenv("TMDB_API_KEY", "")) or ""
+
+def _infer_resolution_from_filename(file_path: Optional[str]) -> str:
+    name = (file_path or "").lower()
+    if "2160p" in name or "4k" in name or "uhd" in name:
+        return "4K"
+    if "1440p" in name:
+        return "1440p"
+    if "1080p" in name:
+        return "1080p"
+    if "720p" in name:
+        return "720p"
+    if "480p" in name:
+        return "480p"
+    return "HD"
+
+def _build_movie_versions_list(raw_versions: list[Movie], current_movie_id: int, run_probe: bool = False) -> list[dict]:
+    versions = []
+    for v in raw_versions:
+        f_size = 0
+        try:
+            if v.file_path and os.path.exists(v.file_path):
+                f_size = os.path.getsize(v.file_path)
+        except Exception:
+            pass
+
+        probe = None
+        if v.file_path and os.path.exists(v.file_path):
+            probe = probe_media_streams(v.file_path) if run_probe else get_cached_media_probe(v.file_path)
+
+        if probe:
+            res_label = get_media_resolution_label(probe)
+            height = probe.get("height") or 0
+        else:
+            res_label = _infer_resolution_from_filename(v.file_path)
+            height = 0
+
+        versions.append({
+            "id": v.id,
+            "filename": os.path.basename(v.file_path),
+            "file_path": v.file_path,
+            "resolution": res_label,
+            "file_size": format_file_size(f_size),
+            "raw_size": f_size,
+            "height": height,
+            "content_rating": v.content_rating,
+            "is_current": v.id == current_movie_id
+        })
+    versions.sort(key=lambda x: (x["height"], x["raw_size"]), reverse=True)
+    return versions
+
+def _parse_cast_json(cast_str: Optional[str]) -> list[dict]:
+    if not cast_str or not cast_str.startswith("["):
+        return []
+    try:
+        data = json.loads(cast_str)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def _merge_cast_items(existing_cast_str: Optional[str], cast_items: list[dict]) -> Optional[str]:
+    if not cast_items:
+        return existing_cast_str
+    existing = _parse_cast_json(existing_cast_str)
+    by_id = {c.get("id"): c.get("profile_filename") for c in existing if c.get("id") is not None and c.get("profile_filename")}
+    by_name = {c.get("name", "").strip().lower(): c.get("profile_filename") for c in existing if c.get("name") and c.get("profile_filename")}
+    merged = []
+    for c in cast_items:
+        cid = c.get("id")
+        cname = (c.get("name") or "").strip()
+        prof = by_id.get(cid) or by_name.get(cname.lower()) or None
+        merged.append({
+            "id": cid,
+            "name": cname,
+            "character": c.get("character", ""),
+            "profile_filename": prof,
+        })
+    return json.dumps(merged) if merged else existing_cast_str
+
+def _get_movie_stage_flags(movie: Movie, raw_versions: list[Movie], has_tmdb: bool) -> tuple[bool, bool]:
+    needs_probe = (movie.runtime is None and bool(movie.file_path)) or (
+        len(raw_versions) > 1 and any(get_cached_media_probe(v.file_path) is None for v in raw_versions if v.file_path)
+    )
+    needs_tmdb_text = has_tmdb and (
+        not movie.tmdb_id or not movie.plot or movie.rating is None or
+        not movie.genres or not movie.director or not movie.content_rating or
+        not movie.cast or movie.cast == "[]"
+    )
+    needs_text = bool(needs_probe or needs_tmdb_text)
+
+    if not has_tmdb or (movie.id in _checked_movie_images):
+        needs_images = False
+    else:
+        missing_cast_photo = bool(movie.cast and ('"profile_filename": null' in movie.cast or '"profile_filename":null' in movie.cast))
+        missing_col_img = bool(movie.collection_id and movie.collection_id > 0 and (not movie.collection_poster_filename or not movie.collection_backdrop_filename))
+        needs_images = bool(
+            not movie.poster_filename or not movie.backdrop_filename or not movie.logo_filename or
+            missing_cast_photo or missing_col_img
+        )
+    return needs_text, needs_images
+
+def _get_series_stage_flags(shows: list[TVShow], has_tmdb: bool, title_key: str) -> tuple[bool, bool]:
+    if not has_tmdb or not shows:
+        return False, False
+    rep = shows[0]
+    needs_text = bool(
+        not rep.plot or rep.rating is None or not rep.genres or not rep.director or
+        not rep.content_rating or not rep.cast or rep.cast == "[]" or
+        any(e.episode_title is None or e.episode_plot is None for e in shows)
+    )
+    if title_key in _checked_tv_images:
+        needs_images = False
+    else:
+        missing_cast_photo = bool(rep.cast and ('"profile_filename": null' in rep.cast or '"profile_filename":null' in rep.cast))
+        needs_images = bool(
+            not rep.poster_filename or not rep.backdrop_filename or not rep.logo_filename or
+            missing_cast_photo or any(not e.season_poster_filename for e in shows)
+        )
+    return needs_text, needs_images
+
+async def _download_cast_photos_concurrently(client, existing_cast: list[dict], cast_items: list[dict]) -> list[dict]:
+    """Download missing cast profile photos concurrently with bounded semaphore."""
+    sem = asyncio.Semaphore(4)
+    path_by_id = {c.get("id"): c.get("profile_path") for c in cast_items if c.get("id") is not None and c.get("profile_path")}
+    path_by_name = {(c.get("name") or "").strip().lower(): (c.get("id"), c.get("profile_path")) for c in cast_items if c.get("name") and c.get("profile_path")}
+
+    source_list = existing_cast if existing_cast else [
+        {"id": c.get("id"), "name": c.get("name", ""), "character": c.get("character", ""), "profile_filename": None}
+        for c in cast_items
+    ]
+
+    async def _resolve_entry(entry: dict) -> dict:
+        out = dict(entry)
+        if out.get("profile_filename"):
+            return out
+        cid = out.get("id")
+        cname = (out.get("name") or "").strip().lower()
+        p_path = path_by_id.get(cid)
+        if not p_path and cname in path_by_name:
+            fallback_id, p_path = path_by_name[cname]
+            if cid is None:
+                cid = fallback_id
+                out["id"] = cid
+        if p_path and cid is not None:
+            async with sem:
+                fn = await async_download_image(client, p_path, "person", cid, "profile")
+            if fn:
+                out["profile_filename"] = fn
+        return out
+
+    return list(await asyncio.gather(*(_resolve_entry(e) for e in source_list)))
 
 @app.get("/movie/{movie_id}", response_class=HTMLResponse)
 def movie_view(
@@ -4303,12 +4528,7 @@ def movie_view(
         movie = session.get(Movie, movie_id)
         if not movie: raise HTTPException(status_code=404, detail="Movie not found")
         
-        cast_list = []
-        if movie.cast and movie.cast.startswith("["):
-            try:
-                import json
-                cast_list = json.loads(movie.cast)
-            except Exception: pass
+        cast_list = _parse_cast_json(movie.cast)
             
         # Discover all editions/versions for this movie
         raw_year = str(movie.year or "").split(" • ")[0].strip()
@@ -4326,40 +4546,17 @@ def movie_view(
 
         raw_versions = session.exec(v_q).all()
 
-        movie_versions = []
-        for v in raw_versions:
-            f_size = 0
-            try:
-                if v.file_path and os.path.exists(v.file_path):
-                    f_size = os.path.getsize(v.file_path)
-            except Exception:
-                pass
-
-            probe = probe_media_streams(v.file_path) if (v.file_path and os.path.exists(v.file_path)) else {}
-            res_label = get_media_resolution_label(probe)
-            height = probe.get("height") or 0
-
-            movie_versions.append({
-                "id": v.id,
-                "filename": os.path.basename(v.file_path),
-                "file_path": v.file_path,
-                "resolution": res_label,
-                "file_size": format_file_size(f_size),
-                "raw_size": f_size,
-                "height": height,
-                "content_rating": v.content_rating,
-                "is_current": v.id == movie.id
-            })
-
-        movie_versions.sort(key=lambda x: (x["height"], x["raw_size"]), reverse=True)
-        rt_str = get_runtime_str(movie, session)
-        formatted_year = f"{movie.year} • {rt_str}" if (movie.year and rt_str) else (movie.year or rt_str or "")
+        # Open page immediately from DB + file stats without blocking on ffprobe
+        movie_versions = _build_movie_versions_list(raw_versions, movie.id, run_probe=False)
+        rt_str = format_runtime_str(movie.runtime)
+        formatted_year = f"{raw_year} • {rt_str}" if (raw_year and rt_str) else (raw_year or rt_str or "")
 
         cached_m = {
             "movie": movie,
             "cast_list": cast_list,
             "movie_versions": movie_versions,
             "raw_version_ids": [v.id for v in raw_versions],
+            "raw_versions": raw_versions,
             "formatted_year": formatted_year,
             "content_rating": movie.content_rating
         }
@@ -4376,6 +4573,9 @@ def movie_view(
         movie.year = cached_m["formatted_year"]
 
     raw_version_ids = cached_m.get("raw_version_ids", [movie.id])
+    raw_versions = cached_m.get("raw_versions", [movie])
+    has_tmdb = bool(_get_tmdb_api_key(session))
+    needs_text_meta, needs_image_meta = _get_movie_stage_flags(movie, raw_versions, has_tmdb)
 
     hist_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == movie.id).where(WatchHistory.media_type == 'movie')
     if prof_id:
@@ -4421,8 +4621,380 @@ def movie_view(
         "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
         "movie": movie, "cast_list": cast_list, "has_progress": has_progress, "in_watchlist": in_watchlist,
         "is_watched": is_watched, "movie_versions": movie_versions, "current_version": current_version,
-        "related_movies": related_movies, "watched_movie_ids": watched_movie_ids, "user_watchlist_movies": user_watchlist_movies
+        "related_movies": related_movies, "watched_movie_ids": watched_movie_ids, "user_watchlist_movies": user_watchlist_movies,
+        "needs_text_meta": needs_text_meta, "needs_image_meta": needs_image_meta
     })
+
+
+@app.get("/api/movie/{movie_id}/metadata/text")
+async def api_movie_metadata_text(
+    movie_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not current_user.movies_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    rating_level = get_profile_rating_level(current_user, current_profile)
+
+    async with _get_movie_meta_lock(movie_id):
+        def _load_snap():
+            with Session(engine) as session:
+                movie = session.get(Movie, movie_id)
+                if not movie:
+                    return None
+                if rating_level > 0 and not is_rating_allowed(movie.content_rating, rating_level):
+                    return {"forbidden": True}
+
+                raw_year = str(movie.year or "").split(" • ")[0].strip()
+                if movie.tmdb_id:
+                    v_q = select(Movie).where(
+                        (Movie.tmdb_id == movie.tmdb_id) |
+                        ((func.lower(Movie.title) == movie.title.strip().lower()) & (Movie.year.like(f"{raw_year}%") if raw_year else True))
+                    )
+                else:
+                    v_q = select(Movie).where(func.lower(Movie.title) == movie.title.strip().lower())
+                    if raw_year:
+                        v_q = v_q.where(Movie.year.like(f"{raw_year}%"))
+                raw_versions = session.exec(v_q).all()
+
+                # Probe runtime and multi-version streams in worker thread (never blocking initial HTML open)
+                if movie.runtime is None and movie.file_path:
+                    get_runtime_str(movie, session)
+                movie_versions = _build_movie_versions_list(raw_versions, movie.id, run_probe=(len(raw_versions) > 1))
+                if rating_level > 0:
+                    movie_versions = [v for v in movie_versions if is_rating_allowed(v.get("content_rating"), rating_level)]
+
+                tmdb_key = _get_tmdb_api_key(session)
+                tmdb_id = movie.tmdb_id
+                if not tmdb_id and movie.poster_filename:
+                    mm = re.search(r'movie_(\d+)_', movie.poster_filename)
+                    if mm:
+                        tmdb_id = int(mm.group(1))
+
+                needs_tmdb_text = bool(tmdb_key) and (
+                    not tmdb_id or not movie.plot or movie.rating is None or
+                    not movie.genres or not movie.director or not movie.content_rating or
+                    not movie.cast or movie.cast == "[]" or not movie.trailer_key
+                )
+                return {
+                    "forbidden": False,
+                    "title": movie.title,
+                    "year": raw_year,
+                    "plot": movie.plot,
+                    "rating": movie.rating,
+                    "runtime": movie.runtime,
+                    "genres": movie.genres,
+                    "content_rating": movie.content_rating,
+                    "director": movie.director,
+                    "collection_id": movie.collection_id,
+                    "collection_name": movie.collection_name,
+                    "cast_str": movie.cast,
+                    "poster_filename": movie.poster_filename,
+                    "backdrop_filename": movie.backdrop_filename,
+                    "logo_filename": movie.logo_filename,
+                    "tmdb_id": tmdb_id,
+                    "tmdb_key": tmdb_key,
+                    "needs_tmdb_text": needs_tmdb_text,
+                    "movie_versions": movie_versions,
+                    "raw_version_ids": [v.id for v in raw_versions],
+                }
+
+        snap = await asyncio.to_thread(_load_snap)
+        if snap is None:
+            raise HTTPException(status_code=404, detail="Movie not found")
+        if snap.get("forbidden"):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        if snap["needs_tmdb_text"] and httpx is not None:
+            tmdb_key = snap["tmdb_key"]
+            tmdb_id = snap["tmdb_id"]
+            async with httpx.AsyncClient(timeout=10.0) as raw_client:
+                client = SafeHTTPClient(raw_client)
+                if not tmdb_id:
+                    params = {"query": snap["title"], "api_key": tmdb_key}
+                    raw_yr = (snap["year"] or "")[:4]
+                    if raw_yr.isdigit():
+                        params["year"] = raw_yr
+                    s_res = await client.get("https://api.themoviedb.org/3/search/movie", params=params)
+                    if s_res.status_code == 200:
+                        results = s_res.json().get("results") or []
+                        if results:
+                            tmdb_id = results[0].get("id")
+
+                if tmdb_id:
+                    poster_path = None
+                    backdrop_path = None
+                    if not snap["plot"] or snap["rating"] is None or not snap["year"] or not snap["poster_filename"] or not snap["backdrop_filename"]:
+                        m_res = await client.get(f"https://api.themoviedb.org/3/movie/{tmdb_id}", params={"api_key": tmdb_key})
+                        if m_res.status_code == 200:
+                            md = m_res.json()
+                            if not snap["plot"]:
+                                snap["plot"] = md.get("overview")
+                            if snap["rating"] is None:
+                                snap["rating"] = md.get("vote_average")
+                            if not snap["year"]:
+                                snap["year"] = (md.get("release_date") or "")[:4]
+                            poster_path = md.get("poster_path")
+                            backdrop_path = md.get("backdrop_path")
+
+                    cast_items, dir_str, content_rating, genres_str, trailer_key, col_id, col_name, image_paths = (
+                        await async_fetch_text_details(client, tmdb_id, "movie", tmdb_key)
+                    )
+
+                    _PENDING_MOVIE_IMG_META[movie_id] = {
+                        "tmdb_id": tmdb_id,
+                        "poster_path": poster_path,
+                        "backdrop_path": backdrop_path,
+                        "logo_path": image_paths.get("logo"),
+                        "collection_id": col_id,
+                        "collection_poster": image_paths.get("collection_poster"),
+                        "collection_backdrop": image_paths.get("collection_backdrop"),
+                        "cast_items": cast_items,
+                    }
+
+                    def _save_text():
+                        with Session(engine) as session:
+                            m = session.get(Movie, movie_id)
+                            if not m:
+                                return None
+                            m.tmdb_id = tmdb_id
+                            if snap["plot"] and not m.plot:
+                                m.plot = snap["plot"]
+                            if snap["rating"] is not None and m.rating is None:
+                                m.rating = snap["rating"]
+                            if snap["year"] and not m.year:
+                                m.year = snap["year"]
+                            if dir_str and not m.director:
+                                m.director = dir_str
+                            if content_rating and not m.content_rating:
+                                m.content_rating = content_rating
+                            if genres_str and not m.genres:
+                                m.genres = genres_str
+                            if trailer_key and not m.trailer_key:
+                                m.trailer_key = trailer_key
+                            if col_id and not m.collection_id:
+                                m.collection_id = col_id
+                            if col_name and not m.collection_name:
+                                m.collection_name = col_name
+                            if cast_items and (not m.cast or m.cast == "[]" or '"id":' not in (m.cast or '')):
+                                m.cast = _merge_cast_items(m.cast, cast_items)
+                            session.add(m)
+                            session.commit()
+                            return {
+                                "title": m.title,
+                                "year": str(m.year or "").split(" • ")[0].strip(),
+                                "plot": m.plot,
+                                "rating": m.rating,
+                                "runtime": m.runtime,
+                                "genres": m.genres,
+                                "content_rating": m.content_rating,
+                                "director": m.director,
+                                "collection_id": m.collection_id,
+                                "collection_name": m.collection_name,
+                                "cast_str": m.cast,
+                                "poster_filename": m.poster_filename,
+                                "backdrop_filename": m.backdrop_filename,
+                                "logo_filename": m.logo_filename,
+                            }
+
+                    saved = await asyncio.to_thread(_save_text)
+                    if saved:
+                        snap.update(saved)
+
+        for vid in snap.get("raw_version_ids", [movie_id]):
+            invalidate_movie_cache(vid)
+
+        rt_str = format_runtime_str(snap.get("runtime"))
+        raw_yr = snap.get("year") or ""
+        formatted_year = f"{raw_yr} • {rt_str}" if (raw_yr and rt_str) else (raw_yr or rt_str or "")
+        cast_list = _parse_cast_json(snap.get("cast_str"))
+
+        has_tmdb = bool(snap.get("tmdb_key"))
+        if not has_tmdb or (movie_id in _checked_movie_images):
+            needs_images = False
+        else:
+            cast_str = snap.get("cast_str") or ""
+            missing_cast_photo = bool(cast_str and ('"profile_filename": null' in cast_str or '"profile_filename":null' in cast_str))
+            col_id = snap.get("collection_id")
+            needs_images = bool(
+                not snap.get("poster_filename") or not snap.get("backdrop_filename") or
+                not snap.get("logo_filename") or missing_cast_photo or bool(col_id and col_id > 0)
+            )
+
+        return {
+            "title": snap["title"],
+            "year": raw_yr,
+            "formatted_year": formatted_year,
+            "plot": snap.get("plot"),
+            "rating": snap.get("rating"),
+            "genres": snap.get("genres"),
+            "content_rating": snap.get("content_rating"),
+            "director": snap.get("director"),
+            "collection_name": snap.get("collection_name"),
+            "cast_list": cast_list,
+            "movie_versions": snap.get("movie_versions", []),
+            "needs_images": needs_images,
+        }
+
+
+@app.get("/api/movie/{movie_id}/metadata/images")
+async def api_movie_metadata_images(
+    movie_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not current_user.movies_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    rating_level = get_profile_rating_level(current_user, current_profile)
+
+    async with _get_movie_meta_lock(movie_id):
+        def _load_img_snap():
+            with Session(engine) as session:
+                movie = session.get(Movie, movie_id)
+                if not movie:
+                    return None
+                if rating_level > 0 and not is_rating_allowed(movie.content_rating, rating_level):
+                    return {"forbidden": True}
+                tmdb_key = _get_tmdb_api_key(session)
+                tmdb_id = movie.tmdb_id
+                if not tmdb_id and movie.poster_filename:
+                    mm = re.search(r'movie_(\d+)_', movie.poster_filename)
+                    if mm:
+                        tmdb_id = int(mm.group(1))
+                return {
+                    "forbidden": False,
+                    "title": movie.title,
+                    "year": str(movie.year or "").split(" • ")[0].strip(),
+                    "tmdb_id": tmdb_id,
+                    "tmdb_key": tmdb_key,
+                    "poster_filename": movie.poster_filename,
+                    "backdrop_filename": movie.backdrop_filename,
+                    "logo_filename": movie.logo_filename,
+                    "collection_id": movie.collection_id,
+                    "collection_poster_filename": movie.collection_poster_filename,
+                    "collection_backdrop_filename": movie.collection_backdrop_filename,
+                    "cast_list": _parse_cast_json(movie.cast),
+                }
+
+        snap = await asyncio.to_thread(_load_img_snap)
+        if snap is None:
+            raise HTTPException(status_code=404, detail="Movie not found")
+        if snap.get("forbidden"):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        tmdb_key = snap["tmdb_key"]
+        if tmdb_key and httpx is not None:
+            pending = _PENDING_MOVIE_IMG_META.pop(movie_id, None) or {}
+            tmdb_id = snap["tmdb_id"] or pending.get("tmdb_id")
+            async with httpx.AsyncClient(timeout=10.0) as raw_client:
+                client = SafeHTTPClient(raw_client)
+                if not tmdb_id:
+                    params = {"query": snap["title"], "api_key": tmdb_key}
+                    raw_yr = (snap["year"] or "")[:4]
+                    if raw_yr.isdigit():
+                        params["year"] = raw_yr
+                    s_res = await client.get("https://api.themoviedb.org/3/search/movie", params=params)
+                    if s_res.status_code == 200:
+                        results = s_res.json().get("results") or []
+                        if results:
+                            tmdb_id = results[0].get("id")
+
+                if tmdb_id:
+                    poster_path = pending.get("poster_path")
+                    backdrop_path = pending.get("backdrop_path")
+                    if (not snap["poster_filename"] and not poster_path) or (not snap["backdrop_filename"] and not backdrop_path):
+                        m_res = await client.get(f"https://api.themoviedb.org/3/movie/{tmdb_id}", params={"api_key": tmdb_key})
+                        if m_res.status_code == 200:
+                            md = m_res.json()
+                            poster_path = poster_path or md.get("poster_path")
+                            backdrop_path = backdrop_path or md.get("backdrop_path")
+
+                    cast_items = pending.get("cast_items")
+                    logo_path = pending.get("logo_path")
+                    col_id = snap["collection_id"] or pending.get("collection_id")
+                    col_poster_path = pending.get("collection_poster")
+                    col_backdrop_path = pending.get("collection_backdrop")
+
+                    needs_text_for_imgs = (
+                        cast_items is None or
+                        (not snap["logo_filename"] and "logo_path" not in pending) or
+                        (col_id and (not snap["collection_poster_filename"] or not snap["collection_backdrop_filename"]) and "collection_poster" not in pending)
+                    )
+                    if needs_text_for_imgs:
+                        c_items, _, _, _, _, fetched_col_id, _, img_paths = await async_fetch_text_details(client, tmdb_id, "movie", tmdb_key)
+                        if cast_items is None:
+                            cast_items = c_items
+                        if not logo_path:
+                            logo_path = img_paths.get("logo")
+                        if not col_id:
+                            col_id = fetched_col_id
+                        if not col_poster_path:
+                            col_poster_path = img_paths.get("collection_poster")
+                        if not col_backdrop_path:
+                            col_backdrop_path = img_paths.get("collection_backdrop")
+
+                    async def _maybe_dl(path, prefix, tid, kind):
+                        if not path or tid is None:
+                            return None
+                        return await async_download_image(client, path, prefix, tid, kind)
+
+                    poster_task = _maybe_dl(poster_path, "movie", tmdb_id, "poster") if not snap["poster_filename"] else asyncio.sleep(0, result=None)
+                    backdrop_task = _maybe_dl(backdrop_path, "movie", tmdb_id, "backdrop") if not snap["backdrop_filename"] else asyncio.sleep(0, result=None)
+                    logo_task = _maybe_dl(logo_path, "movie", tmdb_id, "logo") if (not snap["logo_filename"] or snap["logo_filename"] == "none") else asyncio.sleep(0, result=None)
+                    col_p_task = _maybe_dl(col_poster_path, "collection", col_id, "poster") if (col_id and not snap["collection_poster_filename"]) else asyncio.sleep(0, result=None)
+                    col_b_task = _maybe_dl(col_backdrop_path, "collection", col_id, "backdrop") if (col_id and not snap["collection_backdrop_filename"]) else asyncio.sleep(0, result=None)
+                    cast_task = _download_cast_photos_concurrently(client, snap["cast_list"], cast_items or [])
+
+                    new_poster, new_backdrop, new_logo, new_col_p, new_col_b, updated_cast = await asyncio.gather(
+                        poster_task, backdrop_task, logo_task, col_p_task, col_b_task, cast_task
+                    )
+
+                    def _save_images():
+                        with Session(engine) as session:
+                            m = session.get(Movie, movie_id)
+                            if not m:
+                                return
+                            if not m.tmdb_id:
+                                m.tmdb_id = tmdb_id
+                            if new_poster and not m.poster_filename:
+                                m.poster_filename = new_poster
+                            if new_backdrop and not m.backdrop_filename:
+                                m.backdrop_filename = new_backdrop
+                            if new_logo and (not m.logo_filename or m.logo_filename == "none"):
+                                m.logo_filename = new_logo
+                            elif not m.logo_filename:
+                                m.logo_filename = "none"
+                            if new_col_p and not m.collection_poster_filename:
+                                m.collection_poster_filename = new_col_p
+                            if new_col_b and not m.collection_backdrop_filename:
+                                m.collection_backdrop_filename = new_col_b
+                            if updated_cast:
+                                m.cast = json.dumps(updated_cast)
+                            session.add(m)
+                            session.commit()
+                            snap["poster_filename"] = m.poster_filename
+                            snap["backdrop_filename"] = m.backdrop_filename
+                            snap["logo_filename"] = m.logo_filename
+                            snap["collection_poster_filename"] = m.collection_poster_filename
+                            snap["collection_backdrop_filename"] = m.collection_backdrop_filename
+                            snap["cast_list"] = updated_cast
+
+                    await asyncio.to_thread(_save_images)
+            _checked_movie_images.add(movie_id)
+            invalidate_movie_cache(movie_id)
+
+        return {
+            "poster_filename": snap.get("poster_filename"),
+            "backdrop_filename": snap.get("backdrop_filename"),
+            "logo_filename": snap.get("logo_filename"),
+            "collection_poster_filename": snap.get("collection_poster_filename"),
+            "collection_backdrop_filename": snap.get("collection_backdrop_filename"),
+            "cast_list": snap.get("cast_list", []),
+        }
 
 @app.get("/api/movie/{movie_id}/trailer")
 async def get_movie_trailer(
@@ -4574,6 +5146,63 @@ async def stream_movie_trailer(
 
     return StreamingResponse(generate(), media_type="video/mp4")
 
+def _extract_ep_season_episode(file_path: Optional[str], season: Optional[int], episode: Optional[int]) -> tuple[int, int, bool]:
+    m = re.search(r'S(\d+)E(\d+)', file_path or "", re.IGNORECASE)
+    if m:
+        return int(m.group(1)), int(m.group(2)), True
+    m_s = re.search(r'S(\d+)', file_path or "", re.IGNORECASE)
+    s_val = int(m_s.group(1)) if m_s else (season or 0)
+    return s_val, (episode or 1), False
+
+
+def _build_series_episodes_template(shows: list[TVShow]) -> tuple[list[dict], list[int]]:
+    def get_s_e(t):
+        m = re.search(r'S(\d+)E(\d+)', t.file_path, re.IGNORECASE)
+        if m:
+            return (int(m.group(1)), int(m.group(2)))
+        return (t.season or 0, t.episode or 0)
+
+    metadata_dir = METADATA_DIR if os.path.exists(METADATA_DIR) else "config/metadata"
+    episodes_template = []
+    seasons = set()
+    for ep_obj in sorted(shows, key=get_s_e):
+        s_num, e_num, matched_se = _extract_ep_season_episode(ep_obj.file_path, ep_obj.season, ep_obj.episode)
+        ep_num_val = (ep_obj.episode or e_num) if matched_se else e_num
+        seasons.add(s_num)
+        base = f"Episode {e_num}" if matched_se else (f"Episode {ep_num_val}" if ep_obj.episode else "Special")
+
+        rt_str = format_runtime_str(getattr(ep_obj, "runtime", None))
+        rt_suffix = f" • {rt_str}" if rt_str else ""
+
+        ep_title_val = (getattr(ep_obj, "episode_title", None) or "").strip()
+        if not ep_title_val:
+            filename = os.path.splitext(os.path.basename(ep_obj.file_path))[0]
+            name_match = re.search(r'S\d+E\d+[ \-]*(.+)', filename, re.IGNORECASE)
+            if name_match and name_match.group(1).strip():
+                ep_title_val = name_match.group(1).strip()
+
+        season_episode = f"{ep_title_val} • {base}{rt_suffix}" if ep_title_val else f"{base}{rt_suffix}"
+        thumb_name = getattr(ep_obj, "thumbnail_filename", None) or f"tv_thumb_{ep_obj.id}.jpg"
+        thumb_exists = os.path.exists(os.path.join(metadata_dir, thumb_name))
+
+        episodes_template.append({
+            "id": ep_obj.id,
+            "title": ep_obj.title,
+            "poster_filename": ep_obj.poster_filename,
+            "season_poster_filename": ep_obj.season_poster_filename,
+            "file_path": ep_obj.file_path,
+            "season_episode": season_episode,
+            "episode_name": ep_title_val,
+            "season": s_num,
+            "episode": ep_num_val,
+            "plot": ep_obj.episode_plot or "",
+            "play_url": f"/play/tv/{ep_obj.id}",
+            "thumbnail_filename": thumb_name if thumb_exists else None,
+        })
+
+    return episodes_template, sorted(list(seasons))
+
+
 @app.get("/series/{title}", response_class=HTMLResponse)
 def series_view(
     request: Request,
@@ -4595,83 +5224,9 @@ def series_view(
         shows = session.exec(select(TVShow).where(TVShow.title == title)).all()
         if not shows:
             raise HTTPException(status_code=404, detail="Series not found")
-        
-        # Non-blocking background enrichment of missing logo, cast photos, season posters, episode titles, and episode descriptions
-        needs_tv_enrichment = (
-            not shows[0].logo_filename or
-            not shows[0].cast or
-            shows[0].cast == "[]" or
-            '"profile_filename": null' in (shows[0].cast or '') or
-            any(not e.season_poster_filename or e.episode_plot is None or e.episode_title is None for e in shows)
-        )
-        if needs_tv_enrichment:
-            background_tasks.add_task(async_enrich_tv_show, title)
-            
-        cast_list = []
-        if shows[0].cast and shows[0].cast.startswith("["):
-            try:
-                import json
-                cast_list = json.loads(shows[0].cast)
-            except: pass
 
-        def get_s_e(t):
-            m = re.search(r'S(\d+)E(\d+)', t.file_path, re.IGNORECASE)
-            if m: return (int(m.group(1)), int(m.group(2)))
-            return (0, 0)
-
-        episodes_template = []
-        seasons = set()
-        for ep_obj in sorted(shows, key=get_s_e):
-            ep_dict = {
-                "id": ep_obj.id,
-                "title": ep_obj.title,
-                "poster_filename": ep_obj.poster_filename,
-                "season_poster_filename": ep_obj.season_poster_filename,
-                "file_path": ep_obj.file_path,
-                "season_episode": "",
-                "episode_name": "",
-                "season": 0,
-                "episode": ep_obj.episode,
-                "plot": ep_obj.episode_plot or "",
-                "play_url": f"/play/tv/{ep_obj.id}"
-            }
-            m = re.search(r'S(\d+)E(\d+)', ep_dict['file_path'], re.IGNORECASE)
-            if m:
-                s_num = int(m.group(1))
-                e_num = int(m.group(2))
-                ep_dict["season"] = s_num
-                ep_dict["episode"] = ep_obj.episode or e_num
-                seasons.add(s_num)
-                base = f"Episode {e_num}"
-            else:
-                ep_dict["season"] = ep_obj.season or 0
-                ep_dict["episode"] = ep_obj.episode or 1
-                seasons.add(ep_dict["season"])
-                base = f"Episode {ep_dict['episode']}" if ep_dict.get("episode") else "Special"
-            
-            rt_str = get_runtime_str(ep_obj, session)
-            rt_suffix = f" • {rt_str}" if rt_str else ""
-            
-            ep_title_val = (getattr(ep_obj, "episode_title", None) or "").strip()
-            if not ep_title_val:
-                filename = os.path.splitext(os.path.basename(ep_dict['file_path']))[0]
-                name_match = re.search(r'S\d+E\d+[ \-]*(.+)', filename, re.IGNORECASE)
-                if name_match and name_match.group(1).strip():
-                    ep_title_val = name_match.group(1).strip()
-
-            if ep_title_val:
-                ep_dict['episode_name'] = ep_title_val
-                ep_dict['season_episode'] = f"{ep_dict['episode_name']} • {base}{rt_suffix}"
-            else:
-                ep_dict['season_episode'] = f"{base}{rt_suffix}"
-                
-            thumb_name = getattr(ep_obj, "thumbnail_filename", None) or f"tv_thumb_{ep_obj.id}.jpg"
-            metadata_dir = METADATA_DIR if os.path.exists(METADATA_DIR) else "config/metadata"
-            thumb_exists = os.path.exists(os.path.join(metadata_dir, thumb_name))
-            ep_dict["thumbnail_filename"] = thumb_name if thumb_exists else None
-            episodes_template.append(ep_dict)
-
-        sorted_seasons = sorted(list(seasons))
+        cast_list = _parse_cast_json(shows[0].cast)
+        episodes_template, sorted_seasons = _build_series_episodes_template(shows)
         sorted_shows = sorted(shows, key=get_tv_episode_sort_key)
 
         cached_s = {
@@ -4692,6 +5247,9 @@ def series_view(
 
     if rating_level > 0 and not is_rating_allowed(cached_s["content_rating"], rating_level):
         raise HTTPException(status_code=403, detail="Not appropriate for current profile rating level")
+
+    has_tmdb = bool(_get_tmdb_api_key(session))
+    needs_text_meta, needs_image_meta = _get_series_stage_flags(shows, has_tmdb, title.strip().lower())
 
     series_ep_ids = [e.id for e in shows]
     hist_q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id.in_(series_ep_ids)).where(WatchHistory.media_type == 'tv')
@@ -4809,8 +5367,415 @@ def series_view(
         "title": title, "episodes": episodes, "seasons": sorted_seasons, "series": selected_episode, "cast_list": cast_list,
         "has_progress": has_progress, "in_watchlist": in_watchlist, "resume_link": resume_link, "selected_ep_id": selected_episode.id,
         "selected_ep_dict": selected_ep_dict, "is_series_watched": is_series_watched,
-        "related_shows": related_shows, "watched_tv_titles": watched_tv_titles, "user_watchlist_tv": user_watchlist_tv
+        "related_shows": related_shows, "watched_tv_titles": watched_tv_titles, "user_watchlist_tv": user_watchlist_tv,
+        "needs_text_meta": needs_text_meta, "needs_image_meta": needs_image_meta
     })
+
+
+def _extract_tv_tmdb_id(eps: list[TVShow]) -> Optional[int]:
+    for e in eps:
+        for fn in (e.poster_filename, e.backdrop_filename, e.logo_filename):
+            if fn:
+                mm = re.search(r'tv_(\d+)_', fn)
+                if mm:
+                    return int(mm.group(1))
+    return None
+
+
+@app.get("/api/series/{title}/metadata/text")
+async def api_series_metadata_text(
+    title: str,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not current_user.tv_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    rating_level = get_profile_rating_level(current_user, current_profile)
+    title_key = title.strip().lower()
+
+    async with _get_tv_meta_lock(title_key):
+        def _load_snap():
+            with Session(engine) as session:
+                eps = session.exec(select(TVShow).where(TVShow.title == title)).all()
+                if not eps:
+                    return None
+                rep = eps[0]
+                if rating_level > 0 and not is_rating_allowed(rep.content_rating, rating_level):
+                    return {"forbidden": True}
+                tmdb_key = _get_tmdb_api_key(session)
+                tmdb_id = _extract_tv_tmdb_id(eps)
+
+                season_state = {}
+                for e in eps:
+                    s_val, _, _ = _extract_ep_season_episode(e.file_path, e.season, e.episode)
+                    st = season_state.setdefault(s_val, {"has_sp": False, "needs_ep_meta": False})
+                    if e.season_poster_filename:
+                        st["has_sp"] = True
+                    if e.episode_plot is None or e.episode_title is None:
+                        st["needs_ep_meta"] = True
+
+                needs_show_core = not rep.plot or rep.rating is None or not rep.year
+                needs_show_details = (
+                    not rep.cast or rep.cast == "[]" or '"id":' not in (rep.cast or '') or
+                    not rep.director or not rep.content_rating or not rep.genres
+                )
+                needs_ep_meta = any(st["needs_ep_meta"] for st in season_state.values())
+
+                return {
+                    "forbidden": False,
+                    "tmdb_key": tmdb_key,
+                    "tmdb_id": tmdb_id,
+                    "rep_year": rep.year,
+                    "rep_plot": rep.plot,
+                    "rep_rating": rep.rating,
+                    "rep_genres": rep.genres,
+                    "rep_content_rating": rep.content_rating,
+                    "rep_director": rep.director,
+                    "rep_cast": rep.cast,
+                    "rep_poster": rep.poster_filename,
+                    "rep_backdrop": rep.backdrop_filename,
+                    "rep_logo": rep.logo_filename,
+                    "season_state": season_state,
+                    "needs_tmdb_text": bool(tmdb_key) and (needs_show_core or needs_show_details or needs_ep_meta),
+                    "needs_show_core": needs_show_core,
+                    "needs_show_details": needs_show_details,
+                }
+
+        snap = await asyncio.to_thread(_load_snap)
+        if snap is None:
+            raise HTTPException(status_code=404, detail="Series not found")
+        if snap.get("forbidden"):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        if snap["needs_tmdb_text"] and httpx is not None:
+            tmdb_key = snap["tmdb_key"]
+            tmdb_id = snap["tmdb_id"]
+            async with httpx.AsyncClient(timeout=10.0) as raw_client:
+                client = SafeHTTPClient(raw_client)
+                if not tmdb_id:
+                    params = {"query": title, "api_key": tmdb_key}
+                    raw_yr = (snap["rep_year"] or "")[:4]
+                    if raw_yr.isdigit():
+                        params["first_air_date_year"] = raw_yr
+                    s_res = await client.get("https://api.themoviedb.org/3/search/tv", params=params)
+                    if s_res.status_code == 200:
+                        results = s_res.json().get("results") or []
+                        if results:
+                            tmdb_id = results[0].get("id")
+
+                if not tmdb_id:
+                    def _mark_unmatched():
+                        with Session(engine) as session:
+                            for e in session.exec(select(TVShow).where(TVShow.title == title)).all():
+                                if not e.logo_filename:
+                                    e.logo_filename = "none"
+                                if e.episode_title is None:
+                                    e.episode_title = ""
+                                if e.episode_plot is None:
+                                    e.episode_plot = ""
+                                session.add(e)
+                            session.commit()
+                    await asyncio.to_thread(_mark_unmatched)
+                else:
+                    show_plot = snap["rep_plot"]
+                    show_rating = snap["rep_rating"]
+                    show_year = snap["rep_year"]
+                    poster_path = None
+                    backdrop_path = None
+                    if snap["needs_show_core"] or not snap["rep_poster"] or not snap["rep_backdrop"]:
+                        tv_res = await client.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}", params={"api_key": tmdb_key})
+                        if tv_res.status_code == 200:
+                            td = tv_res.json()
+                            if not show_plot:
+                                show_plot = td.get("overview")
+                            if show_rating is None:
+                                show_rating = td.get("vote_average")
+                            if not show_year:
+                                show_year = (td.get("first_air_date") or "")[:4]
+                            poster_path = td.get("poster_path")
+                            backdrop_path = td.get("backdrop_path")
+
+                    cast_items = None
+                    dir_str = content_rating = genres_str = None
+                    logo_path = None
+                    if snap["needs_show_details"] or not snap["rep_logo"]:
+                        cast_items, dir_str, content_rating, genres_str, _, _, _, img_paths = (
+                            await async_fetch_text_details(client, tmdb_id, "tv", tmdb_key)
+                        )
+                        logo_path = img_paths.get("logo")
+
+                    season_poster_paths = {}
+                    episode_titles = {}
+                    episode_plots = {}
+                    checked_seasons = set()
+
+                    async def _fetch_season(s_num: int):
+                        try:
+                            s_res = await client.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s_num}", params={"api_key": tmdb_key})
+                            if s_res.status_code == 200:
+                                s_data = s_res.json()
+                                if s_data.get("poster_path"):
+                                    season_poster_paths[s_num] = s_data["poster_path"]
+                                for ep_item in s_data.get("episodes") or []:
+                                    ep_num = ep_item.get("episode_number")
+                                    if ep_num is not None:
+                                        episode_titles[(s_num, int(ep_num))] = (ep_item.get("name") or "").strip()
+                                        episode_plots[(s_num, int(ep_num))] = (ep_item.get("overview") or "").strip()
+                                checked_seasons.add(s_num)
+                        except Exception:
+                            pass
+
+                    seasons_to_fetch = [s_num for s_num, st in snap["season_state"].items() if st["needs_ep_meta"] or not st["has_sp"]]
+                    if seasons_to_fetch:
+                        await asyncio.gather(*(_fetch_season(s_num) for s_num in seasons_to_fetch))
+
+                    _PENDING_TV_IMG_META[title_key] = {
+                        "tmdb_id": tmdb_id,
+                        "poster_path": poster_path,
+                        "backdrop_path": backdrop_path,
+                        "logo_path": logo_path,
+                        "cast_items": cast_items,
+                        "season_poster_paths": season_poster_paths,
+                    }
+
+                    def _save_tv_text():
+                        with Session(engine) as session:
+                            eps = session.exec(select(TVShow).where(TVShow.title == title)).all()
+                            for e in eps:
+                                if show_plot and not e.plot:
+                                    e.plot = show_plot
+                                if show_rating is not None and e.rating is None:
+                                    e.rating = show_rating
+                                if show_year and not e.year:
+                                    e.year = show_year
+                                if dir_str and not e.director:
+                                    e.director = dir_str
+                                if content_rating and not e.content_rating:
+                                    e.content_rating = content_rating
+                                if genres_str and not e.genres:
+                                    e.genres = genres_str
+                                if cast_items and (
+                                    not e.cast or e.cast == "[]" or '"id":' not in (e.cast or '') or
+                                    len(cast_items) > len(_parse_cast_json(e.cast))
+                                ):
+                                    e.cast = _merge_cast_items(e.cast, cast_items)
+
+                                s_num, e_num, _ = _extract_ep_season_episode(e.file_path, e.season, e.episode)
+                                if (s_num, e_num) in episode_titles and e.episode_title is None:
+                                    e.episode_title = episode_titles[(s_num, e_num)]
+                                elif s_num in checked_seasons and e.episode_title is None:
+                                    e.episode_title = ""
+                                if (s_num, e_num) in episode_plots and e.episode_plot is None:
+                                    e.episode_plot = episode_plots[(s_num, e_num)]
+                                elif s_num in checked_seasons and e.episode_plot is None:
+                                    e.episode_plot = ""
+                                session.add(e)
+                            session.commit()
+
+                    await asyncio.to_thread(_save_tv_text)
+
+            invalidate_series_cache(title)
+
+        def _build_text_response():
+            with Session(engine) as session:
+                eps = session.exec(select(TVShow).where(TVShow.title == title)).all()
+                if not eps:
+                    return None
+                rep = eps[0]
+                episodes_tpl, _ = _build_series_episodes_template(eps)
+                has_tmdb = bool(_get_tmdb_api_key(session))
+                _, needs_images = _get_series_stage_flags(eps, has_tmdb, title_key)
+                return {
+                    "show": {
+                        "title": title,
+                        "plot": rep.plot or "",
+                        "rating": rep.rating,
+                        "year": rep.year or "",
+                        "genres": rep.genres or "",
+                        "content_rating": rep.content_rating or "",
+                        "director": rep.director or "",
+                        "cast_list": _parse_cast_json(rep.cast),
+                    },
+                    "episodes": [
+                        {
+                            "id": ep_d["id"],
+                            "season": ep_d["season"],
+                            "episode": ep_d["episode"],
+                            "episode_name": ep_d["episode_name"],
+                            "season_episode": ep_d["season_episode"],
+                            "plot": ep_d["plot"],
+                        }
+                        for ep_d in episodes_tpl
+                    ],
+                    "needs_images": needs_images,
+                }
+
+        resp = await asyncio.to_thread(_build_text_response)
+        if resp is None:
+            raise HTTPException(status_code=404, detail="Series not found")
+        return resp
+
+
+@app.get("/api/series/{title}/metadata/images")
+async def api_series_metadata_images(
+    title: str,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not current_user.tv_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    rating_level = get_profile_rating_level(current_user, current_profile)
+    title_key = title.strip().lower()
+
+    async with _get_tv_meta_lock(title_key):
+        def _load_img_snap():
+            with Session(engine) as session:
+                eps = session.exec(select(TVShow).where(TVShow.title == title)).all()
+                if not eps:
+                    return None
+                rep = eps[0]
+                if rating_level > 0 and not is_rating_allowed(rep.content_rating, rating_level):
+                    return {"forbidden": True}
+
+                missing_seasons = set()
+                for e in eps:
+                    if not e.season_poster_filename:
+                        s_val, _, _ = _extract_ep_season_episode(e.file_path, e.season, e.episode)
+                        missing_seasons.add(s_val)
+
+                return {
+                    "forbidden": False,
+                    "tmdb_key": _get_tmdb_api_key(session),
+                    "tmdb_id": _extract_tv_tmdb_id(eps),
+                    "rep_year": rep.year,
+                    "poster_filename": rep.poster_filename,
+                    "backdrop_filename": rep.backdrop_filename,
+                    "logo_filename": rep.logo_filename,
+                    "cast_list": _parse_cast_json(rep.cast),
+                    "missing_seasons": sorted(list(missing_seasons)),
+                }
+
+        snap = await asyncio.to_thread(_load_img_snap)
+        if snap is None:
+            raise HTTPException(status_code=404, detail="Series not found")
+        if snap.get("forbidden"):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        tmdb_key = snap["tmdb_key"]
+        season_posters: dict[int, str] = {}
+        if tmdb_key and httpx is not None:
+            pending = _PENDING_TV_IMG_META.pop(title_key, None) or {}
+            tmdb_id = snap["tmdb_id"] or pending.get("tmdb_id")
+            async with httpx.AsyncClient(timeout=10.0) as raw_client:
+                client = SafeHTTPClient(raw_client)
+                if not tmdb_id:
+                    params = {"query": title, "api_key": tmdb_key}
+                    raw_yr = (snap["rep_year"] or "")[:4]
+                    if raw_yr.isdigit():
+                        params["first_air_date_year"] = raw_yr
+                    s_res = await client.get("https://api.themoviedb.org/3/search/tv", params=params)
+                    if s_res.status_code == 200:
+                        results = s_res.json().get("results") or []
+                        if results:
+                            tmdb_id = results[0].get("id")
+
+                if tmdb_id:
+                    poster_path = pending.get("poster_path")
+                    backdrop_path = pending.get("backdrop_path")
+                    if (not snap["poster_filename"] and not poster_path) or (not snap["backdrop_filename"] and not backdrop_path):
+                        tv_res = await client.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}", params={"api_key": tmdb_key})
+                        if tv_res.status_code == 200:
+                            td = tv_res.json()
+                            poster_path = poster_path or td.get("poster_path")
+                            backdrop_path = backdrop_path or td.get("backdrop_path")
+
+                    cast_items = pending.get("cast_items")
+                    logo_path = pending.get("logo_path")
+                    if cast_items is None or (not snap["logo_filename"] and "logo_path" not in pending):
+                        c_items, _, _, _, _, _, _, img_paths = await async_fetch_text_details(client, tmdb_id, "tv", tmdb_key)
+                        if cast_items is None:
+                            cast_items = c_items
+                        if not logo_path:
+                            logo_path = img_paths.get("logo")
+
+                    season_poster_paths = dict(pending.get("season_poster_paths") or {})
+                    seasons_needing_lookup = [s_num for s_num in snap["missing_seasons"] if s_num not in season_poster_paths]
+                    if seasons_needing_lookup:
+                        async def _fetch_sp_path(s_num: int):
+                            try:
+                                sr = await client.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s_num}", params={"api_key": tmdb_key})
+                                if sr.status_code == 200:
+                                    sp = sr.json().get("poster_path")
+                                    if sp:
+                                        season_poster_paths[s_num] = sp
+                            except Exception:
+                                pass
+                        await asyncio.gather(*(_fetch_sp_path(s_num) for s_num in seasons_needing_lookup))
+
+                    async def _maybe_dl(path, prefix, tid, kind):
+                        if not path or tid is None:
+                            return None
+                        return await async_download_image(client, path, prefix, tid, kind)
+
+                    async def _dl_season_poster(s_num: int, path: str):
+                        fn = await _maybe_dl(path, f"tv_s{s_num}", tmdb_id, "poster")
+                        if fn:
+                            season_posters[s_num] = fn
+
+                    poster_task = _maybe_dl(poster_path, "tv", tmdb_id, "poster") if not snap["poster_filename"] else asyncio.sleep(0, result=None)
+                    backdrop_task = _maybe_dl(backdrop_path, "tv", tmdb_id, "backdrop") if not snap["backdrop_filename"] else asyncio.sleep(0, result=None)
+                    logo_task = _maybe_dl(logo_path, "tv", tmdb_id, "logo") if (not snap["logo_filename"] or snap["logo_filename"] == "none") else asyncio.sleep(0, result=None)
+                    cast_task = _download_cast_photos_concurrently(client, snap["cast_list"], cast_items or [])
+                    sp_tasks = [
+                        _dl_season_poster(s_num, season_poster_paths[s_num])
+                        for s_num in snap["missing_seasons"]
+                        if season_poster_paths.get(s_num)
+                    ]
+
+                    results = await asyncio.gather(poster_task, backdrop_task, logo_task, cast_task, *sp_tasks)
+                    new_poster, new_backdrop, new_logo, updated_cast = results[0], results[1], results[2], results[3]
+
+                    def _save_tv_images():
+                        with Session(engine) as session:
+                            eps = session.exec(select(TVShow).where(TVShow.title == title)).all()
+                            cast_json = json.dumps(updated_cast) if updated_cast else None
+                            for e in eps:
+                                if new_poster and not e.poster_filename:
+                                    e.poster_filename = new_poster
+                                if new_backdrop and not e.backdrop_filename:
+                                    e.backdrop_filename = new_backdrop
+                                if new_logo and (not e.logo_filename or e.logo_filename == "none"):
+                                    e.logo_filename = new_logo
+                                elif not e.logo_filename:
+                                    e.logo_filename = "none"
+                                if cast_json:
+                                    e.cast = cast_json
+                                s_num, _, _ = _extract_ep_season_episode(e.file_path, e.season, e.episode)
+                                if s_num in season_posters and not e.season_poster_filename:
+                                    e.season_poster_filename = season_posters[s_num]
+                                session.add(e)
+                            session.commit()
+                            if eps:
+                                snap["poster_filename"] = eps[0].poster_filename
+                                snap["backdrop_filename"] = eps[0].backdrop_filename
+                                snap["logo_filename"] = eps[0].logo_filename
+                                snap["cast_list"] = updated_cast
+
+                    await asyncio.to_thread(_save_tv_images)
+            _checked_tv_images.add(title_key)
+            invalidate_series_cache(title)
+
+        return {
+            "poster_filename": snap.get("poster_filename"),
+            "backdrop_filename": snap.get("backdrop_filename"),
+            "logo_filename": snap.get("logo_filename"),
+            "cast_list": snap.get("cast_list", []),
+            "season_posters": season_posters,
+        }
 
 def format_seconds_to_duration(seconds: float) -> str:
     if not seconds:
@@ -8643,6 +9608,8 @@ async def fix_media_match(
 
             session.add(movie)
             session.commit()
+            _PENDING_MOVIE_IMG_META.pop(movie.id, None)
+            _checked_movie_images.discard(movie.id)
             invalidate_movie_cache(movie.id)
             return {"success": True, "title": movie.title}
 
@@ -8718,6 +9685,10 @@ async def fix_media_match(
                 session.add(ep)
 
             session.commit()
+            _PENDING_TV_IMG_META.pop(old_title.strip().lower(), None)
+            _PENDING_TV_IMG_META.pop(new_title.strip().lower(), None)
+            _checked_tv_images.discard(old_title.strip().lower())
+            _checked_tv_images.discard(new_title.strip().lower())
             invalidate_series_cache()
             return {"success": True, "title": new_title}
         else:
@@ -9005,8 +9976,55 @@ async def browse_directory(
     except:
         return {"current": path.replace("\\", "/"), "directories": []}
 
+def _get_users_and_invites_context(request: Request, session: Session) -> dict:
+    """Return serialized users, pending invites, host URL, and mounted volume flags for settings UI."""
+    invites = session.exec(select(InviteCode).order_by(InviteCode.id.desc())).all()
+    users = session.exec(select(User).order_by(User.id)).all()
+    _, _, mounted_volumes = _get_volume_context(session)
+    host_url = str(request.base_url).rstrip("/")
+    remote_url_config = session.exec(select(SystemConfig).where(SystemConfig.key == "remote_access_url")).first()
+    if remote_url_config and remote_url_config.value:
+        host_url = remote_url_config.value.rstrip("/")
+
+    return {
+        "users": [
+            {
+                "id": u.id,
+                "username": u.username,
+                "is_admin": bool(u.is_admin),
+                "movies_access": bool(u.movies_access),
+                "tv_access": bool(u.tv_access),
+                "photos_access": bool(u.photos_access),
+                "music_access": bool(u.music_access),
+                "downloads_access": bool(u.downloads_access),
+                "watch_together_access": bool(u.watch_together_access),
+                "can_manage_profiles": bool(u.can_manage_profiles),
+            }
+            for u in users
+        ],
+        "invites": [
+            {
+                "id": inv.id,
+                "code": inv.code,
+                "expires_at": inv.expires_at.strftime("%m/%d/%y") if inv.expires_at else "",
+                "movies_access": bool(inv.movies_access),
+                "tv_access": bool(inv.tv_access),
+                "photos_access": bool(inv.photos_access),
+                "music_access": bool(inv.music_access),
+                "downloads_access": bool(inv.downloads_access),
+                "watch_together_access": bool(inv.watch_together_access),
+                "can_manage_profiles": bool(inv.can_manage_profiles),
+            }
+            for inv in invites
+        ],
+        "host_url": host_url,
+        "mounted_volumes": mounted_volumes,
+    }
+
+
 @app.post("/settings/generate_invite")
 async def generate_invite(
+    request: Request,
     remote_url: str = Form(None),
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
@@ -9024,10 +10042,13 @@ async def generate_invite(
             
     session.add(InviteCode())
     session.commit()
+    if _wants_json(request):
+        return JSONResponse({"status": "ok", **_get_users_and_invites_context(request, session)})
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/delete_invite/{invite_id}")
 async def delete_invite(
+    request: Request,
     invite_id: int,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
@@ -9038,6 +10059,8 @@ async def delete_invite(
     if invite:
         session.delete(invite)
         session.commit()
+    if _wants_json(request):
+        return JSONResponse({"status": "ok", "deleted_invite_id": invite_id, **_get_users_and_invites_context(request, session)})
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/update_invite/{invite_id}")
@@ -9122,6 +10145,7 @@ async def update_user(
 
 @app.post("/settings/delete_user/{user_id}")
 async def delete_user(
+    request: Request,
     user_id: int,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
@@ -9136,6 +10160,8 @@ async def delete_user(
         for i in session.exec(select(WatchInvite).where((WatchInvite.sender_id == user_id) | (WatchInvite.invited_user_id == user_id))).all(): session.delete(i)
         session.delete(user)
         session.commit()
+    if _wants_json(request):
+        return JSONResponse({"status": "ok", "deleted_user_id": user_id, **_get_users_and_invites_context(request, session)})
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.get("/ping")

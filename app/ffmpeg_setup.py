@@ -561,6 +561,21 @@ def get_video_transcode_args(
 
 _media_probe_cache: dict[str, tuple[float, dict]] = {}
 
+def get_cached_media_probe(file_path: str) -> Optional[dict]:
+    """Returns cached media stream probe if already populated and file mtime matches, without invoking ffprobe."""
+    if not file_path:
+        return None
+    entry = _media_probe_cache.get(file_path)
+    if not entry:
+        return None
+    try:
+        mtime = os.path.getmtime(file_path)
+        if entry[0] == mtime:
+            return entry[1]
+    except Exception:
+        pass
+    return None
+
 def probe_media_streams(file_path: str) -> dict:
     """
     Probes video, audio, and subtitle streams of a media file using ffprobe.
