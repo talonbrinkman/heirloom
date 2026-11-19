@@ -752,6 +752,19 @@
             });
         }, true);
 
+        const LOOM_SEARCH_ENABLED = {{ 'true' if loom_enabled else 'false' }};
+        let _loomSearchCatalog = [];
+        let _loomSearchInFlight = false;
+
+        function _escapeLoomHtml(str) {
+            return String(str ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         let globalSearchTimeout = null;
         async function handleGlobalSearch() {
             const query = document.getElementById('searchInput').value;
@@ -768,10 +781,11 @@
                     const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
                     const data = await res.json();
 
+                    let html = '';
                     if (data.items.length === 0) {
-                        resultsContainer.innerHTML = '<div class="empty-state">No results found</div>';
+                        html = '<div class="empty-state">No results found</div>';
                     } else {
-                        resultsContainer.innerHTML = data.items.map(item => {
+                        html = data.items.map(item => {
                             let iconName = 'film';
                             let typeLabel = 'Movie';
                             if (item.type === 'photo') { iconName = 'image'; typeLabel = 'Photo'; }
@@ -788,13 +802,200 @@
                             </a>
                             `;
                         }).join('');
-                        lucide.createIcons();
                     }
+
+                    if (LOOM_SEARCH_ENABLED && query.trim().length >= 2) {
+                        const btnDisabled = _loomSearchInFlight ? 'disabled' : '';
+                        const btnLabel = _loomSearchInFlight
+                            ? '<i data-lucide="loader" class="spinner"></i> Searching The Loom...'
+                            : '<i data-lucide="globe"></i> Search The Loom';
+                        html += `
+                        <div id="loomSearchFooter" class="loom-search-footer">
+                            <button type="button" id="loomSearchBtn" class="btn btn-secondary btn-sm w-full" onclick="searchTheLoom(event)" ${btnDisabled}>
+                                ${btnLabel}
+                            </button>
+                            <div id="loomSearchResults" class="loom-search-results hidden"></div>
+                        </div>`;
+                    }
+
+                    resultsContainer.innerHTML = html;
+                    lucide.createIcons();
                     resultsContainer.style.display = 'flex';
                 } catch (err) {
                     console.error(err);
                 }
             }, 300);
+        }
+
+        function _formatLoomGB(bytes) {
+            const gb = Number(bytes || 0) / (1024 * 1024 * 1024);
+            return `${gb.toFixed(2)} GB`;
+        }
+
+        function _formatLoomDetailsLine(resolution, bytes, hops, peerName) {
+            const resText = _escapeLoomHtml(resolution || 'Unknown');
+            const sizeText = _formatLoomGB(bytes);
+            const h = Number(hops || 0);
+            const hopText = `${h} hop${h === 1 ? '' : 's'}`;
+            const peerText = _escapeLoomHtml(peerName || 'Anonymous');
+            return `${resText} • ${sizeText} • ${hopText} • ${peerText}`;
+        }
+
+        function _renderLoomResultCard(idx, title, subtitle, detailsLine) {
+            return `
+                <div class="loom-search-item">
+                    <div class="loom-search-item-info">
+                        <strong>${_escapeLoomHtml(title)}</strong>
+                        ${subtitle ? `<small>${_escapeLoomHtml(subtitle)}</small>` : ''}
+                        <small>${detailsLine}</small>
+                    </div>
+                    <div class="loom-search-item-actions">
+                        <button type="button" class="btn btn-primary btn-sm" onclick="queueLoomSearchEntry(${idx}, this, event)">
+                            <i data-lucide="download"></i> Download
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+
+        async function searchTheLoom(event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            const query = (document.getElementById('searchInput')?.value || '').trim();
+            const btn = document.getElementById('loomSearchBtn');
+            const out = document.getElementById('loomSearchResults');
+            if (!query || query.length < 2 || !btn || !out || btn.disabled || _loomSearchInFlight) return;
+
+            _loomSearchInFlight = true;
+            btn.disabled = true;
+            btn.innerHTML = '<i data-lucide="loader" class="spinner"></i> Searching The Loom...';
+            out.classList.add('hidden');
+            lucide.createIcons();
+
+            try {
+                const res = await fetch('/api/loom/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query })
+                });
+                const data = await res.json();
+                const latestOut = document.getElementById('loomSearchResults');
+                if (!latestOut) return;
+                if (!res.ok) {
+                    latestOut.innerHTML = `<div class="empty-state">${_escapeLoomHtml(data.error || 'Loom search failed.')}</div>`;
+                    latestOut.classList.remove('hidden');
+                    return;
+                }
+
+                _loomSearchCatalog = [];
+                const rows = [];
+
+                for (const m of (data.movies || [])) {
+                    const idx = _loomSearchCatalog.push({ peer_id: m.peer_id, items: [m] }) - 1;
+                    const titleText = `${m.title}${m.year ? ` (${m.year})` : ''}`;
+                    const details = _formatLoomDetailsLine(m.quality_label, m.file_size, m.hops, m.peer_name);
+                    rows.push(_renderLoomResultCard(idx, titleText, '', details));
+                }
+
+                // Group deduplicated TV episodes by series title (each episode keeps its own best peer_id)
+                const tvGroups = new Map();
+                for (const ep of (data.tv || [])) {
+                    const key = (ep.series_title || ep.title || '').toLowerCase();
+                    if (!tvGroups.has(key)) tvGroups.set(key, []);
+                    tvGroups.get(key).push(ep);
+                }
+                for (const eps of tvGroups.values()) {
+                    const first = eps[0];
+                    const idx = _loomSearchCatalog.push({ peer_id: first.peer_id, items: eps }) - 1;
+                    const totalBytes = eps.reduce((acc, e) => acc + Number(e.file_size || 0), 0);
+                    const seasons = new Set(eps.map(e => e.season).filter(s => s != null));
+                    let titleText = first.series_title || first.title;
+                    let subtitleText = `${eps.length} episode${eps.length === 1 ? '' : 's'}`;
+                    if (eps.length === 1 && first.season != null && first.episode != null) {
+                        const sStr = String(first.season).padStart(2, '0');
+                        const eStr = String(first.episode).padStart(2, '0');
+                        titleText = `${titleText} S${sStr}E${eStr}`;
+                        subtitleText = first.title || '';
+                    } else if (seasons.size === 1) {
+                        const onlySeason = Array.from(seasons)[0];
+                        titleText = `${titleText} (Season ${onlySeason})`;
+                    }
+                    const details = _formatLoomDetailsLine(first.quality_label, totalBytes, first.hops, first.peer_name);
+                    rows.push(_renderLoomResultCard(idx, titleText, subtitleText, details));
+                }
+
+                for (const tr of (data.music || [])) {
+                    const idx = _loomSearchCatalog.push({ peer_id: tr.peer_id, items: [tr] }) - 1;
+                    const subtitleText = [tr.artist_name, tr.album_title].filter(Boolean).join(' • ');
+                    const resLabel = (tr.format || 'Audio').toUpperCase();
+                    const details = _formatLoomDetailsLine(resLabel, tr.file_size, tr.hops, tr.peer_name);
+                    rows.push(_renderLoomResultCard(idx, tr.title, subtitleText, details));
+                }
+
+                for (const ph of (data.photos || [])) {
+                    const idx = _loomSearchCatalog.push({ peer_id: ph.peer_id, items: [ph] }) - 1;
+                    const details = _formatLoomDetailsLine('Photo', ph.file_size, ph.hops, ph.peer_name);
+                    rows.push(_renderLoomResultCard(idx, ph.title, ph.album || '', details));
+                }
+
+                if (rows.length === 0) {
+                    const msg = data.peers_queried === 0
+                        ? 'No peers with Receive turned on.'
+                        : 'No matches found on The Loom.';
+                    latestOut.innerHTML = `<div class="empty-state">${msg}</div>`;
+                } else {
+                    latestOut.innerHTML = rows.join('');
+                }
+                latestOut.classList.remove('hidden');
+            } catch (err) {
+                console.error('Loom search error:', err);
+                const latestOut = document.getElementById('loomSearchResults');
+                if (latestOut) {
+                    latestOut.innerHTML = '<div class="empty-state">Error searching The Loom.</div>';
+                    latestOut.classList.remove('hidden');
+                }
+            } finally {
+                _loomSearchInFlight = false;
+                const latestBtn = document.getElementById('loomSearchBtn');
+                if (latestBtn) {
+                    latestBtn.disabled = false;
+                    latestBtn.innerHTML = '<i data-lucide="globe"></i> Search The Loom';
+                }
+                lucide.createIcons();
+            }
+        }
+
+        async function queueLoomSearchEntry(idx, btn, event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            const entry = _loomSearchCatalog[idx];
+            if (!entry || !btn || btn.disabled) return;
+
+            btn.disabled = true;
+            btn.innerHTML = '<i data-lucide="loader" class="spinner"></i> Queueing...';
+            lucide.createIcons();
+            try {
+                const res = await fetch('/api/loom/sync/queue', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ peer_id: entry.peer_id, items: entry.items })
+                });
+                if (res.ok) {
+                    btn.innerHTML = '<i data-lucide="check"></i> Queued';
+                    if (typeof loadInbox === 'function') loadInbox();
+                } else {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i data-lucide="download"></i> Retry';
+                }
+            } catch (err) {
+                btn.disabled = false;
+                btn.innerHTML = '<i data-lucide="download"></i> Retry';
+            }
+            lucide.createIcons();
         }
 
         function toggleMobileSearch(e) {
@@ -899,17 +1100,79 @@
     <script>lucide.createIcons();</script>
 
     <script>
+        function _formatInboxDownloadStatus(status) {
+            if (status === 'downloading') return 'Downloading';
+            if (status === 'queued') return 'Queued';
+            if (status === 'paused_stream') return 'Paused (Streaming)';
+            if (status === 'paused_schedule') return 'Paused';
+            if (status === 'paused_cap') return 'Paused';
+            return status || 'Active';
+        }
+
+        function _formatInboxDownloadSpeed(bps) {
+            const val = Number(bps || 0);
+            if (val <= 0) return '';
+            if (val >= 1024 * 1024 * 1024) return `${(val / (1024 * 1024 * 1024)).toFixed(2)} GB/s`;
+            if (val >= 1024 * 1024) return `${(val / (1024 * 1024)).toFixed(1)} MB/s`;
+            return `${Math.max(1, Math.round(val / 1024))} KB/s`;
+        }
+
+        function _renderInboxLoomDownload(j) {
+            let titleText = j.title || 'Untitled';
+            let subtitleText = '';
+            if (j.media_type === 'tv' && j.series_title) {
+                const sStr = j.season != null ? String(j.season).padStart(2, '0') : '';
+                const eStr = j.episode != null ? String(j.episode).padStart(2, '0') : '';
+                titleText = sStr && eStr ? `${j.series_title} S${sStr}E${eStr}` : j.series_title;
+                subtitleText = j.title || '';
+            }
+            const pct = Math.max(0, Math.min(100, Number(j.progress_pct || 0)));
+            const details = _formatLoomDetailsLine(j.quality_label, j.total_bytes || j.bytes_transferred, j.hops || 0, j.peer_name);
+            const speedText = j.status === 'downloading' ? _formatInboxDownloadSpeed(j.speed_bps) : '';
+            const statusText = speedText
+                ? `${_formatInboxDownloadStatus(j.status)} • ${pct.toFixed(0)}% • ${speedText}`
+                : `${_formatInboxDownloadStatus(j.status)} • ${pct.toFixed(0)}%`;
+            return `
+                <div class="inbox-item">
+                    <strong>${_escapeLoomHtml(titleText)}</strong>
+                    ${subtitleText ? `<small>${_escapeLoomHtml(subtitleText)}</small>` : ''}
+                    <small>${details}</small>
+                    <div class="inbox-progress-track">
+                        <div class="inbox-progress-fill" style="width: ${pct}%;"></div>
+                    </div>
+                    <div class="inbox-download-footer">
+                        <small class="m-0">${_escapeLoomHtml(statusText)}</small>
+                        <button type="button" class="btn btn-danger btn-sm" onclick="cancelLoomDownload(${j.id}, event)">Cancel</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        async function cancelLoomDownload(jobId, event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            try {
+                await fetch(`/api/loom/jobs/${jobId}/cancel`, { method: 'POST' });
+                loadInbox();
+            } catch (err) {
+                console.error('Failed to cancel Loom download:', err);
+            }
+        }
+
         async function loadInbox() {
             try {
                 const res = await fetch('/api/inbox');
                 const data = await res.json();
-                const items = data.invites;
+                const items = data.invites || [];
                 const resets = data.reset_requests || [];
+                const loomDownloads = data.loom_downloads || [];
                 const badge = document.getElementById('inboxBadge');
                 const container = document.getElementById('inboxItems');
                 if (!badge || !container) return;
 
-                const totalCount = items.length + resets.length;
+                const totalCount = items.length + resets.length + loomDownloads.length;
                 const mobileBadge = document.getElementById('mobileInboxBadge');
                 const mobileContainer = document.getElementById('mobileInboxItems');
 
@@ -920,6 +1183,7 @@
                         mobileBadge.textContent = totalCount;
                     }
                     let html = '';
+                    html += loomDownloads.map(_renderInboxLoomDownload).join('');
                     html += items.map(inv => `
                     <div class="inbox-item">
                         <div><strong>${inv.sender}</strong> invited you to watch <em>${inv.title}</em></div>

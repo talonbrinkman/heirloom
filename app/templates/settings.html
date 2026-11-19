@@ -106,9 +106,26 @@
                 .replace(/'/g, '&#39;');
         }
 
+        function syncLoomSyncDirDropdown(volumePaths) {
+            const sel = document.getElementById('loomSyncDir');
+            if (!sel) return;
+            const currentVal = sel.value || '/media/loom';
+            const active = (volumePaths || []).filter(vp => vp.exists);
+            let html = active.map(vp =>
+                `<option value="${escapeHtml(vp.path)}" ${vp.path === currentVal ? 'selected' : ''}>${escapeHtml(vp.media_type)}: ${escapeHtml(vp.path)}</option>`
+            ).join('');
+            if (!active.some(vp => vp.path === currentVal) && currentVal) {
+                html += `<option value="${escapeHtml(currentVal)}" selected>${escapeHtml(currentVal)}</option>`;
+            } else if (active.length === 0) {
+                html = '<option value="/media/loom" selected>/media/loom (No active volumes)</option>';
+            }
+            sel.innerHTML = html;
+        }
+
         function renderVolumeList(volumePaths) {
             const list = document.getElementById('volumeList');
             if (!list) return;
+            syncLoomSyncDirDropdown(volumePaths);
             if (!volumePaths || volumePaths.length === 0) {
                 list.innerHTML = '<li>No volume paths configured.</li>';
                 return;
@@ -1266,6 +1283,168 @@
                 </div>
             </form>
         </div>
+
+        <div class="card" id="loomSettingsCard">
+            <div class="card-header flex-wrap gap-10">
+                <div>
+                    <h2 class="m-0">The Loom (Federation)</h2>
+                    <small class="muted">Node ID: <code id="loomNodeId">{{ loom_settings.node_id }}</code></small>
+                </div>
+                <div class="flex flex-wrap gap-10 align-center">
+                    <label class="toggle-pill">
+                        <input type="checkbox" id="loomPauseOnStreams" class="hidden-checkbox" onchange="saveLoomSettings()" {% if loom_settings.pause_on_active_streams %}checked{% endif %}>
+                        <span>Pause During Streaming</span>
+                    </label>
+                    <label class="toggle-pill">
+                        <input type="checkbox" id="loomAllowRelay" class="hidden-checkbox" onchange="saveLoomSettings()" {% if loom_settings.allow_relay %}checked{% endif %}>
+                        <span>Allow Relay</span>
+                    </label>
+                    <label class="toggle-pill">
+                        <input type="checkbox" id="loomEnabledToggle" class="hidden-checkbox" onchange="saveLoomSettings()" {% if loom_settings.enabled %}checked{% endif %}>
+                        <span>Enable The Loom</span>
+                    </label>
+                </div>
+            </div>
+            <p class="hint">
+                Opt-in friend-to-friend library discovery and guarded media sync. Disabled by default; imported peers start with Receive and Share off.
+            </p>
+
+            <div class="settings-grid mb-20">
+                <div>
+                    <label class="field-label" for="loomSyncDir">Sync Directory</label>
+                    <select id="loomSyncDir" class="select-input w-full m-0">
+                        <option value="/media/loom" {% if not loom_settings.sync_dir or loom_settings.sync_dir == '/media/loom' %}selected{% endif %}>Loom: /media/loom</option>
+                        {% set active_paths = volume_paths | selectattr('exists') | list %}
+                        {% set ns = namespace(found=(not loom_settings.sync_dir or loom_settings.sync_dir == '/media/loom')) %}
+                        {% for vp in active_paths %}
+                        {% if vp.path != '/media/loom' %}
+                        {% if vp.path == loom_settings.sync_dir %}{% set ns.found = true %}{% endif %}
+                        <option value="{{ vp.path }}" {% if vp.path == loom_settings.sync_dir %}selected{% endif %}>{{ vp.media_type }}: {{ vp.path }}</option>
+                        {% endif %}
+                        {% endfor %}
+                        {% if not ns.found and loom_settings.sync_dir %}
+                        <option value="{{ loom_settings.sync_dir }}" selected>{{ loom_settings.sync_dir }}</option>
+                        {% endif %}
+                    </select>
+                </div>
+                <div>
+                    <label class="field-label" for="loomUploadBandwidthLimit">Max Upload Bandwidth (KB/s)</label>
+                    <input type="number" min="0" id="loomUploadBandwidthLimit" value="{{ loom_settings.upload_bandwidth_limit_kbps }}" class="w-full m-0">
+                </div>
+                <div>
+                    <label class="field-label" for="loomDownloadBandwidthLimit">Max Download Bandwidth (KB/s)</label>
+                    <input type="number" min="0" id="loomDownloadBandwidthLimit" value="{{ loom_settings.download_bandwidth_limit_kbps }}" class="w-full m-0">
+                </div>
+                <div>
+                    <label class="field-label" for="loomMaxQuality">Max Quality Cap</label>
+                    <select id="loomMaxQuality" class="select-input w-full m-0">
+                        <option value="720p" {% if loom_settings.max_quality == '720p' %}selected{% endif %}>720p</option>
+                        <option value="1080p" {% if loom_settings.max_quality == '1080p' %}selected{% endif %}>1080p</option>
+                        <option value="original" {% if loom_settings.max_quality == 'original' %}selected{% endif %}>Original</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="field-label" for="loomMaxHops">Max Hops</label>
+                    <input type="number" min="1" max="10" id="loomMaxHops" value="{{ loom_settings.max_hops or 1 }}" class="w-full m-0">
+                </div>
+                <div>
+                    <label class="field-label" for="loomMaxConcurrentTransfers">Max Concurrent Transfers</label>
+                    <input type="number" min="1" max="20" id="loomMaxConcurrentTransfers" value="{{ loom_settings.max_concurrent_transfers or 2 }}" class="w-full m-0">
+                </div>
+                <div>
+                    <label class="field-label" for="loomMaxRequestsPerMin">Max Requests / Min</label>
+                    <input type="number" min="1" max="120" id="loomMaxRequestsPerMin" value="{{ loom_settings.max_requests_per_minute or 3 }}" class="w-full m-0">
+                </div>
+            </div>
+
+            <div class="mb-20">
+                <label class="field-label" for="loomAllowedFiletypes">Allowed Filetypes</label>
+                <p class="hint mt-0 mb-10">
+                    Comma-separated media extensions allowed for Loom searches and downloads. Any file outside this list is blocked.
+                </p>
+                <input type="text" id="loomAllowedFiletypes" value="{{ loom_settings.allowed_filetypes }}" placeholder=".mp4, .mkv, .mp3, .jpg, .png" class="w-full m-0">
+            </div>
+
+            <div class="mb-20">
+                <label class="field-label">Searchable Volumes</label>
+                <p class="hint mt-0 mb-10">
+                    Choose which volumes peers can query for specific titles (disabled by default). Peers can only ask if you have a specific item, never list your full library.
+                </p>
+                {% if volume_paths %}
+                <div class="user-permissions-group flex-wrap">
+                    {% for vp in volume_paths %}
+                    <label class="toggle-pill">
+                        <input type="checkbox" class="hidden-checkbox loom-searchable-volume" value="{{ vp.path }}" onchange="saveLoomSettings()" {% if vp.path in (loom_settings.searchable_volumes or []) %}checked{% endif %}>
+                        <span>{{ vp.media_type }}: {{ vp.path }}</span>
+                    </label>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="hint m-0">No media volumes configured yet.</p>
+                {% endif %}
+            </div>
+
+            <div class="flex flex-wrap gap-10 align-center mb-20">
+                <button type="button" class="btn btn-primary" onclick="saveLoomSettings(this)">
+                    <i data-lucide="save"></i> Save
+                </button>
+            </div>
+
+            <div class="mb-20">
+                <div class="flex flex-wrap align-center justify-between gap-10 mb-10">
+                    <strong>Peer Pairing</strong>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="exportLoomBundle(this)">
+                        <i data-lucide="share"></i> Export Peer Bundle
+                    </button>
+                </div>
+                <textarea id="loomExportedBundleBox" rows="3" readonly class="w-full mb-10 hidden" placeholder="Your exported Peer Bundle JSON..." onclick="copyLoomBundleText(this.value, this)"></textarea>
+                <textarea id="loomBundleInput" rows="3" placeholder="Paste a friend's Peer Bundle JSON here to import (starts with Receive and Share off)..." class="w-full mb-10"></textarea>
+                <div class="flex gap-10 align-center">
+                    <input type="text" id="loomImportAlias" placeholder="Optional peer nickname (defaults to Anonymous)" class="m-0 flex-1">
+                    <button type="button" class="btn btn-primary" onclick="importLoomBundle(this)">
+                        <i data-lucide="plus"></i> Import Peer
+                    </button>
+                </div>
+                <div id="loomBundleMsg" class="status-message hidden"></div>
+            </div>
+
+            <ul id="loomPeerList">
+                {% for p in loom_peers %}
+                <li class="list-item user-list-item" data-peer-id="{{ p.id }}">
+                    <div class="user-header-row align-center flex-wrap gap-10">
+                        <div>
+                            <div class="flex align-center gap-10">
+                                <strong>{{ p.name or 'Anonymous' }}</strong>
+                                <span class="code-text badge-unknown" data-peer-status-badge="{{ p.id }}">Unknown</span>
+                            </div>
+                            <div class="share-link">Peer: {{ p.base_url }}</div>
+                            {% if p.local_onion_service_id %}
+                            <div class="share-link">Me: http://{{ p.local_onion_service_id }}.onion</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div class="user-controls-row flex flex-wrap align-center justify-between gap-10">
+                        <div class="flex flex-wrap gap-10 align-center">
+                            <label class="toggle-pill">
+                                <input type="checkbox" class="hidden-checkbox" onchange="toggleLoomPeer({{ p.id }}, {allow_incoming: this.checked}, this)" {% if p.allow_incoming %}checked{% endif %}>
+                                <span>Receive</span>
+                            </label>
+                            <label class="toggle-pill">
+                                <input type="checkbox" class="hidden-checkbox" onchange="toggleLoomPeer({{ p.id }}, {allow_outgoing: this.checked}, this)" {% if p.allow_outgoing %}checked{% endif %}>
+                                <span>Share</span>
+                            </label>
+                        </div>
+                        <div class="flex flex-wrap gap-10 align-center">
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="rotateLoomPeerOnion({{ p.id }}, this)" title="Rotate our .onion address for this peer"><i data-lucide="refresh-cw"></i> Rotate Address</button>
+                            <button type="button" class="btn btn-danger btn-sm" onclick="deleteLoomPeer({{ p.id }}, this)"><i data-lucide="trash-2"></i> Delete</button>
+                        </div>
+                    </div>
+                </li>
+                {% else %}
+                <li>No Loom peers configured yet.</li>
+                {% endfor %}
+            </ul>
+        </div>
         {% endif %}
 
         <div class="card">
@@ -1274,7 +1453,7 @@
             </form>
         </div>
         <div style="text-align: center; color: #888; font-size: 0.8em; margin-top: 10px;">
-            <strong>v1.8.22</strong>
+            <strong>v2.0</strong>
         </div>
     </div>
 
@@ -1301,6 +1480,332 @@
     <script src="/static/lucide.min.js"></script>
     <script>lucide.createIcons();</script>
     {% if is_admin %}
+    <script>
+        function renderLoomPeers(peers) {
+            const list = document.getElementById('loomPeerList');
+            if (!list) return;
+            if (!peers || peers.length === 0) {
+                list.innerHTML = '<li>No Loom peers configured yet.</li>';
+                return;
+            }
+            list.innerHTML = peers.map(p => `
+                <li class="list-item user-list-item" data-peer-id="${escapeHtml(p.id)}">
+                    <div class="user-header-row align-center flex-wrap gap-10">
+                        <div>
+                            <div class="flex align-center gap-10">
+                                <strong>${escapeHtml(p.name || 'Anonymous')}</strong>
+                                <span class="code-text ${p.online === true ? 'badge-active' : (p.online === false ? 'badge-inactive' : 'badge-unknown')}" data-peer-status-badge="${escapeHtml(p.id)}">${p.online === true ? 'Active' : (p.online === false ? 'Inactive' : 'Unknown')}</span>
+                            </div>
+                            <div class="share-link">Peer: ${escapeHtml(p.base_url)}</div>
+                            ${p.local_onion_url ? `<div class="share-link">Me: ${escapeHtml(p.local_onion_url)}</div>` : ''}
+                        </div>
+                    </div>
+                    <div class="user-controls-row flex flex-wrap align-center justify-between gap-10">
+                        <div class="flex flex-wrap gap-10 align-center">
+                            <label class="toggle-pill">
+                                <input type="checkbox" class="hidden-checkbox" onchange="toggleLoomPeer(${p.id}, {allow_incoming: this.checked}, this)" ${p.allow_incoming ? 'checked' : ''}>
+                                <span>Receive</span>
+                            </label>
+                            <label class="toggle-pill">
+                                <input type="checkbox" class="hidden-checkbox" onchange="toggleLoomPeer(${p.id}, {allow_outgoing: this.checked}, this)" ${p.allow_outgoing ? 'checked' : ''}>
+                                <span>Share</span>
+                            </label>
+                        </div>
+                        <div class="flex flex-wrap gap-10 align-center">
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="rotateLoomPeerOnion(${p.id}, this)" title="Rotate our .onion address for this peer"><i data-lucide="refresh-cw"></i> Rotate Address</button>
+                            <button type="button" class="btn btn-danger btn-sm" onclick="deleteLoomPeer(${p.id}, this)"><i data-lucide="trash-2"></i> Delete</button>
+                        </div>
+                    </div>
+                </li>
+            `).join('');
+            if (window.lucide) lucide.createIcons();
+        }
+
+        function setLoomPeerRowLocked(peerId, locked) {
+            const row = document.querySelector(`#loomPeerList li[data-peer-id="${peerId}"]`);
+            if (!row) return;
+            row.querySelectorAll('button, input').forEach(el => {
+                el.disabled = locked;
+            });
+        }
+
+        function setLoomButtonLoading(btn, label) {
+            if (!btn) return () => {};
+            const origHTML = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = `<i data-lucide="loader" class="spinner"></i> ${escapeHtml(label)}`;
+            if (window.lucide) lucide.createIcons();
+            return () => {
+                btn.disabled = false;
+                btn.innerHTML = origHTML;
+                if (window.lucide) lucide.createIcons();
+            };
+        }
+
+        async function saveLoomSettings(btn) {
+            if (btn && btn.disabled) return;
+            const restoreBtn = setLoomButtonLoading(btn, 'Saving...');
+            const searchableVolumes = Array.from(document.querySelectorAll('.loom-searchable-volume:checked'))
+                .map(cb => cb.value)
+                .filter(Boolean);
+            const payload = {
+                enabled: Boolean(document.getElementById('loomEnabledToggle')?.checked),
+                allow_relay: Boolean(document.getElementById('loomAllowRelay')?.checked),
+                sync_dir: document.getElementById('loomSyncDir')?.value || '/media/loom',
+                upload_bandwidth_limit_kbps: Number(document.getElementById('loomUploadBandwidthLimit')?.value || 0),
+                download_bandwidth_limit_kbps: Number(document.getElementById('loomDownloadBandwidthLimit')?.value || 0),
+                max_quality: document.getElementById('loomMaxQuality')?.value || '1080p',
+                max_hops: Math.max(1, Number(document.getElementById('loomMaxHops')?.value || 1)),
+                max_concurrent_transfers: Math.max(1, Number(document.getElementById('loomMaxConcurrentTransfers')?.value || 2)),
+                max_requests_per_minute: Math.max(1, Number(document.getElementById('loomMaxRequestsPerMin')?.value || 3)),
+                allowed_filetypes: document.getElementById('loomAllowedFiletypes')?.value || '',
+                pause_on_active_streams: Boolean(document.getElementById('loomPauseOnStreams')?.checked),
+                searchable_volumes: searchableVolumes
+            };
+            try {
+                const res = await fetch('/api/loom/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                restoreBtn();
+                if (res.ok && btn) {
+                    flashButton(btn, 'Saved!');
+                }
+            } catch (err) {
+                console.error('Failed to save Loom settings:', err);
+                restoreBtn();
+            }
+        }
+
+        let _loomBundleMsgTimer = null;
+        function showLoomBundleMsg(text, isError = false) {
+            const msgEl = document.getElementById('loomBundleMsg');
+            if (!msgEl) return;
+            if (_loomBundleMsgTimer) {
+                clearTimeout(_loomBundleMsgTimer);
+                _loomBundleMsgTimer = null;
+            }
+            msgEl.classList.remove('hidden', 'text-success', 'text-danger');
+            msgEl.classList.add(isError ? 'text-danger' : 'text-success');
+            msgEl.textContent = text;
+            _loomBundleMsgTimer = setTimeout(() => {
+                msgEl.classList.add('hidden');
+                _loomBundleMsgTimer = null;
+            }, 3000);
+        }
+
+        async function copyLoomBundleText(text, outBox, btn) {
+            let copied = false;
+            if (navigator.clipboard && window.isSecureContext) {
+                try {
+                    await navigator.clipboard.writeText(text);
+                    copied = true;
+                } catch (_) {
+                    copied = false;
+                }
+            }
+            if (!copied && outBox) {
+                try {
+                    outBox.focus();
+                    outBox.select();
+                    outBox.setSelectionRange(0, text.length);
+                    copied = document.execCommand('copy');
+                } catch (_) {
+                    copied = false;
+                }
+            }
+            if (copied && btn) {
+                flashButton(btn, 'Copied!');
+            }
+            return copied;
+        }
+
+        async function exportLoomBundle(btn) {
+            if (btn && btn.disabled) return;
+            const restoreBtn = setLoomButtonLoading(btn, 'Exporting...');
+
+            const bundlePromise = (async () => {
+                const res = await fetch('/api/loom/export_bundle');
+                const data = await res.json();
+                if (!res.ok) {
+                    throw new Error(data.error || 'Failed to export bundle.');
+                }
+                return JSON.stringify(data.bundle, null, 2);
+            })();
+
+            // Kick off ClipboardItem synchronously inside the click gesture so browsers allow clipboard write after async fetch
+            let clipboardItemPromise = null;
+            if (navigator.clipboard && typeof ClipboardItem !== 'undefined' && window.isSecureContext) {
+                try {
+                    const blobPromise = bundlePromise.then(text => new Blob([text], { type: 'text/plain' }));
+                    clipboardItemPromise = navigator.clipboard.write([new ClipboardItem({ 'text/plain': blobPromise })]);
+                } catch (_) {
+                    clipboardItemPromise = null;
+                }
+            }
+
+            try {
+                const text = await bundlePromise;
+                restoreBtn();
+                const outBox = document.getElementById('loomExportedBundleBox');
+                if (outBox) {
+                    outBox.value = text;
+                    outBox.classList.remove('hidden');
+                }
+
+                let copied = false;
+                if (clipboardItemPromise) {
+                    try {
+                        await clipboardItemPromise;
+                        copied = true;
+                        if (btn) flashButton(btn, 'Copied!');
+                    } catch (_) {
+                        copied = false;
+                    }
+                }
+                if (!copied) {
+                    copied = await copyLoomBundleText(text, outBox, btn);
+                }
+                showLoomBundleMsg(
+                    copied
+                        ? 'Peer bundle exported and copied to clipboard. Send this to your friend.'
+                        : 'Peer bundle exported below. Click the box to copy and send to your friend.',
+                    false
+                );
+            } catch (err) {
+                console.error('Failed to export Loom bundle:', err);
+                restoreBtn();
+                showLoomBundleMsg(err.message || 'Failed to export bundle.', true);
+            }
+        }
+
+        async function rotateLoomPeerOnion(peerId, btn) {
+            if (btn && btn.disabled) return;
+            setLoomPeerRowLocked(peerId, true);
+            const restoreBtn = setLoomButtonLoading(btn, 'Rotating Address...');
+            try {
+                const res = await fetch(`/api/loom/peers/${peerId}/rotate_onion`, { method: 'POST' });
+                const data = await res.json();
+                if (!res.ok) {
+                    restoreBtn();
+                    setLoomPeerRowLocked(peerId, false);
+                    showLoomBundleMsg(data.error || 'Failed to rotate .onion address.', true);
+                    return;
+                }
+                renderLoomPeers(data.peers);
+            } catch (err) {
+                console.error('Failed to rotate peer .onion:', err);
+                restoreBtn();
+                setLoomPeerRowLocked(peerId, false);
+            }
+        }
+
+        async function importLoomBundle(btn) {
+            if (btn && btn.disabled) return;
+            const ta = document.getElementById('loomBundleInput');
+            const aliasEl = document.getElementById('loomImportAlias');
+            const raw = (ta?.value || '').trim();
+            if (!raw) return;
+
+            let aliasVal = (aliasEl?.value || '').trim();
+            if (aliasVal.startsWith('{') || aliasVal.startsWith('[')) {
+                aliasVal = '';
+            }
+
+            const restoreBtn = setLoomButtonLoading(btn, 'Importing...');
+            try {
+                const res = await fetch('/api/loom/import_bundle', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ bundle: raw, name: aliasVal || null })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    showLoomBundleMsg(data.error || 'Failed to import bundle.', true);
+                    return;
+                }
+                if (ta) ta.value = '';
+                if (aliasEl) aliasEl.value = '';
+                showLoomBundleMsg('Peer imported. Toggle Receive or Share to start syncing.', false);
+                renderLoomPeers(data.peers);
+                refreshLoomPeerConnectivity();
+            } catch (err) {
+                console.error('Import error:', err);
+            } finally {
+                restoreBtn();
+            }
+        }
+
+        async function toggleLoomPeer(peerId, patch, checkboxEl) {
+            try {
+                const res = await fetch(`/api/loom/peers/${peerId}/update`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(patch)
+                });
+                if (!res.ok && checkboxEl) {
+                    checkboxEl.checked = !checkboxEl.checked;
+                }
+            } catch (err) {
+                console.error('Failed to update Loom peer:', err);
+                if (checkboxEl) {
+                    checkboxEl.checked = !checkboxEl.checked;
+                }
+            }
+        }
+
+        async function refreshLoomPeerConnectivity() {
+            const list = document.getElementById('loomPeerList');
+            if (!list || !list.querySelector('[data-peer-status-badge]')) return;
+            try {
+                const res = await fetch('/api/loom/peers/connectivity');
+                if (!res.ok) return;
+                const data = await res.json();
+                const map = data.connectivity || {};
+                Object.entries(map).forEach(([peerId, isOnline]) => {
+                    const badge = document.querySelector(`[data-peer-status-badge="${peerId}"]`);
+                    if (!badge) return;
+                    badge.classList.remove('badge-unknown');
+                    badge.classList.toggle('badge-active', Boolean(isOnline));
+                    badge.classList.toggle('badge-inactive', !isOnline);
+                    badge.textContent = isOnline ? 'Active' : 'Inactive';
+                });
+            } catch (err) {
+                console.debug('Failed to check peer connectivity:', err);
+            }
+        }
+
+        (function initLoomConnectivityMonitor() {
+            refreshLoomPeerConnectivity();
+            setInterval(() => {
+                if (!document.hidden) {
+                    refreshLoomPeerConnectivity();
+                }
+            }, 30000);
+        })();
+
+        async function deleteLoomPeer(peerId, btn) {
+            if (btn && btn.disabled) return;
+            if (!confirm('Remove this Loom peer and its transfer history?')) return;
+            setLoomPeerRowLocked(peerId, true);
+            const restoreBtn = setLoomButtonLoading(btn, 'Deleting...');
+            try {
+                const res = await fetch(`/api/loom/peers/${peerId}/delete`, { method: 'POST' });
+                if (res.ok) {
+                    const data = await res.json();
+                    renderLoomPeers(data.peers);
+                } else {
+                    restoreBtn();
+                    setLoomPeerRowLocked(peerId, false);
+                }
+            } catch (err) {
+                console.error('Failed to delete Loom peer:', err);
+                restoreBtn();
+                setLoomPeerRowLocked(peerId, false);
+            }
+        }
+    </script>
     <script>
         (function initSettingsActivityMonitor() {
             const badge = document.getElementById('serverActivityBadge');

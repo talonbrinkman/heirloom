@@ -31,6 +31,7 @@ By leveraging a lightweight, API-first architecture using Python and FastAPI, He
 - Actor & Director Filmography Hubs ("Person" Pages)
 - Instant "Fix Match" Resolution
 - Music Library & Persistent Audio Player
+- The Loom (Private Tor v3 Friend-to-Friend Media Search & Sync)
 - Cross-Platform REST API
 - Frictionless Docker Deployment
 
@@ -38,7 +39,7 @@ By leveraging a lightweight, API-first architecture using Python and FastAPI, He
 
 - **Backend**: [Python 3](https://www.python.org/), [FastAPI](https://fastapi.tiangolo.com/)
 - **Database**: [SQLite](https://www.sqlite.org/), [SQLModel](https://sqlmodel.tiangolo.com/) (SQLAlchemy & Pydantic)
-- **Real-time Communication**: WebSockets
+- **Real-time & Federation**: WebSockets, Built-in Tor v3 Onion Services
 - **Containerization**: [Docker](https://www.docker.com/), Docker Compose
 - **Media Processing**: FFmpeg
 - **Frontend**: Jinja2 Templates, HTML/CSS/JavaScript
@@ -76,7 +77,9 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
      - /path/to/your/movies:/media/movies:ro
      - /path/to/your/photos:/media/photos:ro
      - /path/to/your/music:/media/music:ro
+     - /path/to/your/loom:/media/loom
    ```
+   *(Your main media directories stay mounted read-only; `/media/loom` is a separate read-write directory for media downloaded from friends over The Loom, automatically scanned into your Movies, TV, Photos, and Music libraries.)*
 
 4. **(Optional) Enable Hardware-Accelerated Transcoding (GPU):**
    Heirloom includes automated GPU detection with universal software fallback. By default, device mounts are commented out so the container starts safely on any system (Windows, Mac, cloud VPS).
@@ -121,6 +124,7 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 - **Watch Together & Downloads**: Start synchronized Watch Together sessions from any movie or show page, or download media directly when enabled for your account.
 - **Playback Preferences**: Configure rewind-on-resume, default audio/subtitle languages, "Are You Still Watching?" episode limits, and the in-player sleep timer in **Settings** or the player menu.
 - **Music & Discovery**: Listen across pages with the persistent bottom audio player and queue drawer, explore actor/director filmography pages, and browse auto-grouped franchise collections and related titles.
+- **The Loom (Friend-to-Friend Sync)**: Opt-in, disabled-by-default peer-to-peer media search and sync powered by a built-in Tor v3 daemon (no port forwarding or external Tor setup required). Pair friends with single-use 24-hour expiring `.onion` bundles in **Settings**, configure per-peer **Receive** / **Share** permissions, searchable volumes, allowed filetypes, bandwidth/quality/hop/concurrency/rate limits, and search friends' libraries directly from the Home search bar with live progress, speed, cancellation, and automatic resume for interrupted downloads.
 
 ## 🔮 Upcoming Improvements
 
@@ -128,13 +132,6 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 - **Mobile Offline Sync**: Transcode and download media to phones and tablets for offline airplane and travel playback.
 - **Seamless Continuous Music Streaming Across Pages**: Client-side PJAX/Turbo navigation keeping the persistent audio player and background music streaming uninterrupted across page transitions without audio pause or reload gaps.
 - **On-Demand Subtitle Fetching**: In-player and background retrieval of missing subtitle tracks and languages via external provider integrations (OpenSubtitles / Bazarr).
-- **The Loom (Federated Friend-to-Friend Library Sync & Discovery)**: Opt-in, decentralized server-to-server library replication and multi-hop friend-of-a-friend media discovery/pairing (`A → B → C`), disabled by default with strict safety controls:
-  - **All Controls Disabled by Default**: Master kill-switch, incoming sync, and multi-hop referrals default to off until explicitly enabled per peer.
-  - **Max Hops Limit**: Configurable hop depth (defaulting to `1` for direct friends only) with loop prevention and scoped, short-lived referral tokens.
-  - **Bandwidth Limit**: Configurable upload/download rate caps (`KB/s` / `MB/s`) and automatic pause/throttling when active media streams are playing.
-  - **Sync Schedules**: Time-window scheduling (e.g., overnight-only transfers) to avoid impacting daytime network usage.
-  - **Data Caps & Storage Floor**: Per-peer/monthly transfer caps, max sync library quotas, quality caps (e.g., 1080p or lower), and a minimum free-disk-space safety floor.
-  - **IP / DNS Peer List Import & Export**: Exportable and importable peer address lists (`IP:port` / DNS / signed peer bundles), imported disabled until approved.
 
 ## 🤝 Contributing
 

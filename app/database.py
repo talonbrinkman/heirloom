@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, create_engine, Session, select, text
-from .models import User, UserSession, VolumePath, Profile, WatchHistory, Watchlist, Artist, Album, Track, Playlist, PlaylistTrack, Person
+from .models import User, UserSession, VolumePath, Profile, WatchHistory, Watchlist, Artist, Album, Track, Playlist, PlaylistTrack, Person, LoomPeer, LoomTransferJob
 
 # This is critical: We are saving the database inside the /config folder.
 # Because of your Docker volume mount, this will actually be saved to your desktop!
@@ -393,6 +393,13 @@ def create_db_and_tables():
             session.commit()
         except Exception:
             session.rollback()
+
+        for col in ("local_node_id", "local_onion_service_id", "local_onion_private_key"):
+            try:
+                session.exec(text(f"ALTER TABLE loompeer ADD COLUMN {col} VARCHAR"))
+                session.commit()
+            except Exception:
+                session.rollback()
 
         # Seed Primary Profiles for existing Users if missing
         try:

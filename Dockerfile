@@ -4,9 +4,10 @@ FROM python:3.11-slim
 # Set the working directory inside the container
 WORKDIR /app
 
-# Install ffmpeg and VA-API hardware acceleration libraries
+# Install ffmpeg, tor (for built-in Loom federation), and VA-API hardware acceleration libraries
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    tor \
     vainfo \
     mesa-va-drivers \
     intel-media-va-driver \

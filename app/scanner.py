@@ -1415,6 +1415,13 @@ class ScannerManager:
                 active_vols = session.exec(select(VolumePath)).all()
                 active_paths = {v.path.replace("\\", "/").rstrip("/").lower() for v in active_vols if v.path}
                 active_types = {v.media_type for v in active_vols if v.media_type}
+                loom_dir_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "loom_sync_dir")).first()
+                loom_sync_root = (loom_dir_cfg.value.strip() if (loom_dir_cfg and loom_dir_cfg.value) else "") or "/media/loom"
+                for sub_name, mtype in (("movies", "movie"), ("tv", "tv"), ("photos", "photo"), ("music", "music")):
+                    sub_path = os.path.join(loom_sync_root, sub_name)
+                    if os.path.isdir(sub_path):
+                        active_paths.add(sub_path.replace("\\", "/").rstrip("/").lower())
+                        active_types.add(mtype)
 
             with self._lock:
                 if not self.is_scanning or self._abort_event.is_set():
@@ -1472,6 +1479,23 @@ class ScannerManager:
             tv_volume_paths = [v.path for v in volume_paths if v.media_type == "tv"]
             photo_volume_paths = [v.path for v in volume_paths if v.media_type == "photo"]
             music_volume_paths = [v.path for v in volume_paths if v.media_type == "music"]
+
+            # Also include isolated Loom sync subfolders (e.g. /media/loom/movies) when present
+            # so synced media shows up in libraries while keeping main media mounts separate/read-only.
+            loom_dir_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "loom_sync_dir")).first()
+            loom_sync_root = (loom_dir_cfg.value.strip() if (loom_dir_cfg and loom_dir_cfg.value) else "") or "/media/loom"
+            loom_subfolders = [
+                ("movies", movie_volume_paths, "movie"),
+                ("tv", tv_volume_paths, "tv"),
+                ("photos", photo_volume_paths, "photo"),
+                ("music", music_volume_paths, "music"),
+            ]
+            extra_loom_types = set()
+            for sub_name, target_list, mtype in loom_subfolders:
+                sub_path = os.path.join(loom_sync_root, sub_name)
+                if os.path.isdir(sub_path) and sub_path not in target_list:
+                    target_list.append(sub_path)
+                    extra_loom_types.add(mtype)
 
             raw_movies = session.exec(select(Movie.id, Movie.file_path)).all()
             raw_shows = session.exec(select(TVShow.id, TVShow.file_path)).all()
@@ -1639,6 +1663,23 @@ class ScannerManager:
             photo_volume_paths = [v.path for v in volume_paths if v.media_type == "photo"]
             music_volume_paths = [v.path for v in volume_paths if v.media_type == "music"]
 
+            # Also include isolated Loom sync subfolders (e.g. /media/loom/movies) when present
+            # so synced media shows up in libraries while keeping main media mounts separate/read-only.
+            loom_dir_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "loom_sync_dir")).first()
+            loom_sync_root = (loom_dir_cfg.value.strip() if (loom_dir_cfg and loom_dir_cfg.value) else "") or "/media/loom"
+            loom_subfolders = [
+                ("movies", movie_volume_paths, "movie"),
+                ("tv", tv_volume_paths, "tv"),
+                ("photos", photo_volume_paths, "photo"),
+                ("music", music_volume_paths, "music"),
+            ]
+            extra_loom_types = set()
+            for sub_name, target_list, mtype in loom_subfolders:
+                sub_path = os.path.join(loom_sync_root, sub_name)
+                if os.path.isdir(sub_path) and sub_path not in target_list:
+                    target_list.append(sub_path)
+                    extra_loom_types.add(mtype)
+
             config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
             tmdb_api_key = config.value if config else os.getenv("TMDB_API_KEY")
 
@@ -1652,7 +1693,7 @@ class ScannerManager:
 
         with self._lock:
             self.scanned_volumes = set(movie_volume_paths + tv_volume_paths + photo_volume_paths + music_volume_paths)
-            self.scanned_types = {v.media_type for v in volume_paths if v.media_type}
+            self.scanned_types = {v.media_type for v in volume_paths if v.media_type} | extra_loom_types
             self._abort_event.clear()
 
         if not self.scanned_volumes:
