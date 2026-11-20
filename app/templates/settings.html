@@ -1344,8 +1344,12 @@
                     </select>
                 </div>
                 <div>
-                    <label class="field-label" for="loomMaxHops">Max Hops</label>
-                    <input type="number" min="1" max="10" id="loomMaxHops" value="{{ loom_settings.max_hops or 1 }}" class="w-full m-0">
+                    <label class="field-label" for="loomMaxSearchHops">Max Search Hops</label>
+                    <input type="number" min="1" max="10" id="loomMaxSearchHops" value="{{ loom_settings.max_search_hops or 1 }}" class="w-full m-0">
+                </div>
+                <div>
+                    <label class="field-label" for="loomMaxSendingHops">Max Sending Hops</label>
+                    <input type="number" min="1" max="10" id="loomMaxSendingHops" value="{{ loom_settings.max_sending_hops or 1 }}" class="w-full m-0">
                 </div>
                 <div>
                     <label class="field-label" for="loomMaxConcurrentTransfers">Max Concurrent Transfers</label>
@@ -1354,6 +1358,10 @@
                 <div>
                     <label class="field-label" for="loomMaxRequestsPerMin">Max Requests / Min</label>
                     <input type="number" min="1" max="120" id="loomMaxRequestsPerMin" value="{{ loom_settings.max_requests_per_minute or 3 }}" class="w-full m-0">
+                </div>
+                <div>
+                    <label class="field-label" for="loomMaxFileSizeGb">Max File Size (GB)</label>
+                    <input type="number" min="0" step="0.1" id="loomMaxFileSizeGb" value="{{ loom_settings.max_file_size_gb or 0 }}" class="w-full m-0">
                 </div>
             </div>
 
@@ -1453,7 +1461,7 @@
             </form>
         </div>
         <div style="text-align: center; color: #888; font-size: 0.8em; margin-top: 10px;">
-            <strong>v2.0</strong>
+            <strong>v2.1.7</strong>
         </div>
     </div>
 
@@ -1555,9 +1563,11 @@
                 upload_bandwidth_limit_kbps: Number(document.getElementById('loomUploadBandwidthLimit')?.value || 0),
                 download_bandwidth_limit_kbps: Number(document.getElementById('loomDownloadBandwidthLimit')?.value || 0),
                 max_quality: document.getElementById('loomMaxQuality')?.value || '1080p',
-                max_hops: Math.max(1, Number(document.getElementById('loomMaxHops')?.value || 1)),
+                max_search_hops: Math.max(1, Number(document.getElementById('loomMaxSearchHops')?.value || 1)),
+                max_sending_hops: Math.max(1, Number(document.getElementById('loomMaxSendingHops')?.value || 1)),
                 max_concurrent_transfers: Math.max(1, Number(document.getElementById('loomMaxConcurrentTransfers')?.value || 2)),
                 max_requests_per_minute: Math.max(1, Number(document.getElementById('loomMaxRequestsPerMin')?.value || 3)),
+                max_file_size_gb: Math.max(0, Number(document.getElementById('loomMaxFileSizeGb')?.value || 0)),
                 allowed_filetypes: document.getElementById('loomAllowedFiletypes')?.value || '',
                 pause_on_active_streams: Boolean(document.getElementById('loomPauseOnStreams')?.checked),
                 searchable_volumes: searchableVolumes

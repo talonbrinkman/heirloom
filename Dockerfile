@@ -5,7 +5,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install ffmpeg, tor (for built-in Loom federation), and VA-API hardware acceleration libraries
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ffmpeg \
     tor \
     vainfo \
@@ -16,8 +16,8 @@ RUN apt-get update && apt-get install -y \
 # Copy the requirements file into the container
 COPY requirements.txt .
 
-# Install the Python libraries including WebSocket support for Uvicorn
-RUN pip install --no-cache-dir "uvicorn[standard]" websockets wsproto && pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies in a single pass
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the actual application code into the container
 COPY ./app ./app

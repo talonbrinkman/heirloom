@@ -754,6 +754,9 @@
 
         const LOOM_SEARCH_ENABLED = {{ 'true' if loom_enabled else 'false' }};
         let _loomSearchCatalog = [];
+        let _loomSearchEntries = [];
+        let _loomSortMode = 'best';
+        let _loomSortLabel = 'Best Match';
         let _loomSearchInFlight = false;
 
         function _escapeLoomHtml(str) {
@@ -814,6 +817,20 @@
                             <button type="button" id="loomSearchBtn" class="btn btn-secondary btn-sm w-full" onclick="searchTheLoom(event)" ${btnDisabled}>
                                 ${btnLabel}
                             </button>
+                            <div id="loomSortWrapper" style="position: relative; display: none;">
+                                <button type="button" id="loomSortBtn" class="btn btn-secondary btn-sm w-full" onclick="toggleLoomSortMenu(event)">
+                                    <i data-lucide="arrow-down-up" style="width: 16px; height: 16px;"></i>
+                                    <span id="loomSortText">Sort: ${_escapeLoomHtml(_loomSortLabel)}</span>
+                                </button>
+                                <div class="dropdown-menu" id="loomSortMenu" style="top: 110%; right: 0; min-width: 180px;">
+                                    <button type="button" onclick="setLoomSort('best', 'Best Match')">Best Match</button>
+                                    <button type="button" onclick="setLoomSort('title_asc', 'Title (A-Z)')">Title (A-Z)</button>
+                                    <button type="button" onclick="setLoomSort('title_desc', 'Title (Z-A)')">Title (Z-A)</button>
+                                    <button type="button" onclick="setLoomSort('size_desc', 'Size (Largest)')">Size (Largest)</button>
+                                    <button type="button" onclick="setLoomSort('size_asc', 'Size (Smallest)')">Size (Smallest)</button>
+                                    <button type="button" onclick="setLoomSort('hops_asc', 'Hops (Fewest)')">Hops (Fewest)</button>
+                                </div>
+                            </div>
                             <div id="loomSearchResults" class="loom-search-results hidden"></div>
                         </div>`;
                     }
@@ -832,13 +849,13 @@
             return `${gb.toFixed(2)} GB`;
         }
 
-        function _formatLoomDetailsLine(resolution, bytes, hops, peerName) {
+        function _formatLoomDetailsLine(resolution, bytes, hops, peerName, sep = ' • ') {
             const resText = _escapeLoomHtml(resolution || 'Unknown');
             const sizeText = _formatLoomGB(bytes);
             const h = Number(hops || 0);
             const hopText = `${h} hop${h === 1 ? '' : 's'}`;
             const peerText = _escapeLoomHtml(peerName || 'Anonymous');
-            return `${resText} • ${sizeText} • ${hopText} • ${peerText}`;
+            return [resText, sizeText, hopText, peerText].join(sep);
         }
 
         function _renderLoomResultCard(idx, title, subtitle, detailsLine) {
@@ -858,6 +875,65 @@
             `;
         }
 
+        function toggleLoomSortMenu(event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            const menu = document.getElementById('loomSortMenu');
+            if (menu) menu.classList.toggle('show');
+        }
+
+        function setLoomSort(mode, label) {
+            _loomSortMode = mode;
+            _loomSortLabel = label;
+            const textEl = document.getElementById('loomSortText');
+            if (textEl) textEl.textContent = `Sort: ${label}`;
+            const menu = document.getElementById('loomSortMenu');
+            if (menu) menu.classList.remove('show');
+            renderLoomSearchResults();
+            lucide.createIcons();
+        }
+
+        function renderLoomSearchResults(emptyMessage = 'No matches found on The Loom.') {
+            const latestOut = document.getElementById('loomSearchResults');
+            const sortWrapper = document.getElementById('loomSortWrapper');
+            if (!latestOut) return;
+
+            if (!_loomSearchEntries || _loomSearchEntries.length === 0) {
+                if (sortWrapper) sortWrapper.style.display = 'none';
+                latestOut.innerHTML = `<div class="empty-state">${_escapeLoomHtml(emptyMessage)}</div>`;
+                latestOut.classList.remove('hidden');
+                return;
+            }
+
+            const sorted = [..._loomSearchEntries];
+            sorted.sort((a, b) => {
+                if (_loomSortMode === 'title_asc') {
+                    return a.title.localeCompare(b.title);
+                }
+                if (_loomSortMode === 'title_desc') {
+                    return b.title.localeCompare(a.title);
+                }
+                if (_loomSortMode === 'size_desc') {
+                    return b.sizeBytes - a.sizeBytes;
+                }
+                if (_loomSortMode === 'size_asc') {
+                    return a.sizeBytes - b.sizeBytes;
+                }
+                if (_loomSortMode === 'hops_asc') {
+                    return a.hops - b.hops || a.order - b.order;
+                }
+                return a.order - b.order;
+            });
+
+            if (sortWrapper) sortWrapper.style.display = 'block';
+            latestOut.innerHTML = sorted
+                .map(entry => _renderLoomResultCard(entry.idx, entry.title, entry.subtitle, entry.details))
+                .join('');
+            latestOut.classList.remove('hidden');
+        }
+
         async function searchTheLoom(event) {
             if (event) {
                 event.preventDefault();
@@ -866,12 +942,14 @@
             const query = (document.getElementById('searchInput')?.value || '').trim();
             const btn = document.getElementById('loomSearchBtn');
             const out = document.getElementById('loomSearchResults');
+            const sortWrapper = document.getElementById('loomSortWrapper');
             if (!query || query.length < 2 || !btn || !out || btn.disabled || _loomSearchInFlight) return;
 
             _loomSearchInFlight = true;
             btn.disabled = true;
             btn.innerHTML = '<i data-lucide="loader" class="spinner"></i> Searching The Loom...';
             out.classList.add('hidden');
+            if (sortWrapper) sortWrapper.style.display = 'none';
             lucide.createIcons();
 
             try {
@@ -884,19 +962,27 @@
                 const latestOut = document.getElementById('loomSearchResults');
                 if (!latestOut) return;
                 if (!res.ok) {
-                    latestOut.innerHTML = `<div class="empty-state">${_escapeLoomHtml(data.error || 'Loom search failed.')}</div>`;
-                    latestOut.classList.remove('hidden');
+                    _loomSearchEntries = [];
+                    renderLoomSearchResults(data.error || 'Loom search failed.');
                     return;
                 }
 
                 _loomSearchCatalog = [];
-                const rows = [];
+                _loomSearchEntries = [];
 
                 for (const m of (data.movies || [])) {
                     const idx = _loomSearchCatalog.push({ peer_id: m.peer_id, items: [m] }) - 1;
                     const titleText = `${m.title}${m.year ? ` (${m.year})` : ''}`;
                     const details = _formatLoomDetailsLine(m.quality_label, m.file_size, m.hops, m.peer_name);
-                    rows.push(_renderLoomResultCard(idx, titleText, '', details));
+                    _loomSearchEntries.push({
+                        idx,
+                        order: _loomSearchEntries.length,
+                        title: titleText,
+                        subtitle: '',
+                        details,
+                        sizeBytes: Number(m.file_size || 0),
+                        hops: Number(m.hops || 0),
+                    });
                 }
 
                 // Group deduplicated TV episodes by series title (each episode keeps its own best peer_id)
@@ -923,7 +1009,15 @@
                         titleText = `${titleText} (Season ${onlySeason})`;
                     }
                     const details = _formatLoomDetailsLine(first.quality_label, totalBytes, first.hops, first.peer_name);
-                    rows.push(_renderLoomResultCard(idx, titleText, subtitleText, details));
+                    _loomSearchEntries.push({
+                        idx,
+                        order: _loomSearchEntries.length,
+                        title: titleText,
+                        subtitle: subtitleText,
+                        details,
+                        sizeBytes: totalBytes,
+                        hops: Number(first.hops || 0),
+                    });
                 }
 
                 for (const tr of (data.music || [])) {
@@ -931,31 +1025,39 @@
                     const subtitleText = [tr.artist_name, tr.album_title].filter(Boolean).join(' • ');
                     const resLabel = (tr.format || 'Audio').toUpperCase();
                     const details = _formatLoomDetailsLine(resLabel, tr.file_size, tr.hops, tr.peer_name);
-                    rows.push(_renderLoomResultCard(idx, tr.title, subtitleText, details));
+                    _loomSearchEntries.push({
+                        idx,
+                        order: _loomSearchEntries.length,
+                        title: tr.title,
+                        subtitle: subtitleText,
+                        details,
+                        sizeBytes: Number(tr.file_size || 0),
+                        hops: Number(tr.hops || 0),
+                    });
                 }
 
                 for (const ph of (data.photos || [])) {
                     const idx = _loomSearchCatalog.push({ peer_id: ph.peer_id, items: [ph] }) - 1;
                     const details = _formatLoomDetailsLine('Photo', ph.file_size, ph.hops, ph.peer_name);
-                    rows.push(_renderLoomResultCard(idx, ph.title, ph.album || '', details));
+                    _loomSearchEntries.push({
+                        idx,
+                        order: _loomSearchEntries.length,
+                        title: ph.title,
+                        subtitle: ph.album || '',
+                        details,
+                        sizeBytes: Number(ph.file_size || 0),
+                        hops: Number(ph.hops || 0),
+                    });
                 }
 
-                if (rows.length === 0) {
-                    const msg = data.peers_queried === 0
-                        ? 'No peers with Receive turned on.'
-                        : 'No matches found on The Loom.';
-                    latestOut.innerHTML = `<div class="empty-state">${msg}</div>`;
-                } else {
-                    latestOut.innerHTML = rows.join('');
-                }
-                latestOut.classList.remove('hidden');
+                const emptyMsg = data.peers_queried === 0
+                    ? 'No peers with Receive turned on.'
+                    : 'No matches found on The Loom.';
+                renderLoomSearchResults(emptyMsg);
             } catch (err) {
                 console.error('Loom search error:', err);
-                const latestOut = document.getElementById('loomSearchResults');
-                if (latestOut) {
-                    latestOut.innerHTML = '<div class="empty-state">Error searching The Loom.</div>';
-                    latestOut.classList.remove('hidden');
-                }
+                _loomSearchEntries = [];
+                renderLoomSearchResults('Error searching The Loom.');
             } finally {
                 _loomSearchInFlight = false;
                 const latestBtn = document.getElementById('loomSearchBtn');
@@ -1102,6 +1204,8 @@
     <script>
         function _formatInboxDownloadStatus(status) {
             if (status === 'downloading') return 'Downloading';
+            if (status === 'uploading') return 'Uploading';
+            if (status === 'canceled_by_sender') return 'Canceled by Sender';
             if (status === 'queued') return 'Queued';
             if (status === 'paused_stream') return 'Paused (Streaming)';
             if (status === 'paused_schedule') return 'Paused';
@@ -1117,6 +1221,22 @@
             return `${Math.max(1, Math.round(val / 1024))} KB/s`;
         }
 
+        function _formatInboxDownloadEta(transferred, total, bps) {
+            const speed = Number(bps || 0);
+            const tot = Number(total || 0);
+            const done = Number(transferred || 0);
+            if (speed <= 0 || tot <= 0 || done >= tot) return '';
+            const secs = Math.ceil((tot - done) / speed);
+            if (secs < 60) return `${secs}s remaining`;
+            if (secs < 3600) {
+                const mins = Math.ceil(secs / 60);
+                return `${mins} min remaining`;
+            }
+            const hrs = Math.floor(secs / 3600);
+            const mins = Math.ceil((secs % 3600) / 60);
+            return mins > 0 ? `${hrs}h ${mins}m remaining` : `${hrs}h remaining`;
+        }
+
         function _renderInboxLoomDownload(j) {
             let titleText = j.title || 'Untitled';
             let subtitleText = '';
@@ -1126,12 +1246,21 @@
                 titleText = sStr && eStr ? `${j.series_title} S${sStr}E${eStr}` : j.series_title;
                 subtitleText = j.title || '';
             }
+            const isUpload = j.direction === 'upload' || j.status === 'uploading';
+            const isCanceledBySender = j.status === 'canceled_by_sender';
             const pct = Math.max(0, Math.min(100, Number(j.progress_pct || 0)));
-            const details = _formatLoomDetailsLine(j.quality_label, j.total_bytes || j.bytes_transferred, j.hops || 0, j.peer_name);
-            const speedText = j.status === 'downloading' ? _formatInboxDownloadSpeed(j.speed_bps) : '';
-            const statusText = speedText
-                ? `${_formatInboxDownloadStatus(j.status)} • ${pct.toFixed(0)}% • ${speedText}`
-                : `${_formatInboxDownloadStatus(j.status)} • ${pct.toFixed(0)}%`;
+            const details = _formatLoomDetailsLine(j.quality_label, j.total_bytes || j.bytes_transferred, j.hops || 1, j.peer_name);
+            const isActiveTransfer = j.status === 'downloading' || j.status === 'uploading';
+            const speedText = isActiveTransfer ? _formatInboxDownloadSpeed(j.speed_bps) : '';
+            const etaText = isActiveTransfer ? _formatInboxDownloadEta(j.bytes_transferred, j.total_bytes, j.speed_bps) : '';
+            const statusText = isCanceledBySender
+                ? 'Canceled by Sender'
+                : [_formatInboxDownloadStatus(j.status), `${pct.toFixed(0)}%`, speedText].filter(Boolean).join(' • ');
+            const actionBtn = isUpload
+                ? `<button type="button" class="btn btn-danger btn-sm" onclick="cancelLoomUpload('${_escapeLoomHtml(j.upload_id || j.id)}', event)">Cancel</button>`
+                : (isCanceledBySender
+                    ? `<button type="button" class="btn btn-secondary btn-sm" onclick="cancelLoomDownload(${j.id}, event)">Dismiss</button>`
+                    : `<button type="button" class="btn btn-danger btn-sm" onclick="cancelLoomDownload(${j.id}, event)">Cancel</button>`);
             return `
                 <div class="inbox-item">
                     <strong>${_escapeLoomHtml(titleText)}</strong>
@@ -1142,7 +1271,8 @@
                     </div>
                     <div class="inbox-download-footer">
                         <small class="m-0">${_escapeLoomHtml(statusText)}</small>
-                        <button type="button" class="btn btn-danger btn-sm" onclick="cancelLoomDownload(${j.id}, event)">Cancel</button>
+                        ${etaText ? `<small class="m-0">${_escapeLoomHtml(etaText)}</small>` : ''}
+                        ${actionBtn}
                     </div>
                 </div>
             `;
@@ -1161,6 +1291,19 @@
             }
         }
 
+        async function cancelLoomUpload(uploadId, event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            try {
+                await fetch(`/api/loom/uploads/${encodeURIComponent(uploadId)}/cancel`, { method: 'POST' });
+                loadInbox();
+            } catch (err) {
+                console.error('Failed to cancel Loom upload:', err);
+            }
+        }
+
         async function loadInbox() {
             try {
                 const res = await fetch('/api/inbox');
@@ -1168,11 +1311,12 @@
                 const items = data.invites || [];
                 const resets = data.reset_requests || [];
                 const loomDownloads = data.loom_downloads || [];
+                const loomUploads = data.loom_uploads || [];
                 const badge = document.getElementById('inboxBadge');
                 const container = document.getElementById('inboxItems');
                 if (!badge || !container) return;
 
-                const totalCount = items.length + resets.length + loomDownloads.length;
+                const totalCount = items.length + resets.length + loomDownloads.length + loomUploads.length;
                 const mobileBadge = document.getElementById('mobileInboxBadge');
                 const mobileContainer = document.getElementById('mobileInboxItems');
 
@@ -1184,6 +1328,7 @@
                     }
                     let html = '';
                     html += loomDownloads.map(_renderInboxLoomDownload).join('');
+                    html += loomUploads.map(_renderInboxLoomDownload).join('');
                     html += items.map(inv => `
                     <div class="inbox-item">
                         <div><strong>${inv.sender}</strong> invited you to watch <em>${inv.title}</em></div>

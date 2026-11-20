@@ -1,0 +1,35 @@
+# Version control & editor/agent metadata
+.git
+.gitignore
+.agents
+.DS_Store
+
+# Runtime data & media (mounted as volumes, never needed in image build)
+media/
+config/
+.env
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.csv
+
+# Other apps, tests & docs
+heirloom_mobile/
+tests/
+*.md
+LICENSE
+docker-compose.yml
+Dockerfile
+
+# Python caches & virtual environments
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.pytest_cache/
+.venv/
+venv/
+
+# Windows-only local binaries
+app/bin/*.exe

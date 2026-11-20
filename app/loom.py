@@ -40,9 +40,11 @@ LOOM_DEFAULTS: dict[str, str] = {
     "loom_download_bandwidth_limit_kbps": "0",
     "loom_pause_on_active_streams": "true",
     "loom_max_quality": "1080p",
-    "loom_max_hops": "1",
+    "loom_max_search_hops": "1",
+    "loom_max_sending_hops": "1",
     "loom_max_concurrent_transfers": "2",
     "loom_max_requests_per_minute": "3",
+    "loom_max_file_size_gb": "0",
     "loom_allowed_filetypes": DEFAULT_LOOM_ALLOWED_FILETYPES,
     "loom_searchable_volumes": "[]",
 }
@@ -420,9 +422,25 @@ def is_filetype_allowed(filename_or_path: Optional[str], allowed_filetypes: list
     return ext in set(allowed_filetypes)
 
 
+def is_file_size_allowed(file_size: Any, max_file_size_gb: float) -> bool:
+    """Return True if max_file_size_gb <= 0 or file_size is within the configured GB limit."""
+    limit_gb = float(max_file_size_gb or 0)
+    if limit_gb <= 0:
+        return True
+    try:
+        size_bytes = int(file_size or 0)
+    except (TypeError, ValueError):
+        return False
+    return size_bytes <= int(limit_gb * (1024 ** 3))
+
+
 def get_loom_settings(session: Session) -> dict[str, Any]:
     node_id = get_or_create_node_id(session)
     raw = {k: _get_config_value(session, k, v) for k, v in LOOM_DEFAULTS.items()}
+    legacy_hops = _get_config_value(session, "loom_max_hops", "").strip()
+    search_hops_raw = _get_config_value(session, "loom_max_search_hops", "").strip() or legacy_hops or "1"
+    max_search_hops = max(1, min(10, int(float(search_hops_raw))))
+    max_sending_hops = max(1, min(10, int(float(raw["loom_max_sending_hops"] or 1))))
     allowed_list = parse_allowed_filetypes(raw["loom_allowed_filetypes"])
     return {
         "node_id": node_id,
@@ -433,9 +451,12 @@ def get_loom_settings(session: Session) -> dict[str, Any]:
         "download_bandwidth_limit_kbps": max(0, int(float(raw["loom_download_bandwidth_limit_kbps"] or 0))),
         "pause_on_active_streams": raw["loom_pause_on_active_streams"].strip().lower() == "true",
         "max_quality": (raw["loom_max_quality"].strip().lower() or "1080p"),
-        "max_hops": max(1, min(10, int(float(raw["loom_max_hops"] or 1)))),
+        "max_hops": max_search_hops,
+        "max_search_hops": max_search_hops,
+        "max_sending_hops": max_sending_hops,
         "max_concurrent_transfers": max(1, min(20, int(float(raw["loom_max_concurrent_transfers"] or 2)))),
         "max_requests_per_minute": max(1, min(120, int(float(raw["loom_max_requests_per_minute"] or 3)))),
+        "max_file_size_gb": max(0.0, round(float(raw["loom_max_file_size_gb"] or 0), 3)),
         "allowed_filetypes": ", ".join(allowed_list),
         "allowed_filetypes_list": allowed_list,
         "searchable_volumes": _parse_searchable_volumes(raw["loom_searchable_volumes"]),
@@ -472,9 +493,12 @@ def save_loom_settings(session: Session, data: dict[str, Any]) -> dict[str, Any]
             if str(v or "").strip().lower() in ("720p", "1080p", "original")
             else "1080p",
         ),
-        "max_hops": ("loom_max_hops", lambda v: str(max(1, min(10, int(float(v or 1)))))),
+        "max_hops": ("loom_max_search_hops", lambda v: str(max(1, min(10, int(float(v or 1)))))),
+        "max_search_hops": ("loom_max_search_hops", lambda v: str(max(1, min(10, int(float(v or 1)))))),
+        "max_sending_hops": ("loom_max_sending_hops", lambda v: str(max(1, min(10, int(float(v or 1)))))),
         "max_concurrent_transfers": ("loom_max_concurrent_transfers", lambda v: str(max(1, min(20, int(float(v or 2)))))),
         "max_requests_per_minute": ("loom_max_requests_per_minute", lambda v: str(max(1, min(120, int(float(v or 3)))))),
+        "max_file_size_gb": ("loom_max_file_size_gb", lambda v: str(max(0.0, round(float(v or 0), 3)))),
         "allowed_filetypes": ("loom_allowed_filetypes", _encode_allowed_filetypes),
         "searchable_volumes": ("loom_searchable_volumes", _encode_searchable_volumes),
     }
@@ -1046,6 +1070,17 @@ def load_loom_manifest(session: Optional[Session] = None) -> dict[str, Any]:
     return {"version": 3, "generated_at": None, "movies": [], "tv": [], "photos": [], "music": []}
 
 
+def get_manifest_quality_label(session: Session, media_type: str, item_id: int, file_path: str) -> str:
+    """Return the probed resolution label from the Loom manifest for a movie/tv item, falling back to filename."""
+    bucket = "movies" if media_type == "movie" else ("tv" if media_type == "tv" else "")
+    if bucket:
+        manifest = load_loom_manifest(session)
+        for entry in manifest.get(bucket, []):
+            if entry.get("id") == item_id and entry.get("quality_label"):
+                return str(entry["quality_label"])
+    return _infer_resolution_from_filename(file_path)
+
+
 def _normalize_search_text(text: Optional[str]) -> str:
     cleaned = re.sub(r"[^\w\s]", " ", (text or "").lower())
     return re.sub(r"\s+", " ", cleaned).strip()
@@ -1070,33 +1105,45 @@ def _strip_private_fields(item: dict[str, Any]) -> dict[str, Any]:
 
 def parse_loom_search_query(raw_query: str) -> dict[str, Any]:
     """
-    Dissect a search string like 'The Office S1E4', 'The Office S1', or 'Dexter Season 2 Episode 3'
-    into a clean title query plus optional season, episode, and inferred media_type.
+    Dissect a search string like 'The Office S1E4', 'The Office S1', 'Dexter Season 2 Episode 3',
+    or mixed forms like 'Dexter Season 1 E3' into a clean title query plus optional season,
+    episode, and inferred media_type.
     """
     text = str(raw_query or "").strip()
     season: Optional[int] = None
     episode: Optional[int] = None
 
-    patterns = [
-        # S01E04 or S1 E4
-        (re.compile(r"\b[sS](\d{1,2})\s*[eE](\d{1,3})\b"), True),
-        # 1x04
-        (re.compile(r"\b(\d{1,2})[xX](\d{1,3})\b"), True),
-        # Season 1 Episode 4 / Season 1 Ep 4 / Season 1
-        (re.compile(r"\bseason\s*(\d{1,2})(?:\s*(?:episode|ep\.?)\s*(\d{1,3}))?\b", re.IGNORECASE), True),
-        # Standalone S1 / S01
-        (re.compile(r"\b[sS](\d{1,2})\b"), False),
-    ]
-
     cleaned = text
-    for pat, has_ep_group in patterns:
+    combined_patterns = (
+        # S01E04, S1 E4, S01.E04, S1-E4
+        re.compile(r"\b[sS](\d{1,2})[\s.\-_]*[eE](\d{1,3})\b"),
+        # 1x04
+        re.compile(r"\b(\d{1,2})[xX](\d{1,3})\b"),
+    )
+
+    matched_combined = False
+    for pat in combined_patterns:
         m = pat.search(cleaned)
         if m:
             season = int(m.group(1))
-            if has_ep_group and m.lastindex and m.lastindex >= 2 and m.group(2):
-                episode = int(m.group(2))
+            episode = int(m.group(2))
             cleaned = (cleaned[:m.start()] + " " + cleaned[m.end():]).strip()
+            matched_combined = True
             break
+
+    if not matched_combined:
+        season_pat = re.compile(r"\b(?:season|s)\s*(\d{1,2})\b", re.IGNORECASE)
+        episode_pat = re.compile(r"\b(?:episode|ep\.?|e)\s*(\d{1,3})\b", re.IGNORECASE)
+
+        sm = season_pat.search(cleaned)
+        if sm:
+            season = int(sm.group(1))
+            cleaned = (cleaned[:sm.start()] + " " + cleaned[sm.end():]).strip()
+
+        em = episode_pat.search(cleaned)
+        if em:
+            episode = int(em.group(1))
+            cleaned = (cleaned[:em.start()] + " " + cleaned[em.end():]).strip()
 
     cleaned = re.sub(r"[\s\-–—:]+$", "", cleaned)
     cleaned = re.sub(r"^[\s\-–—:]+", "", cleaned)
@@ -1106,7 +1153,7 @@ def parse_loom_search_query(raw_query: str) -> dict[str, Any]:
         "query": cleaned or text,
         "season": season,
         "episode": episode,
-        "media_type": "tv" if season is not None else None,
+        "media_type": "tv" if (season is not None or episode is not None) else None,
     }
 
 
@@ -1138,6 +1185,7 @@ def search_loom_manifest(
     settings = get_loom_settings(session)
     searchable_volumes = settings["searchable_volumes"]
     allowed_filetypes = settings["allowed_filetypes_list"]
+    max_file_size_gb = settings["max_file_size_gb"]
     norm_type = (media_type or parsed["media_type"] or "").strip().lower() or None
     norm_year = str(year or "").strip() or None
 
@@ -1163,6 +1211,8 @@ def search_loom_manifest(
                 continue
             if not is_filetype_allowed(item.get("filename") or item.get("_file_path"), allowed_filetypes):
                 continue
+            if not is_file_size_allowed(item.get("file_size"), max_file_size_gb):
+                continue
             if norm_year and str(item.get("year") or "").strip() != norm_year:
                 continue
             if _matches_specific_query(norm_q, item.get("title")):
@@ -1174,12 +1224,22 @@ def search_loom_manifest(
                 continue
             if not is_filetype_allowed(item.get("filename") or item.get("_file_path"), allowed_filetypes):
                 continue
+            if not is_file_size_allowed(item.get("file_size"), max_file_size_gb):
+                continue
             if norm_year and str(item.get("year") or "").strip() != norm_year:
                 continue
-            if effective_season is not None and item.get("season") != effective_season:
-                continue
-            if effective_episode is not None and item.get("episode") != effective_episode:
-                continue
+            if effective_season is not None:
+                try:
+                    if int(item.get("season")) != effective_season:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+            if effective_episode is not None:
+                try:
+                    if int(item.get("episode")) != effective_episode:
+                        continue
+                except (TypeError, ValueError):
+                    continue
             if _matches_specific_query(norm_q, item.get("series_title")):
                 tv.append(_strip_private_fields(item))
 
@@ -1189,6 +1249,8 @@ def search_loom_manifest(
                 continue
             if not is_filetype_allowed(item.get("filename") or item.get("_file_path"), allowed_filetypes):
                 continue
+            if not is_file_size_allowed(item.get("file_size"), max_file_size_gb):
+                continue
             if _matches_specific_query(norm_q, item.get("title"), item.get("album")):
                 photos.append(_strip_private_fields(item))
 
@@ -1197,6 +1259,8 @@ def search_loom_manifest(
             if not is_path_in_volumes(item.get("_file_path", ""), searchable_volumes):
                 continue
             if not is_filetype_allowed(item.get("filename") or item.get("_file_path"), allowed_filetypes):
+                continue
+            if not is_file_size_allowed(item.get("file_size"), max_file_size_gb):
                 continue
             if norm_year and str(item.get("year") or "").strip() != norm_year:
                 continue
@@ -1222,17 +1286,32 @@ def _rank_loom_source(item: dict[str, Any]) -> tuple[int, int, int]:
     return (hops, -q_h, -size)
 
 
+def _title_match_rank(title: Optional[str], norm_q: str) -> int:
+    """Rank exact title matches (0) ahead of prefix matches (1) and other matches (2)."""
+    if not norm_q:
+        return 0
+    norm_t = _normalize_search_text(title)
+    if norm_t == norm_q:
+        return 0
+    if norm_t.startswith(norm_q + " "):
+        return 1
+    return 2
+
+
 def deduplicate_loom_search_results(
     movies: list[dict[str, Any]],
     tv: list[dict[str, Any]],
     photos: list[dict[str, Any]],
     music: list[dict[str, Any]],
+    query: str = "",
 ) -> dict[str, list[dict[str, Any]]]:
     """
     Merge duplicate matches across multiple peers, picking the best source per item
     (Direct > relayed, higher quality > lower quality, larger file > smaller) and
     annotating each item with `sources_count`.
     """
+    norm_q = _normalize_search_text(parse_loom_search_query(query)["query"]) if query else ""
+
     def _merge(items: list[dict[str, Any]], key_fn: Callable[[dict[str, Any]], tuple]) -> list[dict[str, Any]]:
         grouped: dict[tuple, list[dict[str, Any]]] = {}
         for item in items:
@@ -1254,11 +1333,19 @@ def deduplicate_loom_search_results(
         movies,
         lambda m: (_normalize_search_text(m.get("title")), str(m.get("year") or "").strip()),
     )
+    if norm_q:
+        dedup_movies.sort(key=lambda m: (_title_match_rank(m.get("title"), norm_q), _normalize_search_text(m.get("title"))))
+
     dedup_tv = _merge(
         tv,
         lambda t: (_normalize_search_text(t.get("series_title") or t.get("title")), t.get("season"), t.get("episode")),
     )
-    dedup_tv.sort(key=lambda t: (_normalize_search_text(t.get("series_title") or ""), int(t.get("season") or 0), int(t.get("episode") or 0)))
+    dedup_tv.sort(key=lambda t: (
+        _title_match_rank(t.get("series_title") or t.get("title"), norm_q),
+        _normalize_search_text(t.get("series_title") or ""),
+        int(t.get("season") or 0),
+        int(t.get("episode") or 0),
+    ))
 
     dedup_photos = _merge(
         photos,
@@ -1550,11 +1637,11 @@ class LoomSyncManager:
         self._job_retry_counts: dict[int, int] = {}
 
     def _schedule_job_retry(self, job_id: int, reason: str, written: Optional[int] = None) -> None:
-        """Re-queue an interrupted job with exponential backoff (10s -> 20s -> 40s -> 60s) while keeping its .part file."""
+        """Re-queue an interrupted job with quick first probe (1.5s) then backoff (10s -> 20s -> 40s -> 60s) while keeping .part."""
         with self._speed_lock:
             attempts = self._job_retry_counts.get(job_id, 0) + 1
             self._job_retry_counts[job_id] = attempts
-            delay = min(60.0, 10.0 * (2 ** (attempts - 1)))
+            delay = 1.5 if attempts == 1 else min(60.0, 10.0 * (2 ** (attempts - 2)))
             self._job_retry_after[job_id] = time.monotonic() + delay
         with Session(engine) as session:
             j = session.get(LoomTransferJob, job_id)
@@ -1745,6 +1832,7 @@ class LoomSyncManager:
         existing_offset = os.path.getsize(part_path) if os.path.exists(part_path) else 0
 
         headers = sign_loom_headers(local_node_id, peer_secret, "GET", remote_path)
+        headers["X-Loom-Job-Id"] = f"{local_node_id}:{job_id}"
         if existing_offset > 0:
             headers["Range"] = f"bytes={existing_offset}-"
 
@@ -1769,7 +1857,12 @@ class LoomSyncManager:
             client_kwargs = get_httpx_client_kwargs(peer_url, timeout=httpx.Timeout(30.0, read=60.0))
             with httpx.Client(**client_kwargs) as client:
                 with client.stream("GET", f"{peer_url}{remote_path}", headers=headers) as resp:
-                    if resp.status_code == 416 and existing_offset > 0:
+                    if resp.status_code == 410:
+                        self._clear_job_retry(job_id)
+                        self._mark_job(job_id, "canceled_by_sender", "Canceled by Sender")
+                        cleanup_job_part_file(target_path, sync_dir=sync_dir_for_cleanup)
+                        return True
+                    elif resp.status_code == 416 and existing_offset > 0:
                         cleanup_job_part_file(target_path, sync_dir=sync_dir_for_cleanup)
                         self._schedule_job_retry(job_id, "Range offset reset", written=0)
                         return False
@@ -1920,4 +2013,147 @@ class LoomSyncManager:
                 session.commit()
 
 
+class LoomUploadTracker:
+    """Tracks active outgoing Loom uploads so admins can monitor and cancel them in real time."""
+
+    CANCEL_TTL_JOB_SECONDS = 1800.0   # 30 minutes for specific remote job IDs
+    CANCEL_TTL_ITEM_SECONDS = 60.0    # 60 seconds fallback when no X-Loom-Job-Id header is sent
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._uploads: dict[str, dict[str, Any]] = {}
+        self._cancelled_keys: dict[tuple, float] = {}
+
+    def _prune_cancelled_locked(self, now: float) -> None:
+        expired = [k for k, exp in self._cancelled_keys.items() if exp <= now]
+        for k in expired:
+            self._cancelled_keys.pop(k, None)
+
+    def register_upload(
+        self,
+        *,
+        peer_id: Optional[int],
+        peer_name: str,
+        media_type: str,
+        item_id: int,
+        title: str,
+        series_title: Optional[str] = None,
+        season: Optional[int] = None,
+        episode: Optional[int] = None,
+        quality_label: str = "",
+        total_bytes: int = 0,
+        start_offset: int = 0,
+        hops: int = 1,
+        remote_job_id: str = "",
+    ) -> tuple[str, threading.Event]:
+        upload_id = uuid.uuid4().hex
+        cancel_event = threading.Event()
+        with self._lock:
+            self._uploads[upload_id] = {
+                "upload_id": upload_id,
+                "peer_id": peer_id,
+                "peer_name": peer_name or "Anonymous",
+                "media_type": media_type,
+                "item_id": item_id,
+                "remote_job_id": (remote_job_id or "").strip(),
+                "title": title or "Untitled",
+                "series_title": series_title,
+                "season": season,
+                "episode": episode,
+                "quality_label": quality_label or "",
+                "hops": max(1, int(hops or 1)),
+                "bytes_transferred": max(0, int(start_offset or 0)),
+                "total_bytes": max(0, int(total_bytes or 0)),
+                "speed_bps": 0.0,
+                "status": "uploading",
+                "cancel_event": cancel_event,
+                "started_at": time.monotonic(),
+            }
+        return upload_id, cancel_event
+
+    def update_progress(self, upload_id: str, bytes_transferred: int, speed_bps: float) -> None:
+        with self._lock:
+            entry = self._uploads.get(upload_id)
+            if not entry:
+                return
+            entry["bytes_transferred"] = max(0, int(bytes_transferred))
+            if speed_bps > 0:
+                prev = float(entry.get("speed_bps") or 0.0)
+                entry["speed_bps"] = (0.6 * speed_bps + 0.4 * prev) if prev > 0 else speed_bps
+
+    def cancel_upload(self, upload_id: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            self._prune_cancelled_locked(now)
+            entry = self._uploads.get(upload_id)
+            if not entry:
+                return False
+            entry["status"] = "cancelled"
+            entry["cancel_event"].set()
+            peer_id = entry.get("peer_id")
+            remote_job_id = entry.get("remote_job_id") or ""
+            if peer_id is not None:
+                if remote_job_id:
+                    self._cancelled_keys[("job", peer_id, remote_job_id)] = now + self.CANCEL_TTL_JOB_SECONDS
+                else:
+                    self._cancelled_keys[("item", peer_id, entry.get("media_type"), entry.get("item_id"))] = (
+                        now + self.CANCEL_TTL_ITEM_SECONDS
+                    )
+            return True
+
+    def is_transfer_cancelled_by_sender(
+        self,
+        peer_id: Optional[int],
+        remote_job_id: str,
+        media_type: str,
+        item_id: int,
+    ) -> bool:
+        if peer_id is None:
+            return False
+        now = time.monotonic()
+        rjid = (remote_job_id or "").strip()
+        with self._lock:
+            self._prune_cancelled_locked(now)
+            if rjid and ("job", peer_id, rjid) in self._cancelled_keys:
+                return True
+            if not rjid and ("item", peer_id, media_type, item_id) in self._cancelled_keys:
+                return True
+            return False
+
+    def unregister_upload(self, upload_id: str) -> None:
+        with self._lock:
+            self._uploads.pop(upload_id, None)
+
+    def list_active_uploads(self) -> list[dict[str, Any]]:
+        with self._lock:
+            results: list[dict[str, Any]] = []
+            for entry in self._uploads.values():
+                if entry.get("status") != "uploading":
+                    continue
+                total = int(entry.get("total_bytes") or 0)
+                transferred = int(entry.get("bytes_transferred") or 0)
+                pct = round((transferred / total) * 100.0, 1) if total > 0 else 0.0
+                results.append({
+                    "id": entry["upload_id"],
+                    "upload_id": entry["upload_id"],
+                    "direction": "upload",
+                    "peer_id": entry["peer_id"],
+                    "peer_name": entry["peer_name"],
+                    "media_type": entry["media_type"],
+                    "title": entry["title"],
+                    "series_title": entry["series_title"],
+                    "season": entry["season"],
+                    "episode": entry["episode"],
+                    "quality_label": entry["quality_label"],
+                    "hops": entry["hops"],
+                    "status": "uploading",
+                    "bytes_transferred": transferred,
+                    "total_bytes": total,
+                    "progress_pct": min(100.0, pct),
+                    "speed_bps": round(float(entry.get("speed_bps") or 0.0), 1),
+                })
+            return results
+
+
+loom_upload_tracker = LoomUploadTracker()
 loom_sync_manager = LoomSyncManager()

@@ -63,8 +63,11 @@ from .loom import (
     rollover_peer_monthly_usage,
     is_quality_allowed,
     is_filetype_allowed,
+    is_file_size_allowed,
     build_sync_target_path,
     cleanup_job_part_file,
+    get_manifest_quality_label,
+    loom_upload_tracker,
     loom_sync_manager,
 )
 from .scanner import METADATA_DIR, scan_media_library, scanner_manager, is_recycle_name, is_recycle_path, download_image, async_download_image, async_fetch_additional_details, async_fetch_text_details, SafeHTTPClient, httpx, find_local_trailer, extract_tmdb_trailer_key
@@ -10521,6 +10524,7 @@ async def get_inbox(
 
     reset_requests = []
     loom_downloads = []
+    loom_uploads = []
     if is_actual_admin(current_user, current_profile):
         pending_resets = session.exec(select(PasswordResetRequest).where(PasswordResetRequest.status == "pending")).all()
         for pr in pending_resets:
@@ -10534,7 +10538,7 @@ async def get_inbox(
 
         active_jobs = session.exec(
             select(LoomTransferJob)
-            .where(LoomTransferJob.status.in_(["queued", "downloading", "paused_stream", "paused_schedule", "paused_cap"]))
+            .where(LoomTransferJob.status.in_(["queued", "downloading", "paused_stream", "paused_schedule", "paused_cap", "canceled_by_sender"]))
             .order_by(LoomTransferJob.id.desc())
             .limit(20)
         ).all()
@@ -10544,11 +10548,13 @@ async def get_inbox(
                 p = session.get(LoomPeer, j.peer_id)
                 peer_names[j.peer_id] = (p.name or "Anonymous") if p else "Anonymous"
             item = _serialize_loom_job(j)
+            item["direction"] = "download"
             item["peer_name"] = peer_names[j.peer_id]
-            item["hops"] = 0
+            item["hops"] = 2 if getattr(j, "relay_token", None) else 1
             loom_downloads.append(item)
+        loom_uploads = loom_upload_tracker.list_active_uploads()
 
-    return {"invites": results, "reset_requests": reset_requests, "loom_downloads": loom_downloads}
+    return {"invites": results, "reset_requests": reset_requests, "loom_downloads": loom_downloads, "loom_uploads": loom_uploads}
 
 def get_user_active_session(user_id: int, db: Session) -> Optional[WatchSession]:
     now = datetime.now(timezone.utc)
@@ -11019,6 +11025,10 @@ async def loom_v1_search(request: Request, session: Session = Depends(get_sessio
         hops_remaining = max(0, int((payload.get("hops_remaining") if isinstance(payload, dict) else 0) or 0))
     except (TypeError, ValueError):
         hops_remaining = 0
+    try:
+        hops_traveled = max(1, int((payload.get("hops_traveled") if isinstance(payload, dict) else 1) or 1))
+    except (TypeError, ValueError):
+        hops_traveled = 1
 
     peer.last_seen_at = datetime.now(timezone.utc)
     session.add(peer)
@@ -11039,24 +11049,28 @@ async def loom_v1_search(request: Request, session: Session = Depends(get_sessio
     if not is_self_peer and mark_or_check_search_request_id(request_id):
         return {"found": False, "query": str(query or ""), "movies": [], "tv": [], "photos": [], "music": []}
 
-    try:
-        result = search_loom_manifest(
-            session,
-            query=query,
-            media_type=media_type,
-            year=year,
-            season=season,
-            episode=episode,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    max_sending_hops = max(1, int(settings["max_sending_hops"]))
+    if hops_traveled > max_sending_hops:
+        result = {"found": False, "query": str(query or ""), "movies": [], "tv": [], "photos": [], "music": []}
+    else:
+        try:
+            result = search_loom_manifest(
+                session,
+                query=query,
+                media_type=media_type,
+                year=year,
+                season=season,
+                episode=episode,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     for bucket in ("movies", "tv", "photos", "music"):
         for item in result.get(bucket, []):
             item["hops"] = 0
 
-    if not is_self_peer and settings["allow_relay"] and hops_remaining > 0 and httpx is not None:
-        next_hops = min(hops_remaining - 1, max(0, int(settings["max_hops"]) - 1))
+    if not is_self_peer and settings["allow_relay"] and hops_remaining > 0 and hops_traveled < max_sending_hops and httpx is not None:
+        next_hops = min(hops_remaining - 1, max(0, max_sending_hops - hops_traveled))
         downstream_peers = session.exec(
             select(LoomPeer).where(
                 LoomPeer.id != peer.id,
@@ -11069,6 +11083,7 @@ async def loom_v1_search(request: Request, session: Session = Depends(get_sessio
             "query": query,
             "request_id": request_id,
             "hops_remaining": next_hops,
+            "hops_traveled": hops_traveled + 1,
         }
         if media_type:
             fwd_payload_dict["media_type"] = media_type
@@ -11166,6 +11181,8 @@ async def loom_v1_relay_download(
     hdrs = sign_loom_headers(local_nid, target_peer.shared_secret, "GET", upstream_path)
     if request.headers.get("range"):
         hdrs["Range"] = request.headers["range"]
+    if request.headers.get("x-loom-job-id"):
+        hdrs["X-Loom-Job-Id"] = request.headers["x-loom-job-id"]
 
     upstream_url = f"{target_peer.base_url.rstrip('/')}{upstream_path}"
     bw_kbps = settings["upload_bandwidth_limit_kbps"]
@@ -11215,6 +11232,10 @@ async def loom_v1_download(
     if not peer:
         raise HTTPException(status_code=401, detail="Invalid Loom signature.")
 
+    remote_job_id = (request.headers.get("x-loom-job-id") or "").strip()
+    if peer.id is not None and loom_upload_tracker.is_transfer_cancelled_by_sender(peer.id, remote_job_id, media_type, item_id):
+        return JSONResponse(status_code=410, content={"detail": "Canceled by Sender", "code": "canceled_by_sender"})
+
     allowed, _, reason = can_transfer_now(
         session,
         peer,
@@ -11245,6 +11266,8 @@ async def loom_v1_download(
 
     file_path = item.file_path
     file_size = os.path.getsize(file_path)
+    if not is_file_size_allowed(file_size, settings["max_file_size_gb"]):
+        raise HTTPException(status_code=403, detail="File exceeds Max File Size limit.")
     range_header = request.headers.get("range")
     start = 0
     end = file_size - 1
@@ -11263,20 +11286,58 @@ async def loom_v1_download(
 
     content_length = end - start + 1
     peer_id = peer.id
+    peer_name = peer.name or "Anonymous"
     bw_kbps = settings["upload_bandwidth_limit_kbps"]
 
     if peer_id is not None and not acquire_peer_transfer_slot(peer_id, settings["max_concurrent_transfers"]):
         raise HTTPException(status_code=429, detail="Max concurrent transfers reached for this peer.")
 
+    upload_title = getattr(item, "title", None) or os.path.basename(file_path)
+    upload_series_title = None
+    upload_season = None
+    upload_episode = None
+    if media_type == "tv":
+        upload_series_title = getattr(item, "series_title", None) or upload_title
+        upload_season = getattr(item, "season", None)
+        upload_episode = getattr(item, "episode", None)
+        upload_title = getattr(item, "episode_title", None) or upload_series_title
+        upload_quality = get_manifest_quality_label(session, media_type, item_id, file_path)
+    elif media_type == "movie":
+        upload_quality = get_manifest_quality_label(session, media_type, item_id, file_path)
+    elif media_type == "photo":
+        upload_quality = "Photo"
+    else:
+        upload_quality = os.path.splitext(file_path)[1].lstrip(".").upper() or "Audio"
+
+    upload_id, cancel_event = loom_upload_tracker.register_upload(
+        peer_id=peer_id,
+        peer_name=peer_name,
+        media_type=media_type,
+        item_id=item_id,
+        title=upload_title,
+        series_title=upload_series_title,
+        season=upload_season,
+        episode=upload_episode,
+        quality_label=upload_quality,
+        total_bytes=file_size,
+        start_offset=start,
+        hops=1,
+        remote_job_id=remote_job_id,
+    )
+
     def _stream_file():
         sent_total = 0
         win_start = time.monotonic()
         win_bytes = 0
+        speed_check_time = win_start
+        speed_check_bytes = 0
         try:
             with open(file_path, "rb") as fp:
                 fp.seek(start)
                 remaining = content_length
                 while remaining > 0:
+                    if cancel_event.is_set():
+                        break
                     chunk = fp.read(min(65536, remaining))
                     if not chunk:
                         break
@@ -11285,8 +11346,15 @@ async def loom_v1_download(
                     remaining -= clen
                     sent_total += clen
                     win_bytes += clen
+                    speed_check_bytes += clen
+                    now_mono = time.monotonic()
+                    if now_mono - speed_check_time >= 0.5 or speed_check_bytes >= 256 * 1024:
+                        dt = max(0.05, now_mono - speed_check_time)
+                        loom_upload_tracker.update_progress(upload_id, start + sent_total, speed_check_bytes / dt)
+                        speed_check_time = now_mono
+                        speed_check_bytes = 0
                     if bw_kbps > 0:
-                        elapsed = time.monotonic() - win_start
+                        elapsed = now_mono - win_start
                         target = win_bytes / (bw_kbps * 1024.0)
                         if target > elapsed:
                             time.sleep(min(1.5, target - elapsed))
@@ -11294,6 +11362,7 @@ async def loom_v1_download(
                             win_start = time.monotonic()
                             win_bytes = 0
         finally:
+            loom_upload_tracker.unregister_upload(upload_id)
             if peer_id is not None:
                 release_peer_transfer_slot(peer_id)
             if sent_total > 0:
@@ -11627,11 +11696,12 @@ async def api_search_all_loom_peers(
 
     request_id = str(uuid.uuid4())
     mark_or_check_search_request_id(request_id)
-    hops_remaining = max(0, int(settings["max_hops"]) - 1)
+    hops_remaining = max(0, int(settings["max_search_hops"]) - 1)
     search_payload_dict: dict[str, Any] = {
         "query": parsed["query"],
         "request_id": request_id,
         "hops_remaining": hops_remaining,
+        "hops_traveled": 1,
     }
     if parsed["season"] is not None:
         search_payload_dict["season"] = parsed["season"]
@@ -11704,18 +11774,18 @@ async def api_search_all_loom_peers(
         peer_label = p.name or "Anonymous"
         for m in (data.get("movies") or []):
             if is_quality_allowed(m.get("quality_label"), max_q) and is_filetype_allowed(m.get("filename"), allowed_exts):
-                movies.append({**m, "peer_id": p.id, "peer_name": peer_label})
+                movies.append({**m, "hops": int(m.get("hops", 0) or 0) + 1, "peer_id": p.id, "peer_name": peer_label})
         for t in (data.get("tv") or []):
             if is_quality_allowed(t.get("quality_label"), max_q) and is_filetype_allowed(t.get("filename"), allowed_exts):
-                tv.append({**t, "peer_id": p.id, "peer_name": peer_label})
+                tv.append({**t, "hops": int(t.get("hops", 0) or 0) + 1, "peer_id": p.id, "peer_name": peer_label})
         for ph in (data.get("photos") or []):
             if is_filetype_allowed(ph.get("filename"), allowed_exts):
-                photos.append({**ph, "peer_id": p.id, "peer_name": peer_label})
+                photos.append({**ph, "hops": int(ph.get("hops", 0) or 0) + 1, "peer_id": p.id, "peer_name": peer_label})
         for tr in (data.get("music") or []):
             if is_filetype_allowed(tr.get("filename"), allowed_exts):
-                music.append({**tr, "peer_id": p.id, "peer_name": peer_label})
+                music.append({**tr, "hops": int(tr.get("hops", 0) or 0) + 1, "peer_id": p.id, "peer_name": peer_label})
 
-    deduped = deduplicate_loom_search_results(movies, tv, photos, music)
+    deduped = deduplicate_loom_search_results(movies, tv, photos, music, query=parsed["query"])
     return {
         "found": bool(deduped["movies"] or deduped["tv"] or deduped["photos"] or deduped["music"]),
         "query": raw_query,
@@ -11904,3 +11974,15 @@ async def api_cancel_loom_job(
         sync_dir = get_loom_settings(session).get("sync_dir") or "/media/loom"
         cleanup_job_part_file(job.target_path, sync_dir=sync_dir)
     return {"status": "ok"}
+
+
+@app.post("/api/loom/uploads/{upload_id}/cancel")
+async def api_cancel_loom_upload(
+    upload_id: str,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+):
+    if not is_actual_admin(current_user, current_profile):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    cancelled = loom_upload_tracker.cancel_upload(upload_id)
+    return {"status": "ok", "cancelled": cancelled}

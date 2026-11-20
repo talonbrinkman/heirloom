@@ -24,7 +24,9 @@ def db_session(tmp_path, monkeypatch):
 
 
 def test_settings_split_bandwidth_and_removed_fields(db_session):
-    assert loom.get_loom_settings(db_session)["max_hops"] == 1
+    defaults = loom.get_loom_settings(db_session)
+    assert defaults["max_search_hops"] == 1
+    assert defaults["max_sending_hops"] == 1
     saved = loom.save_loom_settings(
         db_session,
         {
@@ -34,7 +36,8 @@ def test_settings_split_bandwidth_and_removed_fields(db_session):
             "download_bandwidth_limit_kbps": 2048,
             "pause_on_active_streams": False,
             "max_quality": "720p",
-            "max_hops": 2,
+            "max_search_hops": 4,
+            "max_sending_hops": 2,
         },
     )
     assert saved["enabled"] is True
@@ -43,7 +46,9 @@ def test_settings_split_bandwidth_and_removed_fields(db_session):
     assert saved["download_bandwidth_limit_kbps"] == 2048
     assert saved["pause_on_active_streams"] is False
     assert saved["max_quality"] == "720p"
-    assert saved["max_hops"] == 2
+    assert saved["max_search_hops"] == 4
+    assert saved["max_sending_hops"] == 2
+    assert saved["max_hops"] == 4
     for removed in ("node_name", "public_url", "min_free_gb", "max_quota_gb", "monthly_cap_gb", "schedule_enabled"):
         assert removed not in saved
 
@@ -277,6 +282,9 @@ def test_parse_and_search_season_episode_queries(db_session, tmp_path):
     assert loom.parse_loom_search_query("The Office S1") == {"query": "The Office", "season": 1, "episode": None, "media_type": "tv"}
     assert loom.parse_loom_search_query("The Office S1E4") == {"query": "The Office", "season": 1, "episode": 4, "media_type": "tv"}
     assert loom.parse_loom_search_query("Dexter Season 2 Episode 3") == {"query": "Dexter", "season": 2, "episode": 3, "media_type": "tv"}
+    assert loom.parse_loom_search_query("Dexter Season 1 E3") == {"query": "Dexter", "season": 1, "episode": 3, "media_type": "tv"}
+    assert loom.parse_loom_search_query("Dexter S1 Episode 3") == {"query": "Dexter", "season": 1, "episode": 3, "media_type": "tv"}
+    assert loom.parse_loom_search_query("Dexter S01 Ep. 3") == {"query": "Dexter", "season": 1, "episode": 3, "media_type": "tv"}
     assert loom.parse_loom_search_query("Inception") == {"query": "Inception", "season": None, "episode": None, "media_type": None}
 
     tv_dir = tmp_path / "tv"
@@ -325,6 +333,19 @@ def test_deduplicate_loom_search_results_picks_best_source():
     ep1, ep2 = deduped["tv"]
     assert ep1["episode"] == 1 and ep1["peer_id"] == 2 and ep1["sources_count"] == 2
     assert ep2["episode"] == 2 and ep2["peer_id"] == 1 and ep2["sources_count"] == 1
+
+    # Exact title match ranks ahead of prefix/substring matches
+    dexter_tv = [
+        {"id": 1, "series_title": "A Dexter Story", "season": 1, "episode": 3, "quality_label": "1080p", "file_size": 500, "hops": 0, "peer_id": 1},
+        {"id": 2, "series_title": "Dexter: New Blood", "season": 1, "episode": 3, "quality_label": "1080p", "file_size": 500, "hops": 0, "peer_id": 1},
+        {"id": 3, "series_title": "Dexter", "season": 1, "episode": 3, "quality_label": "1080p", "file_size": 500, "hops": 0, "peer_id": 1},
+    ]
+    dexter_dedup = loom.deduplicate_loom_search_results([], dexter_tv, [], [], query="Dexter S01E03")
+    assert [t["series_title"] for t in dexter_dedup["tv"]] == [
+        "Dexter",
+        "Dexter: New Blood",
+        "A Dexter Story",
+    ]
 
 
 def test_peer_rate_limit_and_concurrent_transfer_slots(db_session):
@@ -489,3 +510,87 @@ def test_recover_interrupted_jobs_resumes_from_part_file(db_session, tmp_path):
     assert job.status == "queued"
     assert job.bytes_transferred == 10
     assert part.exists()
+
+
+def test_upload_tracker_progress_and_sender_cancel():
+    tracker = loom.LoomUploadTracker()
+    uid, cancel_ev = tracker.register_upload(
+        peer_id=7,
+        peer_name="NAS Friend",
+        media_type="movie",
+        item_id=42,
+        title="Madden",
+        quality_label="1080p",
+        total_bytes=1000,
+        start_offset=100,
+        hops=1,
+        remote_job_id="nodeA:99",
+    )
+    assert not cancel_ev.is_set()
+    tracker.update_progress(uid, 500, 200_000.0)
+    active = tracker.list_active_uploads()
+    assert len(active) == 1
+    assert active[0]["status"] == "uploading"
+    assert active[0]["peer_name"] == "NAS Friend"
+    assert active[0]["progress_pct"] == 50.0
+    assert active[0]["speed_bps"] == 200_000.0
+
+    # Sender cancels upload
+    assert tracker.cancel_upload(uid) is True
+    assert cancel_ev.is_set()
+    assert tracker.list_active_uploads() == []
+
+    # Same remote_job_id is recognized as canceled by sender; a fresh job_id is allowed
+    assert tracker.is_transfer_cancelled_by_sender(7, "nodeA:99", "movie", 42) is True
+    assert tracker.is_transfer_cancelled_by_sender(7, "nodeA:100", "movie", 42) is False
+    tracker.unregister_upload(uid)
+
+
+def test_max_file_size_gb_filtering(db_session, tmp_path):
+    assert loom.get_loom_settings(db_session)["max_file_size_gb"] == 0.0
+    assert loom.is_file_size_allowed(5 * (1024 ** 3), 0) is True
+    assert loom.is_file_size_allowed(5 * (1024 ** 3), 4.5) is False
+    assert loom.is_file_size_allowed(4 * (1024 ** 3), 4.5) is True
+
+    vol = tmp_path / "movies"
+    vol.mkdir()
+    small_file = vol / "Small.Movie.1080p.mp4"
+    large_file = vol / "Large.Movie.1080p.mp4"
+    small_file.write_bytes(b"a")
+    large_file.write_bytes(b"b")
+
+    manifest_path = tmp_path / "loom_manifest.json"
+    manifest_data = {
+        "version": 3,
+        "movies": [
+            {
+                "id": 1,
+                "media_type": "movie",
+                "title": "Small Movie",
+                "filename": small_file.name,
+                "file_size": 4 * (1024 ** 3),
+                "quality_label": "1080p",
+                "_file_path": str(small_file),
+            },
+            {
+                "id": 2,
+                "media_type": "movie",
+                "title": "Large Movie",
+                "filename": large_file.name,
+                "file_size": 5 * (1024 ** 3),
+                "quality_label": "1080p",
+                "_file_path": str(large_file),
+            },
+        ],
+        "tv": [],
+        "photos": [],
+        "music": [],
+    }
+    manifest_path.write_text(__import__("json").dumps(manifest_data), encoding="utf-8")
+
+    loom.save_loom_settings(db_session, {"searchable_volumes": [str(vol)], "max_file_size_gb": 4.5})
+    with __import__("unittest.mock").mock.patch.object(loom, "get_loom_manifest_path", return_value=str(manifest_path)):
+        res_small = loom.search_loom_manifest(db_session, "Small Movie")
+        res_large = loom.search_loom_manifest(db_session, "Large Movie")
+        assert len(res_small["movies"]) == 1
+        assert res_large["movies"] == []
