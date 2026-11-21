@@ -284,3 +284,10 @@ class LoomTransferJob(SQLModel, table=True):
     error_message: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class LoomPeerEvent(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    peer_id: int = Field(foreign_key="loompeer.id", index=True)
+    action: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)

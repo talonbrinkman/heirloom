@@ -594,3 +594,23 @@ def test_max_file_size_gb_filtering(db_session, tmp_path):
         res_large = loom.search_loom_manifest(db_session, "Large Movie")
         assert len(res_small["movies"]) == 1
         assert res_large["movies"] == []
+
+
+def test_peer_history_logging_and_pruning(db_session):
+    assert loom.format_loom_item_label("Pilot", "Dexter", 1, 3) == "Dexter S01E03"
+    assert loom.format_loom_item_label("Inception") == "Inception"
+
+    peer = LoomPeer(name="Cerebro", node_id="node-hist-1", base_url="http://abc.onion", shared_secret="sec")
+    db_session.add(peer)
+    db_session.commit()
+    db_session.refresh(peer)
+
+    for i in range(5):
+        loom.log_loom_peer_event(db_session, peer.id, f"Action {i}", max_events_per_peer=3)
+
+    events = db_session.exec(
+        loom.select(loom.LoomPeerEvent)
+        .where(loom.LoomPeerEvent.peer_id == peer.id)
+        .order_by(loom.LoomPeerEvent.id.desc())
+    ).all()
+    assert [e.action for e in events] == ["Action 4", "Action 3", "Action 2"]

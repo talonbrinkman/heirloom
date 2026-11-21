@@ -18,7 +18,7 @@ from sqlmodel import Session, select
 
 from .database import engine, sqlite_file_name
 from .ffmpeg_setup import get_cached_media_probe, probe_media_streams
-from .models import LoomPeer, LoomTransferJob, Movie, Photo, SystemConfig, TVShow, Track
+from .models import LoomPeer, LoomPeerEvent, LoomTransferJob, Movie, Photo, SystemConfig, TVShow, Track
 
 try:
     import httpx
@@ -59,6 +59,49 @@ QUALITY_HEIGHT_MAP: dict[str, int] = {
     "2160p": 2160,
     "original": 99999,
 }
+
+
+def format_loom_item_label(
+    title: Optional[str],
+    series_title: Optional[str] = None,
+    season: Optional[int] = None,
+    episode: Optional[int] = None,
+) -> str:
+    if series_title and season is not None and episode is not None:
+        return f"{series_title} S{int(season):02d}E{int(episode):02d}"
+    return (series_title or title or "Untitled").strip()
+
+
+def log_loom_peer_event(
+    session: Session,
+    peer_id: Optional[int],
+    action: str,
+    *,
+    commit: bool = True,
+    max_events_per_peer: int = 200,
+) -> Optional[LoomPeerEvent]:
+    if peer_id is None:
+        return None
+    text = str(action or "").strip()
+    if not text:
+        return None
+    ev = LoomPeerEvent(peer_id=int(peer_id), action=text[:240])
+    session.add(ev)
+    if commit:
+        session.commit()
+        session.refresh(ev)
+        if max_events_per_peer > 0:
+            stale = session.exec(
+                select(LoomPeerEvent)
+                .where(LoomPeerEvent.peer_id == int(peer_id))
+                .order_by(LoomPeerEvent.created_at.desc(), LoomPeerEvent.id.desc())
+                .offset(max_events_per_peer)
+            ).all()
+            if stale:
+                for old in stale:
+                    session.delete(old)
+                session.commit()
+    return ev
 
 
 def _get_config_value(session: Session, key: str, default: str = "") -> str:
@@ -1981,6 +2024,8 @@ class LoomSyncManager:
                     j.error_message = None
                     j.updated_at = datetime.now(timezone.utc)
                     session.add(j)
+                    label = format_loom_item_label(j.title, j.series_title, j.season, j.episode)
+                    log_loom_peer_event(session, j.peer_id, f"Downloaded {label}", commit=False)
                 if p:
                     if bytes_since_db_flush > 0:
                         rollover_peer_monthly_usage(session, p)
@@ -2010,6 +2055,11 @@ class LoomSyncManager:
                 j.error_message = error_message
                 j.updated_at = datetime.now(timezone.utc)
                 session.add(j)
+                label = format_loom_item_label(j.title, j.series_title, j.season, j.episode)
+                if status == "canceled_by_sender":
+                    log_loom_peer_event(session, j.peer_id, f"Peer canceled {label}", commit=False)
+                elif status == "failed":
+                    log_loom_peer_event(session, j.peer_id, f"Download failed: {label}", commit=False)
                 session.commit()
 
 
@@ -2080,6 +2130,11 @@ class LoomUploadTracker:
             if speed_bps > 0:
                 prev = float(entry.get("speed_bps") or 0.0)
                 entry["speed_bps"] = (0.6 * speed_bps + 0.4 * prev) if prev > 0 else speed_bps
+
+    def get_upload_info(self, upload_id: str) -> Optional[dict[str, Any]]:
+        with self._lock:
+            entry = self._uploads.get(upload_id)
+            return dict(entry) if entry else None
 
     def cancel_upload(self, upload_id: str) -> bool:
         now = time.monotonic()

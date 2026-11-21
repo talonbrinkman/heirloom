@@ -33,7 +33,7 @@ import random
 from collections import defaultdict, Counter
 from datetime import datetime, timezone, timedelta
 from .database import create_db_and_tables, get_session, engine
-from .models import User, UserSession, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile, Artist, Album, Track, Playlist, PlaylistTrack, Person, LoomPeer, LoomTransferJob
+from .models import User, UserSession, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile, Artist, Album, Track, Playlist, PlaylistTrack, Person, LoomPeer, LoomPeerEvent, LoomTransferJob
 from .loom import (
     get_loom_settings,
     save_loom_settings,
@@ -67,6 +67,8 @@ from .loom import (
     build_sync_target_path,
     cleanup_job_part_file,
     get_manifest_quality_label,
+    format_loom_item_label,
+    log_loom_peer_event,
     loom_upload_tracker,
     loom_sync_manager,
 )
@@ -10968,6 +10970,7 @@ async def loom_v1_handshake(request: Request, session: Session = Depends(get_ses
         payload = {}
 
     peer = verify_loom_request(session, dict(request.headers), "POST", "/api/loom/v1/handshake", body)
+    is_new_pair = False
     if not peer:
         peer = consume_issued_secret_for_handshake(
             session,
@@ -10978,6 +10981,8 @@ async def loom_v1_handshake(request: Request, session: Session = Depends(get_ses
             peer_name=payload.get("name", "Anonymous"),
             peer_base_url=payload.get("base_url", ""),
         )
+        if peer:
+            is_new_pair = True
     if not peer:
         raise HTTPException(status_code=401, detail="Invalid or expired Loom signature.")
 
@@ -10990,6 +10995,8 @@ async def loom_v1_handshake(request: Request, session: Session = Depends(get_ses
         if payload.get("base_url"):
             peer.base_url = str(payload["base_url"]).strip().rstrip("/")
     session.add(peer)
+    if is_new_pair and peer.id is not None:
+        log_loom_peer_event(session, peer.id, "Peer paired", commit=False)
     session.commit()
 
     local_node_id, _ = get_peer_local_identity(session, peer)
@@ -11030,12 +11037,27 @@ async def loom_v1_search(request: Request, session: Session = Depends(get_sessio
     except (TypeError, ValueError):
         hops_traveled = 1
 
+    sender_node_id = (request.headers.get("x-loom-node-id") or "").strip()
+    is_self_peer = bool(sender_node_id and peer.local_node_id and sender_node_id == peer.local_node_id)
+
+    q_text = str(query or "").strip()
+    if not is_self_peer and q_text and peer.id is not None:
+        q_label = q_text
+        if season is not None and episode is not None:
+            try:
+                q_label = f"{q_text} S{int(season):02d}E{int(episode):02d}"
+            except (TypeError, ValueError):
+                pass
+        elif season is not None:
+            try:
+                q_label = f"{q_text} S{int(season):02d}"
+            except (TypeError, ValueError):
+                pass
+        log_loom_peer_event(session, peer.id, f'Peer searched "{q_label}"', commit=False)
+
     peer.last_seen_at = datetime.now(timezone.utc)
     session.add(peer)
     session.commit()
-
-    sender_node_id = (request.headers.get("x-loom-node-id") or "").strip()
-    is_self_peer = bool(sender_node_id and peer.local_node_id and sender_node_id == peer.local_node_id)
 
     if peer.id is not None:
         rl_ok, retry_after = check_peer_search_rate_limit(peer.id, settings["max_requests_per_minute"])
@@ -11309,6 +11331,10 @@ async def loom_v1_download(
     else:
         upload_quality = os.path.splitext(file_path)[1].lstrip(".").upper() or "Audio"
 
+    upload_label = format_loom_item_label(upload_title, upload_series_title, upload_season, upload_episode)
+    if start == 0 and peer_id is not None:
+        log_loom_peer_event(session, peer_id, f"Sending {upload_label}")
+
     upload_id, cancel_event = loom_upload_tracker.register_upload(
         peer_id=peer_id,
         peer_name=peer_name,
@@ -11373,6 +11399,8 @@ async def loom_v1_download(
                         p.bytes_sent_month += sent_total
                         p.last_seen_at = datetime.now(timezone.utc)
                         s.add(p)
+                        if not cancel_event.is_set() and start + sent_total >= file_size and peer_id is not None:
+                            log_loom_peer_event(s, peer_id, f"Sent {upload_label}", commit=False)
                         s.commit()
 
     resp_headers = {
@@ -11462,6 +11490,7 @@ async def api_import_loom_bundle(
         peer = import_peer_bundle(session, raw_bundle, custom_name=custom_name)
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
+    log_loom_peer_event(session, peer.id, "Paired with peer")
 
     settings = get_loom_settings(session)
     if settings["enabled"] and peer.base_url:
@@ -11625,8 +11654,36 @@ async def api_rotate_loom_peer_onion(
         new_url = rotate_peer_onion(session, peer)
     except RuntimeError as e:
         return JSONResponse(status_code=503, content={"error": str(e)})
+    log_loom_peer_event(session, peer.id, "Rotated address")
     peers = session.exec(select(LoomPeer).order_by(LoomPeer.id.desc())).all()
     return {"status": "ok", "local_onion_url": new_url, "peers": [_serialize_loom_peer(p) for p in peers]}
+
+
+@app.get("/api/loom/peers/{peer_id}/history")
+async def api_loom_peer_history(
+    peer_id: int,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session),
+):
+    if not is_actual_admin(current_user, current_profile):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    events = session.exec(
+        select(LoomPeerEvent)
+        .where(LoomPeerEvent.peer_id == peer_id)
+        .order_by(LoomPeerEvent.created_at.desc(), LoomPeerEvent.id.desc())
+        .limit(100)
+    ).all()
+    return {
+        "events": [
+            {
+                "id": e.id,
+                "action": e.action,
+                "created_at": (e.created_at.replace(tzinfo=timezone.utc) if e.created_at.tzinfo is None else e.created_at).isoformat(),
+            }
+            for e in events
+        ]
+    }
 
 
 @app.post("/api/loom/peers/{peer_id}/delete")
@@ -11647,6 +11704,8 @@ async def api_delete_loom_peer(
             if job.status != "completed":
                 cleanup_job_part_file(job.target_path, sync_dir=sync_dir)
             session.delete(job)
+        for ev in session.exec(select(LoomPeerEvent).where(LoomPeerEvent.peer_id == peer_id)).all():
+            session.delete(ev)
         session.delete(peer)
         session.commit()
     peers = session.exec(select(LoomPeer).order_by(LoomPeer.id.desc())).all()
@@ -11730,6 +11789,10 @@ async def api_search_all_loom_peers(
         except Exception:
             pass
         return None
+
+    for p in eligible_peers:
+        log_loom_peer_event(session, p.id, f'Searched for "{raw_query}"', commit=False)
+    session.commit()
 
     tasks = [asyncio.create_task(_query_peer(p)) for p in eligible_peers]
     responses: list[Optional[tuple[LoomPeer, dict[str, Any]]]] = []
@@ -11827,6 +11890,8 @@ async def api_search_peer_item(
         search_payload_dict["year"] = str(body["year"]).strip()
 
     search_payload = json.dumps(search_payload_dict).encode("utf-8")
+    if query:
+        log_loom_peer_event(session, peer.id, f'Searched for "{query}"')
     local_node_id, _ = get_peer_local_identity(session, peer)
     hdrs = sign_loom_headers(local_node_id, peer.shared_secret, "POST", "/api/loom/v1/search", search_payload)
     hdrs["Content-Type"] = "application/json"
@@ -11938,6 +12003,11 @@ async def api_queue_loom_sync(
         session.add(job)
         session.commit()
         session.refresh(job)
+        log_loom_peer_event(
+            session,
+            job.peer_id,
+            f"Requested {format_loom_item_label(job.title, job.series_title, job.season, job.episode)}",
+        )
         created_jobs.append(job)
 
     loom_sync_manager.wake()
@@ -11970,6 +12040,12 @@ async def api_cancel_loom_job(
         job.status = "cancelled"
         job.updated_at = datetime.now(timezone.utc)
         session.add(job)
+        log_loom_peer_event(
+            session,
+            job.peer_id,
+            f"Canceled download: {format_loom_item_label(job.title, job.series_title, job.season, job.episode)}",
+            commit=False,
+        )
         session.commit()
         sync_dir = get_loom_settings(session).get("sync_dir") or "/media/loom"
         cleanup_job_part_file(job.target_path, sync_dir=sync_dir)
@@ -11981,8 +12057,16 @@ async def api_cancel_loom_upload(
     upload_id: str,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session),
 ):
     if not is_actual_admin(current_user, current_profile):
         raise HTTPException(status_code=403, detail="Forbidden")
+    info = loom_upload_tracker.get_upload_info(upload_id)
     cancelled = loom_upload_tracker.cancel_upload(upload_id)
+    if cancelled and info and info.get("peer_id") is not None:
+        log_loom_peer_event(
+            session,
+            info["peer_id"],
+            f"Canceled sending {format_loom_item_label(info.get('title'), info.get('series_title'), info.get('season'), info.get('episode'))}",
+        )
     return {"status": "ok", "cancelled": cancelled}

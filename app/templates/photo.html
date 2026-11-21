@@ -45,42 +45,13 @@
             margin: 0;
             font-size: 1.5em;
         }
-        .close-btn {
-            color: #fff;
-            background: rgba(255,255,255,0.2);
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            text-decoration: none;
-            transition: background 0.2s;
-        }
-        .close-btn:hover {
-            background: rgba(255,255,255,0.4);
-        }
         .photo-arrow {
             position: absolute;
             top: 50%;
             transform: translateY(-50%);
-            color: #fff;
-            background: rgba(255,255,255,0.2);
-            border-radius: 50%;
-            width: 44px;
-            height: 44px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            text-decoration: none;
-            transition: background 0.2s, transform 0.15s ease-out;
             z-index: 10;
-            border: none;
-            cursor: pointer;
-            outline: none;
         }
-        .photo-arrow:hover { 
-            background: rgba(255,255,255,0.4); 
+        .photo-arrow:hover {
             transform: translateY(-50%) scale(1.08);
         }
         .left-arrow { left: 20px; }
@@ -99,16 +70,16 @@
         </div>
         <div class="flex gap-15">
             {% if user.downloads_access %}
-            <a href="/photo_file/{{ photo.id }}" download class="close-btn" id="photoDownloadBtn" title="Download"><i data-lucide="download"></i></a>
+            <a href="/photo_file/{{ photo.id }}" download class="control-btn" id="photoDownloadBtn" title="Download"><i data-lucide="download"></i></a>
             {% endif %}
-            <a href="{{ close_url }}" class="close-btn" title="Close" id="photoCloseBtn"><i data-lucide="x"></i></a>
+            <a href="{{ close_url }}" class="player-close-btn" title="Close" id="photoCloseBtn"><i data-lucide="x"></i></a>
         </div>
     </div>
     
-    <button type="button" class="photo-arrow left-arrow" id="prevPhotoBtn" onclick="navPhoto(-1)" title="Previous" style="display: {% if prev_photo_id %}flex{% else %}none{% endif %};">
+    <button type="button" class="control-btn photo-arrow left-arrow" id="prevPhotoBtn" onclick="navPhoto(-1)" title="Previous" style="display: {% if prev_photo_id %}inline-flex{% else %}none{% endif %};">
         <i data-lucide="chevron-left"></i>
     </button>
-    <button type="button" class="photo-arrow right-arrow" id="nextPhotoBtn" onclick="navPhoto(1)" title="Next" style="display: {% if next_photo_id %}flex{% else %}none{% endif %};">
+    <button type="button" class="control-btn photo-arrow right-arrow" id="nextPhotoBtn" onclick="navPhoto(1)" title="Next" style="display: {% if next_photo_id %}inline-flex{% else %}none{% endif %};">
         <i data-lucide="chevron-right"></i>
     </button>
 

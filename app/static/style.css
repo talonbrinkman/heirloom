@@ -318,8 +318,9 @@ button:disabled,
 
 button svg,
 .btn svg {
-    width: 16px;
-    height: 16px;
+    width: 1.25em;
+    height: 1.25em;
+    aspect-ratio: 1/1;
     flex-shrink: 0;
 }
 
@@ -357,11 +358,6 @@ button svg,
     font-size: 0.75em;
 }
 
-.btn-sm svg {
-    height: 100%;
-    aspect-ratio: 1;
-}
-
 .btn-block {
     width: 100%;
 }
@@ -397,8 +393,9 @@ button svg,
 
 .icon-btn svg,
 .icon-btn i {
-    width: 1.1em;
-    height: 1.1em;
+    width: 50%;
+    height: 50%;
+    aspect-ratio: 1 / 1;
 }
 
 /* Pill-shaped translucent button (detail page Play / Watchlist / Download) */
@@ -920,8 +917,9 @@ button.hover-play {
 
 .hover-play svg,
 .hover-play i {
-    width: 1.3em;
-    height: 1.3em;
+    width: 50%;
+    height: 50%;
+    aspect-ratio: 1 / 1;
 }
 
 .hover-play:active,
@@ -945,8 +943,9 @@ button.three-dots-btn {
 
 .three-dots-btn svg,
 .three-dots-btn i {
-    width: 1.05em;
-    height: 1.05em;
+    width: 50%;
+    height: 50%;
+    aspect-ratio: 1 / 1;
 }
 
 .poster-container:hover .hover-play,
@@ -2072,6 +2071,7 @@ a.player-close-btn:hover {
 .control-btn i {
     width: 50%;
     height: 50%;
+    aspect-ratio: 1 / 1;
     display: block;
     color: var(--text);
     flex-shrink: 0;
@@ -2129,8 +2129,9 @@ button.play-btn-large {
 
 .play-btn-large svg,
 .play-btn-large i {
-    width: 1.35em;
-    height: 1.35em;
+    width: 50%;
+    height: 50%;
+    aspect-ratio: 1 / 1;
 }
 
 .play-btn-large svg.lucide-play {
@@ -2750,6 +2751,59 @@ video::-webkit-media-text-track-display,
     display: flex;
     flex-direction: column;
     
+}
+
+.peer-history-toggle {
+    width: 100%;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.8em;
+    padding-top: var(--gap);
+    cursor: pointer;
+    user-select: none;
+    transition: color 0.2s;
+}
+
+.peer-history-toggle:hover {
+    color: var(--text);
+}
+
+.peer-history-panel {
+    width: 100%;
+    margin-top: var(--gap);
+    padding: var(--padding);
+    border-radius: var(--radius);
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap);
+    max-height: 240px;
+    overflow-y: auto;
+    box-sizing: border-box;
+}
+
+.peer-history-panel.hidden {
+    display: none;
+}
+
+.peer-history-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: var(--padding);
+    font-size: 0.8em;
+    line-height: 1.4;
+}
+
+.peer-history-action {
+    color: var(--text);
+    word-break: break-word;
+}
+
+.peer-history-time {
+    color: var(--text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .user-header-row {
@@ -4484,8 +4538,9 @@ video::-webkit-media-text-track-display,
     body.is-mobile .control-btn i,
     body.is-mobile .player-close-btn svg,
     body.is-mobile .player-close-btn i {
-        width: 1.25em;
-        height: 1.25em;
+        width: 50%;
+        height: 50%;
+        aspect-ratio: 1 / 1;
     }
 
     .play-btn-large,
@@ -4503,8 +4558,9 @@ video::-webkit-media-text-track-display,
     .play-btn-large i,
     body.is-mobile .play-btn-large svg,
     body.is-mobile .play-btn-large i {
-        width: 1.5em;
-        height: 1.5em;
+        width: 50%;
+        height: 50%;
+        aspect-ratio: 1 / 1;
     }
 
     .skip-marker-btn,
@@ -5048,8 +5104,9 @@ video::-webkit-media-text-track-display,
 }
 
 .icon-swatch-btn svg {
-    width: 20px;
-    height: 20px;
+    width: 50%;
+    height: 50%;
+    aspect-ratio: 1 / 1;
 }
 
 /* ========================================================
@@ -5825,8 +5882,9 @@ body.has-active-player .main-content {
 
 .track-table .control-btn svg,
 .track-table .control-btn i {
-    width: 1.0em;
-    height: 1.0em;
+    width: 50%;
+    height: 50%;
+    aspect-ratio: 1 / 1;
 }
 
 .track-actions {
@@ -6015,8 +6073,9 @@ body.has-active-player .main-content {
     }
     .heirloom-player-bar .control-btn svg,
     .heirloom-player-bar .control-btn i {
-        width: 1.05em;
-        height: 1.05em;
+        width: 50%;
+        height: 50%;
+        aspect-ratio: 1 / 1;
     }
     .heirloom-player-bar .play-btn-large,
     .heirloom-player-bar button.play-btn-large {
@@ -6026,8 +6085,9 @@ body.has-active-player .main-content {
     }
     .heirloom-player-bar .play-btn-large svg,
     .heirloom-player-bar .play-btn-large i {
-        width: 1.25em;
-        height: 1.25em;
+        width: 50%;
+        height: 50%;
+        aspect-ratio: 1 / 1;
     }
     .player-queue-drawer {
         width: calc(100vw - 20px);

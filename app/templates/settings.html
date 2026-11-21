@@ -1402,11 +1402,11 @@
                 <div class="flex flex-wrap align-center justify-between gap-10 mb-10">
                     <strong>Peer Pairing</strong>
                     <button type="button" class="btn btn-secondary btn-sm" onclick="exportLoomBundle(this)">
-                        <i data-lucide="share"></i> Export Peer Bundle
+                        <i data-lucide="share"></i> Share Invite
                     </button>
                 </div>
-                <textarea id="loomExportedBundleBox" rows="3" readonly class="w-full mb-10 hidden" placeholder="Your exported Peer Bundle JSON..." onclick="copyLoomBundleText(this.value, this)"></textarea>
-                <textarea id="loomBundleInput" rows="3" placeholder="Paste a friend's Peer Bundle JSON here to import (starts with Receive and Share off)..." class="w-full mb-10"></textarea>
+                <textarea id="loomExportedBundleBox" rows="3" readonly class="w-full mb-10 hidden" placeholder="Your pairing invite JSON..." onclick="copyLoomBundleText(this.value, this)"></textarea>
+                <textarea id="loomBundleInput" rows="3" placeholder="Paste a friend's invite JSON here to pair (starts with Receive and Share off)..." class="w-full mb-10"></textarea>
                 <div class="flex gap-10 align-center">
                     <input type="text" id="loomImportAlias" placeholder="Optional peer nickname (defaults to Anonymous)" class="m-0 flex-1">
                     <button type="button" class="btn btn-primary" onclick="importLoomBundle(this)">
@@ -1447,6 +1447,8 @@
                             <button type="button" class="btn btn-danger btn-sm" onclick="deleteLoomPeer({{ p.id }}, this)"><i data-lucide="trash-2"></i> Delete</button>
                         </div>
                     </div>
+                    <div class="peer-history-toggle" onclick="toggleLoomPeerHistory({{ p.id }}, this)">Show Peer History</div>
+                    <div class="peer-history-panel hidden" id="loomPeerHistory-{{ p.id }}"></div>
                 </li>
                 {% else %}
                 <li>No Loom peers configured yet.</li>
@@ -1460,8 +1462,8 @@
                 <button type="submit" class="btn btn-danger btn-block"><i data-lucide="log-out"></i> Sign Out</button>
             </form>
         </div>
-        <div style="text-align: center; color: #888; font-size: 0.8em; margin-top: 10px;">
-            <strong>v2.1.7</strong>
+        <div style="text-align: center; color: var(--text-muted); font-size: 0.75em;">
+            <strong>v2.2</strong>
         </div>
     </div>
 
@@ -1524,6 +1526,8 @@
                             <button type="button" class="btn btn-danger btn-sm" onclick="deleteLoomPeer(${p.id}, this)"><i data-lucide="trash-2"></i> Delete</button>
                         </div>
                     </div>
+                    <div class="peer-history-toggle" onclick="toggleLoomPeerHistory(${p.id}, this)">Show Peer History</div>
+                    <div class="peer-history-panel hidden" id="loomPeerHistory-${p.id}"></div>
                 </li>
             `).join('');
             if (window.lucide) lucide.createIcons();
@@ -1679,14 +1683,14 @@
                 }
                 showLoomBundleMsg(
                     copied
-                        ? 'Peer bundle exported and copied to clipboard. Send this to your friend.'
-                        : 'Peer bundle exported below. Click the box to copy and send to your friend.',
+                        ? 'Pairing invite copied to clipboard. Send this to your friend.'
+                        : 'Pairing invite generated below. Click the box to copy and send to your friend.',
                     false
                 );
             } catch (err) {
-                console.error('Failed to export Loom bundle:', err);
+                console.error('Failed to generate Loom invite:', err);
                 restoreBtn();
-                showLoomBundleMsg(err.message || 'Failed to export bundle.', true);
+                showLoomBundleMsg(err.message || 'Failed to generate pairing invite.', true);
             }
         }
 
@@ -1794,6 +1798,55 @@
                 }
             }, 30000);
         })();
+
+        function formatPeerHistoryTime(isoStr) {
+            const d = new Date(isoStr);
+            if (isNaN(d.getTime())) return '';
+            let h = d.getHours();
+            const m = String(d.getMinutes()).padStart(2, '0');
+            const ampm = h >= 12 ? 'PM' : 'AM';
+            h = h % 12 || 12;
+            return `${h}:${m} ${ampm} ${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
+        }
+
+        async function toggleLoomPeerHistory(peerId, toggleEl) {
+            const panel = document.getElementById(`loomPeerHistory-${peerId}`);
+            if (!panel || !toggleEl) return;
+
+            const isHidden = panel.classList.contains('hidden');
+            if (!isHidden) {
+                panel.classList.add('hidden');
+                toggleEl.textContent = 'Show Peer History';
+                return;
+            }
+
+            panel.classList.remove('hidden');
+            toggleEl.textContent = 'Hide Peer History';
+            panel.innerHTML = '<div class="peer-history-time" style="text-align: center;">Loading...</div>';
+
+            try {
+                const res = await fetch(`/api/loom/peers/${peerId}/history`);
+                if (!res.ok) {
+                    panel.innerHTML = '<div class="peer-history-time" style="text-align: center;">Failed to load history.</div>';
+                    return;
+                }
+                const data = await res.json();
+                const events = data.events || [];
+                if (events.length === 0) {
+                    panel.innerHTML = '<div class="peer-history-time" style="text-align: center;">No activity yet.</div>';
+                    return;
+                }
+                panel.innerHTML = events.map(ev => `
+                    <div class="peer-history-row">
+                        <span class="peer-history-action">${escapeHtml(ev.action)}</span>
+                        <span class="peer-history-time">${escapeHtml(formatPeerHistoryTime(ev.created_at))}</span>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error('Failed to load peer history:', err);
+                panel.innerHTML = '<div class="peer-history-time" style="text-align: center;">Failed to load history.</div>';
+            }
+        }
 
         async function deleteLoomPeer(peerId, btn) {
             if (btn && btn.disabled) return;
