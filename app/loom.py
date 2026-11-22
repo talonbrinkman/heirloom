@@ -1409,6 +1409,7 @@ def search_loom_manifest(
     year: Optional[str] = None,
     season: Optional[int] = None,
     episode: Optional[int] = None,
+    bypass_file_size_limit: bool = False,
 ) -> dict[str, Any]:
     """
     Answer a specific item availability query (e.g. 'Dexter', 'The Office S1', 'The Office S1E4')
@@ -1430,7 +1431,7 @@ def search_loom_manifest(
     settings = get_loom_settings(session)
     searchable_volumes = settings["searchable_volumes"]
     allowed_filetypes = settings["allowed_filetypes_list"]
-    max_file_size_gb = settings["max_file_size_gb"]
+    max_file_size_gb = 0.0 if bypass_file_size_limit else settings["max_file_size_gb"]
     norm_type = (media_type or parsed["media_type"] or "").strip().lower() or None
     norm_year = str(year or "").strip() or None
 
@@ -2260,7 +2261,7 @@ class LoomSyncManager:
                                         return True
                                     session.add(j)
                                     session.commit()
-                                    bw_kbps = settings["download_bandwidth_limit_kbps"]
+                                    bw_kbps = 0 if (p and p.no_limits) else settings["download_bandwidth_limit_kbps"]
                                 bytes_since_db_flush = 0
                                 last_check_time = now_mono
 

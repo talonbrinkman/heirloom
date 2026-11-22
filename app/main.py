@@ -10948,6 +10948,7 @@ def _serialize_loom_peer(p: LoomPeer) -> dict:
         "online": _loom_peer_online_cache.get(p.id) if p.id is not None else None,
         "allow_incoming": bool(p.allow_incoming),
         "allow_outgoing": bool(p.allow_outgoing),
+        "no_limits": bool(p.no_limits),
         "max_hops": p.max_hops,
         "bytes_sent_month": p.bytes_sent_month or 0,
         "bytes_received_month": p.bytes_received_month or 0,
@@ -11114,7 +11115,7 @@ async def loom_v1_search(request: Request, session: Session = Depends(get_sessio
     session.add(peer)
     session.commit()
 
-    if peer.id is not None:
+    if peer.id is not None and not peer.no_limits:
         rl_ok, retry_after = check_peer_search_rate_limit(peer.id, settings["max_requests_per_minute"])
         if not rl_ok:
             raise HTTPException(
@@ -11138,6 +11139,7 @@ async def loom_v1_search(request: Request, session: Session = Depends(get_sessio
                 year=year,
                 season=season,
                 episode=episode,
+                bypass_file_size_limit=bool(peer.no_limits),
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -11311,7 +11313,7 @@ async def loom_v1_relay_download(
         hdrs["X-Loom-Job-Id"] = request.headers["x-loom-job-id"]
 
     upstream_url = f"{target_peer.base_url.rstrip('/')}{upstream_path}"
-    bw_kbps = settings["upload_bandwidth_limit_kbps"]
+    bw_kbps = 0 if peer.no_limits else settings["upload_bandwidth_limit_kbps"]
     peer_id = peer.id
     target_peer_id = target_peer.id
     req_name = peer.name or "Anonymous"
@@ -11324,8 +11326,11 @@ async def loom_v1_relay_download(
     hops_left = int(mapping.get("hops_left") or 0)
     hop_info = f"{hops_away} hop{'s' if hops_away != 1 else ''} away, {hops_left} left"
 
-    if peer_id is not None and not acquire_peer_transfer_slot(peer_id, settings["max_concurrent_transfers"]):
-        raise HTTPException(status_code=429, detail="Max concurrent transfers reached for this peer.")
+    acquired_slot = False
+    if peer_id is not None and not peer.no_limits:
+        if not acquire_peer_transfer_slot(peer_id, settings["max_concurrent_transfers"]):
+            raise HTTPException(status_code=429, detail="Max concurrent transfers reached for this peer.")
+        acquired_slot = True
 
     if not range_hdr or range_hdr.strip().startswith("bytes=0-"):
         if peer_id is not None:
@@ -11340,7 +11345,7 @@ async def loom_v1_relay_download(
         upstream_res = await stream_ctx.__aenter__()
     except Exception:
         await client.aclose()
-        if peer_id is not None:
+        if acquired_slot and peer_id is not None:
             release_peer_transfer_slot(peer_id)
         raise HTTPException(status_code=502, detail="Failed to reach upstream relay peer.")
 
@@ -11348,8 +11353,9 @@ async def loom_v1_relay_download(
         status_code = upstream_res.status_code
         await stream_ctx.__aexit__(None, None, None)
         await client.aclose()
-        if peer_id is not None:
+        if acquired_slot and peer_id is not None:
             release_peer_transfer_slot(peer_id)
+        if peer_id is not None:
             log_loom_peer_event(session, peer_id, f"Relay failed (HTTP {status_code}): {item_desc} from {src_name} ({hop_info})")
         return Response(status_code=status_code)
 
@@ -11384,7 +11390,7 @@ async def loom_v1_relay_download(
                 await stream_ctx.__aexit__(None, None, None)
             finally:
                 await client.aclose()
-            if peer_id is not None:
+            if acquired_slot and peer_id is not None:
                 release_peer_transfer_slot(peer_id)
             if relayed_bytes > 0:
                 with Session(engine) as s:
@@ -11450,7 +11456,7 @@ async def loom_v1_download(
 
     file_path = item.file_path
     file_size = os.path.getsize(file_path)
-    if not is_file_size_allowed(file_size, settings["max_file_size_gb"]):
+    if not peer.no_limits and not is_file_size_allowed(file_size, settings["max_file_size_gb"]):
         raise HTTPException(status_code=403, detail="File exceeds Max File Size limit.")
     range_header = request.headers.get("range")
     start = 0
@@ -11472,10 +11478,13 @@ async def loom_v1_download(
     content_length = end - start + 1
     peer_id = peer.id
     peer_name = peer.name or "Anonymous"
-    bw_kbps = settings["upload_bandwidth_limit_kbps"]
+    bw_kbps = 0 if peer.no_limits else settings["upload_bandwidth_limit_kbps"]
 
-    if peer_id is not None and not acquire_peer_transfer_slot(peer_id, settings["max_concurrent_transfers"]):
-        raise HTTPException(status_code=429, detail="Max concurrent transfers reached for this peer.")
+    acquired_slot = False
+    if peer_id is not None and not peer.no_limits:
+        if not acquire_peer_transfer_slot(peer_id, settings["max_concurrent_transfers"]):
+            raise HTTPException(status_code=429, detail="Max concurrent transfers reached for this peer.")
+        acquired_slot = True
 
     upload_title = getattr(item, "title", None) or os.path.basename(file_path)
     upload_series_title = None
@@ -11552,7 +11561,7 @@ async def loom_v1_download(
                             win_bytes = 0
         finally:
             loom_upload_tracker.unregister_upload(upload_id)
-            if peer_id is not None:
+            if acquired_slot and peer_id is not None:
                 release_peer_transfer_slot(peer_id)
             if sent_total > 0:
                 with Session(engine) as s:
@@ -11773,6 +11782,8 @@ async def api_update_loom_peer(
         peer.allow_incoming = bool(body["allow_incoming"])
     if "allow_outgoing" in body:
         peer.allow_outgoing = bool(body["allow_outgoing"])
+    if "no_limits" in body:
+        peer.no_limits = bool(body["no_limits"])
     if (peer.allow_incoming or peer.allow_outgoing) and peer.status != "approved":
         peer.status = "approved"
         status_changed = True

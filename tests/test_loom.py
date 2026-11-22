@@ -875,3 +875,39 @@ def test_auto_rotate_addresses_and_72h_grace_period(db_session, monkeypatch):
     assert old_sid in deleted
     db_session.refresh(peer)
     assert peer.prev_onion_service_id is None
+
+
+def test_peer_no_limits_bypasses_file_size_in_search(db_session, tmp_path):
+    vol = tmp_path / "movies"
+    vol.mkdir()
+    big_file = vol / "Huge.Movie.1080p.mkv"
+    big_file.write_bytes(b"huge")
+
+    manifest_path = tmp_path / "loom_manifest.json"
+    manifest_path.write_text(
+        json.dumps({
+            "version": 3,
+            "movies": [
+                {
+                    "id": 1,
+                    "media_type": "movie",
+                    "title": "Huge Movie",
+                    "filename": big_file.name,
+                    "file_size": 10 * (1024 ** 3),
+                    "quality_label": "1080p",
+                    "_file_path": str(big_file),
+                }
+            ],
+            "tv": [],
+            "photos": [],
+            "music": [],
+        }),
+        encoding="utf-8",
+    )
+
+    loom.save_loom_settings(db_session, {"searchable_volumes": [str(vol)], "max_file_size_gb": 2.0})
+    with __import__("unittest.mock").mock.patch.object(loom, "get_loom_manifest_path", return_value=str(manifest_path)):
+        limited = loom.search_loom_manifest(db_session, "Huge Movie", bypass_file_size_limit=False)
+        unlimited = loom.search_loom_manifest(db_session, "Huge Movie", bypass_file_size_limit=True)
+        assert limited["movies"] == []
+        assert len(unlimited["movies"]) == 1

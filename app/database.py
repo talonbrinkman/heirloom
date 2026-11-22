@@ -457,6 +457,7 @@ def create_db_and_tables():
             "ALTER TABLE loompeer ADD COLUMN prev_onion_private_key VARCHAR",
             "ALTER TABLE loompeer ADD COLUMN prev_onion_expires_at DATETIME",
             "ALTER TABLE loompeer ADD COLUMN last_rotated_at DATETIME",
+            "ALTER TABLE loompeer ADD COLUMN no_limits BOOLEAN DEFAULT 0",
         ):
             try:
                 session.exec(text(alter_sql))

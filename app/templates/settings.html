@@ -1431,8 +1431,8 @@
                     <div class="user-header-row align-center flex-wrap gap-10">
                         <div>
                             <div class="flex align-center gap-10">
+                                <span class="code-text badge-unknown" data-peer-status-badge="{{ p.id }}"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg> Unknown</span>
                                 <textarea class="peer-name-input" rows="1" wrap="off" maxlength="80" data-peer-id="{{ p.id }}" data-original-name="{{ p.name or 'Anonymous' }}" onfocus="this.select()" onkeydown="handleLoomPeerNameKeydown(event, this)" onblur="saveLoomPeerName({{ p.id }}, this)" oninput="autoResizePeerName(this)">{{ p.name or 'Anonymous' }}</textarea>
-                                <span class="code-text badge-unknown" data-peer-status-badge="{{ p.id }}">Unknown</span>
                             </div>
                         </div>
                         {% if p.created_at %}
@@ -1448,6 +1448,10 @@
                             <label class="toggle-pill">
                                 <input type="checkbox" class="hidden-checkbox" onchange="toggleLoomPeer({{ p.id }}, {allow_outgoing: this.checked}, this)" {% if p.allow_outgoing %}checked{% endif %}>
                                 <span>Share</span>
+                            </label>
+                            <label class="toggle-pill" title="Bypass Max File Size, Max Requests, Max Transfers, and Max Bandwidths for this peer">
+                                <input type="checkbox" class="hidden-checkbox" onchange="toggleLoomPeer({{ p.id }}, {no_limits: this.checked}, this)" {% if p.no_limits %}checked{% endif %}>
+                                <span>No Limits</span>
                             </label>
                         </div>
                         <div class="peer-history-toggle" onclick="toggleLoomPeerHistory({{ p.id }}, this)">Show Peer Info</div>
@@ -1471,7 +1475,7 @@
             </form>
         </div>
         <div style="text-align: center; color: var(--text-muted); font-size: 0.75em;">
-            <strong>v2.3.2</strong>
+            <strong>v2.3.8</strong>
         </div>
     </div>
 
@@ -1511,8 +1515,8 @@
                     <div class="user-header-row align-center flex-wrap gap-10">
                         <div>
                             <div class="flex align-center gap-10">
+                                <span class="code-text ${p.online === true ? 'badge-active' : (p.online === false ? 'badge-inactive' : 'badge-unknown')}" data-peer-status-badge="${escapeHtml(p.id)}">${p.online === true ? '<i data-lucide="check"></i> Active' : (p.online === false ? '<i data-lucide="x"></i> Inactive' : '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg> Unknown')}</span>
                                 <textarea class="peer-name-input" rows="1" wrap="off" maxlength="80" data-peer-id="${escapeHtml(p.id)}" data-original-name="${escapeHtml(p.name || 'Anonymous')}" onfocus="this.select()" onkeydown="handleLoomPeerNameKeydown(event, this)" onblur="saveLoomPeerName(${p.id}, this)" oninput="autoResizePeerName(this)">${escapeHtml(p.name || 'Anonymous')}</textarea>
-                                <span class="code-text ${p.online === true ? 'badge-active' : (p.online === false ? 'badge-inactive' : 'badge-unknown')}" data-peer-status-badge="${escapeHtml(p.id)}">${p.online === true ? 'Active' : (p.online === false ? 'Inactive' : 'Unknown')}</span>
                             </div>
                         </div>
                         ${p.created_at ? `<span class="peer-paired-date">${escapeHtml(formatPeerPairedDate(p.created_at))}</span>` : ''}
@@ -1527,13 +1531,17 @@
                                 <input type="checkbox" class="hidden-checkbox" onchange="toggleLoomPeer(${p.id}, {allow_outgoing: this.checked}, this)" ${p.allow_outgoing ? 'checked' : ''}>
                                 <span>Share</span>
                             </label>
+                            <label class="toggle-pill" title="Bypass Max File Size, Max Requests, Max Transfers, and Max Bandwidths for this peer">
+                                <input type="checkbox" class="hidden-checkbox" onchange="toggleLoomPeer(${p.id}, {no_limits: this.checked}, this)" ${p.no_limits ? 'checked' : ''}>
+                                <span>No Limits</span>
+                            </label>
                         </div>
+                        <div class="peer-history-toggle" onclick="toggleLoomPeerHistory(${p.id}, this)">Show Peer Info</div>
                         <div class="flex flex-wrap gap-10 align-center">
                             <button type="button" class="btn btn-secondary btn-sm" onclick="rotateLoomPeerOnion(${p.id}, this)" title="Rotate our .onion address for this peer"><i data-lucide="refresh-cw"></i> Rotate Address</button>
                             <button type="button" class="btn btn-danger btn-sm" onclick="deleteLoomPeer(${p.id}, this)"><i data-lucide="trash-2"></i> Delete</button>
                         </div>
                     </div>
-                    <div class="peer-history-toggle" onclick="toggleLoomPeerHistory(${p.id}, this)">Show Peer Info</div>
                     <div class="peer-history-panel hidden" id="loomPeerHistory-${p.id}"></div>
                 </li>
             `).join('');
@@ -1858,8 +1866,9 @@
                     badge.classList.remove('badge-unknown');
                     badge.classList.toggle('badge-active', Boolean(isOnline));
                     badge.classList.toggle('badge-inactive', !isOnline);
-                    badge.textContent = isOnline ? 'Active' : 'Inactive';
+                    badge.innerHTML = `<i data-lucide="${isOnline ? 'check' : 'x'}"></i> ${isOnline ? 'Active' : 'Inactive'}`;
                 });
+                if (window.lucide) lucide.createIcons();
             } catch (err) {
                 console.debug('Failed to check peer connectivity:', err);
             }

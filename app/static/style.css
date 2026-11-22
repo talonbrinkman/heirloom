@@ -2765,10 +2765,14 @@ video::-webkit-media-text-track-display,
     font-weight: 700;
     line-height: 1.3;
     white-space: nowrap;
-    resize: none;
+    resize: none !important;
     overflow: hidden;
     width: fit-content;
     cursor: text;
+}
+
+.peer-name-input::-webkit-resizer {
+    display: none;
 }
 
 .peer-name-input:focus {

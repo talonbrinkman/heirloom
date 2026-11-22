@@ -263,6 +263,7 @@ class LoomPeer(SQLModel, table=True):
     status: str = Field(default="pending", index=True)  # pending, approved, disabled
     allow_incoming: bool = Field(default=False)
     allow_outgoing: bool = Field(default=False)
+    no_limits: bool = Field(default=False)
     max_hops: int = Field(default=1)
     monthly_cap_gb: Optional[float] = Field(default=None)
     bytes_sent_month: int = Field(default=0)
