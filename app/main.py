@@ -33,11 +33,12 @@ import random
 from collections import defaultdict, Counter
 from datetime import datetime, timezone, timedelta
 from .database import create_db_and_tables, get_session, engine
-from .models import User, UserSession, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile, Artist, Album, Track, Playlist, PlaylistTrack, Person, LoomPeer, LoomPeerEvent, LoomTransferJob
+from .models import User, UserSession, Movie, TVShow, InviteCode, Watchlist, WatchHistory, VolumePath, SystemConfig, Photo, WatchSession, WatchInvite, PasswordResetRequest, Profile, Artist, Album, Track, Playlist, PlaylistTrack, Person, LoomPeer, LoomPeerEvent, LoomDirectPairRequest, LoomTransferJob
 from .loom import (
     get_loom_settings,
     save_loom_settings,
     get_or_create_node_id,
+    get_loom_server_fingerprint,
     get_peer_local_identity,
     get_httpx_client_kwargs,
     sign_loom_headers,
@@ -56,6 +57,8 @@ from .loom import (
     mark_or_check_search_request_id,
     register_relay_token,
     resolve_relay_token,
+    register_direct_pair_route,
+    resolve_direct_pair_route,
     check_peer_search_rate_limit,
     acquire_peer_transfer_slot,
     release_peer_transfer_slot,
@@ -67,6 +70,8 @@ from .loom import (
     build_sync_target_path,
     cleanup_job_part_file,
     get_manifest_quality_label,
+    compute_file_sha256,
+    is_valid_sha256,
     format_loom_item_label,
     log_loom_peer_event,
     loom_upload_tracker,
@@ -10527,6 +10532,7 @@ async def get_inbox(
     reset_requests = []
     loom_downloads = []
     loom_uploads = []
+    loom_pair_requests = []
     if is_actual_admin(current_user, current_profile):
         pending_resets = session.exec(select(PasswordResetRequest).where(PasswordResetRequest.status == "pending")).all()
         for pr in pending_resets:
@@ -10556,7 +10562,28 @@ async def get_inbox(
             loom_downloads.append(item)
         loom_uploads = loom_upload_tracker.list_active_uploads()
 
-    return {"invites": results, "reset_requests": reset_requests, "loom_downloads": loom_downloads, "loom_uploads": loom_uploads}
+        pending_pair_reqs = session.exec(
+            select(LoomDirectPairRequest)
+            .where(LoomDirectPairRequest.status == "pending")
+            .order_by(LoomDirectPairRequest.id.desc())
+        ).all()
+        for dpr in pending_pair_reqs:
+            vp = session.get(LoomPeer, dpr.via_peer_id)
+            loom_pair_requests.append({
+                "id": dpr.id,
+                "via_peer_id": dpr.via_peer_id,
+                "via_peer_name": (vp.name or "Anonymous") if vp else "Anonymous",
+                "item_label": dpr.item_label,
+                "created_at": (dpr.created_at.replace(tzinfo=timezone.utc) if dpr.created_at.tzinfo is None else dpr.created_at).isoformat(),
+            })
+
+    return {
+        "invites": results,
+        "reset_requests": reset_requests,
+        "loom_downloads": loom_downloads,
+        "loom_uploads": loom_uploads,
+        "loom_pair_requests": loom_pair_requests,
+    }
 
 def get_user_active_session(user_id: int, db: Session) -> Optional[WatchSession]:
     now = datetime.now(timezone.utc)
@@ -10927,6 +10954,7 @@ def _serialize_loom_peer(p: LoomPeer) -> dict:
         "usage_month": p.usage_month or "",
         "last_seen_at": p.last_seen_at.isoformat() if p.last_seen_at else None,
         "last_sync_at": p.last_sync_at.isoformat() if p.last_sync_at else None,
+        "created_at": (p.created_at.replace(tzinfo=timezone.utc) if p.created_at.tzinfo is None else p.created_at).isoformat() if p.created_at else None,
     }
 
 
@@ -10980,6 +11008,7 @@ async def loom_v1_handshake(request: Request, session: Session = Depends(get_ses
             body,
             peer_name=payload.get("name", "Anonymous"),
             peer_base_url=payload.get("base_url", ""),
+            peer_fingerprint=payload.get("server_fingerprint"),
         )
         if peer:
             is_new_pair = True
@@ -10989,14 +11018,23 @@ async def loom_v1_handshake(request: Request, session: Session = Depends(get_ses
     peer.last_seen_at = datetime.now(timezone.utc)
     sender_node_id = (request.headers.get("x-loom-node-id") or "").strip()
     is_self_handshake = bool(sender_node_id and peer.local_node_id and sender_node_id == peer.local_node_id)
+    old_base_url = (peer.base_url or "").strip().rstrip("/")
+    address_rotated = False
     if not is_self_handshake:
         if payload.get("name"):
             peer.name = str(payload["name"]).strip()[:80]
+        if payload.get("server_fingerprint"):
+            peer.peer_fingerprint = str(payload["server_fingerprint"]).strip()[:64] or peer.peer_fingerprint
         if payload.get("base_url"):
-            peer.base_url = str(payload["base_url"]).strip().rstrip("/")
+            new_base_url = str(payload["base_url"]).strip().rstrip("/")
+            if not is_new_pair and old_base_url and new_base_url and new_base_url != old_base_url:
+                address_rotated = True
+            peer.base_url = new_base_url
     session.add(peer)
     if is_new_pair and peer.id is not None:
         log_loom_peer_event(session, peer.id, "Peer paired", commit=False)
+    elif address_rotated and peer.id is not None:
+        log_loom_peer_event(session, peer.id, "Peer rotated address", commit=False)
     session.commit()
 
     local_node_id, _ = get_peer_local_identity(session, peer)
@@ -11040,9 +11078,10 @@ async def loom_v1_search(request: Request, session: Session = Depends(get_sessio
     sender_node_id = (request.headers.get("x-loom-node-id") or "").strip()
     is_self_peer = bool(sender_node_id and peer.local_node_id and sender_node_id == peer.local_node_id)
 
+    peer_name = peer.name or "Anonymous"
     q_text = str(query or "").strip()
-    if not is_self_peer and q_text and peer.id is not None:
-        q_label = q_text
+    q_label = q_text
+    if q_text:
         if season is not None and episode is not None:
             try:
                 q_label = f"{q_text} S{int(season):02d}E{int(episode):02d}"
@@ -11053,7 +11092,23 @@ async def loom_v1_search(request: Request, session: Session = Depends(get_sessio
                 q_label = f"{q_text} S{int(season):02d}"
             except (TypeError, ValueError):
                 pass
-        log_loom_peer_event(session, peer.id, f'Peer searched "{q_label}"', commit=False)
+    if not is_self_peer and q_text and peer.id is not None:
+        if hops_traveled > 1:
+            log_loom_peer_event(
+                session,
+                peer.id,
+                f'Relayed search "{q_label}" from {peer_name} ({hops_traveled} hops away, {hops_remaining} left)',
+                commit=False,
+            )
+        elif hops_remaining > 0:
+            log_loom_peer_event(
+                session,
+                peer.id,
+                f'Peer searched "{q_label}" (1 hop away, {hops_remaining} left)',
+                commit=False,
+            )
+        else:
+            log_loom_peer_event(session, peer.id, f'Peer searched "{q_label}"', commit=False)
 
     peer.last_seen_at = datetime.now(timezone.utc)
     session.add(peer)
@@ -11137,28 +11192,76 @@ async def loom_v1_search(request: Request, session: Session = Depends(get_sessio
             return None
 
         if downstream_peers:
+            target_map = {t.id: t for t in downstream_peers if t.id is not None}
+            if q_label:
+                hop_word = "hop" if hops_traveled == 1 else "hops"
+                for t in downstream_peers:
+                    if t.id is not None:
+                        log_loom_peer_event(
+                            session,
+                            t.id,
+                            f'Relayed search "{q_label}" from {peer_name} ({hops_traveled} {hop_word} away, {next_hops} left)',
+                            commit=False,
+                        )
+                session.commit()
             forwarded_responses = await asyncio.gather(*(_query_downstream(t) for t in downstream_peers))
+            logged_relayed_matches = False
             for entry in forwarded_responses:
                 if not entry:
                     continue
                 target_id, data = entry
+                target_obj = target_map.get(target_id)
+                target_name = (target_obj.name if target_obj else None) or "Anonymous"
+                match_count = 0
                 for bucket in ("movies", "tv", "photos", "music"):
                     for item in (data.get(bucket) or []):
                         if not isinstance(item, dict) or item.get("id") is None:
                             continue
                         relayed = {k: v for k, v in item.items() if not k.startswith("_")}
                         relayed["hops"] = int(relayed.get("hops", 0)) + 1
+                        item_label = format_loom_item_label(
+                            relayed.get("title"),
+                            relayed.get("series_title"),
+                            relayed.get("season"),
+                            relayed.get("episode"),
+                        )
                         relayed["relay_token"] = register_relay_token(
                             target_peer_id=target_id,
                             media_type=relayed.get("media_type") or bucket.rstrip("s"),
                             remote_item_id=int(relayed["id"]),
                             upstream_relay_token=relayed.get("relay_token"),
+                            item_label=item_label,
+                            quality_label=str(relayed.get("quality_label") or ""),
+                            hops_away=int(relayed.get("hops") or 1),
+                            hops_left=next_hops,
                         )
                         result[bucket].append(relayed)
+                        match_count += 1
+                if match_count > 0 and peer.id is not None:
+                    hop_word = "hop" if hops_traveled == 1 else "hops"
+                    match_word = "match" if match_count == 1 else "matches"
+                    log_loom_peer_event(
+                        session,
+                        peer.id,
+                        f'Relayed {match_count} {match_word} for "{q_label}" from {target_name} ({hops_traveled} {hop_word} away, {next_hops} left)',
+                        commit=False,
+                    )
+                    logged_relayed_matches = True
+            if logged_relayed_matches:
+                session.commit()
 
         result["found"] = bool(result["movies"] or result["tv"] or result["photos"] or result["music"])
 
     return result
+
+
+def _format_loom_bytes(num_bytes: int) -> str:
+    n = max(0, int(num_bytes or 0))
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    if n < 1024 * 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f} MB"
+    return f"{n / (1024 * 1024 * 1024):.2f} GB"
 
 
 @app.get("/api/loom/v1/relay/{relay_token}")
@@ -11201,44 +11304,103 @@ async def loom_v1_relay_download(
     )
     local_nid, _ = get_peer_local_identity(session, target_peer)
     hdrs = sign_loom_headers(local_nid, target_peer.shared_secret, "GET", upstream_path)
-    if request.headers.get("range"):
-        hdrs["Range"] = request.headers["range"]
+    range_hdr = request.headers.get("range")
+    if range_hdr:
+        hdrs["Range"] = range_hdr
     if request.headers.get("x-loom-job-id"):
         hdrs["X-Loom-Job-Id"] = request.headers["x-loom-job-id"]
 
     upstream_url = f"{target_peer.base_url.rstrip('/')}{upstream_path}"
     bw_kbps = settings["upload_bandwidth_limit_kbps"]
     peer_id = peer.id
+    target_peer_id = target_peer.id
+    req_name = peer.name or "Anonymous"
+    src_name = target_peer.name or "Anonymous"
+
+    item_desc = mapping.get("item_label") or f"{mapping['media_type']} #{mapping['remote_item_id']}"
+    if mapping.get("quality_label"):
+        item_desc = f"{item_desc} ({mapping['quality_label']})"
+    hops_away = int(mapping.get("hops_away") or 1)
+    hops_left = int(mapping.get("hops_left") or 0)
+    hop_info = f"{hops_away} hop{'s' if hops_away != 1 else ''} away, {hops_left} left"
 
     if peer_id is not None and not acquire_peer_transfer_slot(peer_id, settings["max_concurrent_transfers"]):
         raise HTTPException(status_code=429, detail="Max concurrent transfers reached for this peer.")
 
+    if not range_hdr or range_hdr.strip().startswith("bytes=0-"):
+        if peer_id is not None:
+            log_loom_peer_event(session, peer_id, f"Relaying {item_desc} from {src_name} ({hop_info})", commit=False)
+        if target_peer_id is not None:
+            log_loom_peer_event(session, target_peer_id, f"Relaying {item_desc} to {req_name} ({hop_info})", commit=False)
+        session.commit()
+
+    client = httpx.AsyncClient(**get_httpx_client_kwargs(target_peer.base_url, timeout=None))
+    stream_ctx = client.stream("GET", upstream_url, headers=hdrs)
+    try:
+        upstream_res = await stream_ctx.__aenter__()
+    except Exception:
+        await client.aclose()
+        if peer_id is not None:
+            release_peer_transfer_slot(peer_id)
+        raise HTTPException(status_code=502, detail="Failed to reach upstream relay peer.")
+
+    if upstream_res.status_code not in (200, 206):
+        status_code = upstream_res.status_code
+        await stream_ctx.__aexit__(None, None, None)
+        await client.aclose()
+        if peer_id is not None:
+            release_peer_transfer_slot(peer_id)
+            log_loom_peer_event(session, peer_id, f"Relay failed (HTTP {status_code}): {item_desc} from {src_name} ({hop_info})")
+        return Response(status_code=status_code)
+
+    fwd_headers: dict[str, str] = {}
+    for h_name in ("x-loom-sha256", "content-length", "content-range", "accept-ranges"):
+        val = upstream_res.headers.get(h_name)
+        if val is not None:
+            fwd_headers[h_name] = val
+
     async def _relay_stream():
         win_start = time.monotonic()
         win_bytes = 0
+        relayed_bytes = 0
         try:
-            async with httpx.AsyncClient(**get_httpx_client_kwargs(target_peer.base_url, timeout=None)) as client:
-                async with client.stream("GET", upstream_url, headers=hdrs) as upstream_res:
-                    if upstream_res.status_code not in (200, 206):
-                        return
-                    async for chunk in upstream_res.aiter_bytes(chunk_size=65536):
-                        if not chunk:
-                            break
-                        yield chunk
-                        win_bytes += len(chunk)
-                        if bw_kbps > 0:
-                            elapsed = time.monotonic() - win_start
-                            target = win_bytes / (bw_kbps * 1024.0)
-                            if target > elapsed:
-                                await asyncio.sleep(min(1.5, target - elapsed))
-                            if time.monotonic() - win_start >= 1.0:
-                                win_start = time.monotonic()
-                                win_bytes = 0
+            async for chunk in upstream_res.aiter_bytes(chunk_size=65536):
+                if not chunk:
+                    break
+                yield chunk
+                clen = len(chunk)
+                relayed_bytes += clen
+                win_bytes += clen
+                if bw_kbps > 0:
+                    elapsed = time.monotonic() - win_start
+                    target = win_bytes / (bw_kbps * 1024.0)
+                    if target > elapsed:
+                        await asyncio.sleep(min(1.5, target - elapsed))
+                    if time.monotonic() - win_start >= 1.0:
+                        win_start = time.monotonic()
+                        win_bytes = 0
         finally:
+            try:
+                await stream_ctx.__aexit__(None, None, None)
+            finally:
+                await client.aclose()
             if peer_id is not None:
                 release_peer_transfer_slot(peer_id)
+            if relayed_bytes > 0:
+                with Session(engine) as s:
+                    size_str = _format_loom_bytes(relayed_bytes)
+                    if peer_id is not None:
+                        log_loom_peer_event(s, peer_id, f"Relayed {item_desc} from {src_name} ({size_str}, {hop_info})", commit=False)
+                    if target_peer_id is not None:
+                        log_loom_peer_event(s, target_peer_id, f"Relayed {item_desc} to {req_name} ({size_str}, {hop_info})", commit=False)
+                    s.commit()
 
-    return StreamingResponse(_relay_stream(), media_type="application/octet-stream")
+    return StreamingResponse(
+        _relay_stream(),
+        status_code=upstream_res.status_code,
+        media_type="application/octet-stream",
+        headers=fwd_headers,
+    )
 
 
 @app.get("/api/loom/v1/download/{media_type}/{item_id}")
@@ -11306,6 +11468,7 @@ async def loom_v1_download(
             raise HTTPException(status_code=416, detail="Requested Range Not Satisfiable.")
         status_code = 206
 
+    file_sha256 = await asyncio.to_thread(compute_file_sha256, file_path)
     content_length = end - start + 1
     peer_id = peer.id
     peer_name = peer.name or "Anonymous"
@@ -11406,6 +11569,7 @@ async def loom_v1_download(
     resp_headers = {
         "Accept-Ranges": "bytes",
         "Content-Length": str(content_length),
+        "X-Loom-Sha256": file_sha256,
     }
     if status_code == 206:
         resp_headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
@@ -11505,6 +11669,7 @@ async def api_import_loom_bundle(
                 local_node_id=local_node_id,
                 local_onion_url=local_onion_url,
                 shared_secret=peer.shared_secret,
+                server_fingerprint=get_loom_server_fingerprint(session),
             )
         )
 
@@ -11555,6 +11720,7 @@ async def _apply_loom_peer_network_update(
     local_node_id: str,
     local_onion_url: str,
     shared_secret: str,
+    server_fingerprint: str = "",
 ):
     if peer_status == "disabled" and local_onion_service_id:
         await asyncio.to_thread(tor_onion_manager.delete_onion_service, local_onion_service_id)
@@ -11572,6 +11738,8 @@ async def _apply_loom_peer_network_update(
             hs_body: dict[str, Any] = {"node_id": local_node_id}
             if local_onion_url:
                 hs_body["base_url"] = local_onion_url
+            if server_fingerprint:
+                hs_body["server_fingerprint"] = server_fingerprint
             hs_payload = json.dumps(hs_body).encode("utf-8")
             hdrs = sign_loom_headers(local_node_id, shared_secret, "POST", "/api/loom/v1/handshake", hs_payload)
             hdrs["Content-Type"] = "application/json"
@@ -11628,6 +11796,7 @@ async def api_update_loom_peer(
                 local_node_id=local_node_id,
                 local_onion_url=local_onion_url,
                 shared_secret=peer.shared_secret,
+                server_fingerprint=get_loom_server_fingerprint(session),
             )
         )
 
@@ -11674,16 +11843,296 @@ async def api_loom_peer_history(
         .order_by(LoomPeerEvent.created_at.desc(), LoomPeerEvent.id.desc())
         .limit(100)
     ).all()
+    pr_ids = [e.pair_request_id for e in events if e.pair_request_id is not None]
+    pr_map: dict[int, LoomDirectPairRequest] = {}
+    if pr_ids:
+        for pr in session.exec(select(LoomDirectPairRequest).where(LoomDirectPairRequest.id.in_(pr_ids))).all():
+            if pr.id is not None:
+                pr_map[pr.id] = pr
     return {
         "events": [
             {
                 "id": e.id,
                 "action": e.action,
+                "can_request_direct_pair": bool(e.relay_token),
+                "pair_request": (
+                    {"id": pr_map[e.pair_request_id].id, "status": pr_map[e.pair_request_id].status}
+                    if e.pair_request_id is not None and e.pair_request_id in pr_map
+                    else None
+                ),
                 "created_at": (e.created_at.replace(tzinfo=timezone.utc) if e.created_at.tzinfo is None else e.created_at).isoformat(),
             }
             for e in events
         ]
     }
+
+
+@app.post("/api/loom/peers/{peer_id}/request_direct_pair")
+async def api_request_direct_pair(
+    peer_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session),
+):
+    if not is_actual_admin(current_user, current_profile):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    _require_loom_enabled(session)
+    if httpx is None:
+        raise HTTPException(status_code=500, detail="httpx is required for Loom federation.")
+
+    body = await request.json()
+    event_id = int(body.get("event_id") or 0)
+    peer = session.get(LoomPeer, peer_id)
+    ev = session.get(LoomPeerEvent, event_id)
+    if not peer or not peer.base_url or peer.status != "approved":
+        return JSONResponse(status_code=400, content={"error": "Peer is unavailable."})
+    if not ev or ev.peer_id != peer_id or not ev.relay_token:
+        return JSONResponse(status_code=400, content={"error": "This event does not have an active relay route."})
+
+    item_label = ev.action.removeprefix("Downloaded ").strip()
+    payload = json.dumps({
+        "request_id": str(uuid.uuid4()),
+        "relay_token": ev.relay_token,
+        "item_label": item_label,
+    }).encode("utf-8")
+    local_node_id, _ = get_peer_local_identity(session, peer)
+    hdrs = sign_loom_headers(local_node_id, peer.shared_secret, "POST", "/api/loom/v1/direct_pair/request", payload)
+    hdrs["Content-Type"] = "application/json"
+
+    try:
+        async with httpx.AsyncClient(**get_httpx_client_kwargs(peer.base_url, timeout=20.0)) as client:
+            res = await client.post(
+                f"{peer.base_url.rstrip('/')}/api/loom/v1/direct_pair/request",
+                headers=hdrs,
+                content=payload,
+            )
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": f"Failed to reach peer: {e}"})
+
+    if res.status_code != 200:
+        detail = res.text[:200]
+        try:
+            detail = res.json().get("detail", detail)
+        except Exception:
+            pass
+        return JSONResponse(status_code=res.status_code, content={"error": detail or "Direct pair request failed."})
+
+    ev.relay_token = None
+    session.add(ev)
+    log_loom_peer_event(session, peer_id, f"Requested Direct Peer Pair ({item_label})" if item_label else "Requested Direct Peer Pair", commit=False)
+    session.commit()
+    return {"status": "ok"}
+
+
+@app.post("/api/loom/v1/direct_pair/request")
+async def loom_v1_direct_pair_request(request: Request, session: Session = Depends(get_session)):
+    settings = _require_loom_enabled(session)
+    body = await request.body()
+    peer = verify_loom_request(session, dict(request.headers), "POST", "/api/loom/v1/direct_pair/request", body)
+    if not peer or peer.id is None:
+        raise HTTPException(status_code=401, detail="Invalid Loom signature.")
+
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.")
+
+    request_id = str((payload.get("request_id") if isinstance(payload, dict) else "") or "").strip() or str(uuid.uuid4())
+    relay_token = str((payload.get("relay_token") if isinstance(payload, dict) else "") or "").strip()
+    requester_name = str((payload.get("requester_name") if isinstance(payload, dict) else "") or "").strip() or (peer.name or "Anonymous")
+    item_label = str((payload.get("item_label") if isinstance(payload, dict) else "") or "").strip()
+
+    if relay_token:
+        mapping = resolve_relay_token(relay_token)
+        if not mapping:
+            raise HTTPException(status_code=404, detail="Relay token expired or invalid.")
+        if not settings["allow_relay"]:
+            raise HTTPException(status_code=403, detail="Relaying is disabled on this server.")
+        target_peer = session.get(LoomPeer, mapping["target_peer_id"])
+        if not target_peer or target_peer.id is None or target_peer.status != "approved" or not target_peer.allow_incoming or not target_peer.base_url:
+            raise HTTPException(status_code=502, detail="Upstream relay peer is unavailable.")
+        if httpx is None:
+            raise HTTPException(status_code=500, detail="httpx is required for Loom relaying.")
+
+        register_direct_pair_route(request_id, peer.id, target_peer.id)
+        fwd_payload = json.dumps({
+            "request_id": request_id,
+            "relay_token": mapping.get("upstream_relay_token") or "",
+            "requester_name": peer.name or "Anonymous",
+            "item_label": item_label,
+        }).encode("utf-8")
+        local_nid, _ = get_peer_local_identity(session, target_peer)
+        hdrs = sign_loom_headers(local_nid, target_peer.shared_secret, "POST", "/api/loom/v1/direct_pair/request", fwd_payload)
+        hdrs["Content-Type"] = "application/json"
+
+        try:
+            async with httpx.AsyncClient(**get_httpx_client_kwargs(target_peer.base_url, timeout=20.0)) as client:
+                res = await client.post(
+                    f"{target_peer.base_url.rstrip('/')}/api/loom/v1/direct_pair/request",
+                    headers=hdrs,
+                    content=fwd_payload,
+                )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Failed to reach upstream peer: {e}")
+
+        if res.status_code != 200:
+            raise HTTPException(status_code=502, detail="Upstream peer rejected direct pair request.")
+
+        label_suffix = f" ({item_label})" if item_label else ""
+        log_loom_peer_event(session, peer.id, f"Relayed Direct Peer Pair Request{label_suffix}", commit=False)
+        log_loom_peer_event(session, target_peer.id, f"Relayed Direct Peer Pair Request{label_suffix}", commit=False)
+        session.commit()
+        return {"status": "relayed"}
+
+    pr = LoomDirectPairRequest(
+        via_peer_id=peer.id,
+        request_id=request_id,
+        requester_name=requester_name[:80],
+        item_label=item_label[:160],
+        status="pending",
+    )
+    session.add(pr)
+    session.commit()
+    session.refresh(pr)
+    log_loom_peer_event(
+        session,
+        peer.id,
+        f"Relayed Direct Peer Pair Request ({item_label})" if item_label else "Relayed Direct Peer Pair Request",
+        pair_request_id=pr.id,
+    )
+    return {"status": "pending"}
+
+
+@app.post("/api/loom/direct_pair/{req_id}/respond")
+async def api_respond_loom_direct_pair(
+    req_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session),
+):
+    if not is_actual_admin(current_user, current_profile):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    body = await request.json()
+    decision = str((body.get("decision") if isinstance(body, dict) else "") or "").strip().lower()
+    if decision not in ("approve", "decline"):
+        raise HTTPException(status_code=400, detail="Invalid decision.")
+
+    pr = session.get(LoomDirectPairRequest, req_id)
+    if not pr:
+        raise HTTPException(status_code=404, detail="Direct pair request not found.")
+    if pr.status != "pending":
+        return {"status": pr.status}
+
+    via_peer = session.get(LoomPeer, pr.via_peer_id)
+    if decision == "approve":
+        if not tor_onion_manager.is_control_available():
+            await asyncio.to_thread(tor_onion_manager.ensure_tor_running, 10.0)
+        try:
+            bundle = export_peer_bundle(session)
+        except RuntimeError as e:
+            return JSONResponse(status_code=503, content={"error": str(e)})
+        pr.status = "approved"
+        session.add(pr)
+        log_loom_peer_event(session, pr.via_peer_id, "Approved Direct Peer Pair Request", commit=False)
+        session.commit()
+        resp_body: dict[str, Any] = {"request_id": pr.request_id, "decision": "approve", "bundle": bundle}
+    else:
+        pr.status = "declined"
+        session.add(pr)
+        log_loom_peer_event(session, pr.via_peer_id, "Declined Direct Peer Pair Request", commit=False)
+        session.commit()
+        resp_body = {"request_id": pr.request_id, "decision": "decline"}
+
+    if via_peer and via_peer.base_url and httpx is not None:
+        payload = json.dumps(resp_body).encode("utf-8")
+        local_nid, _ = get_peer_local_identity(session, via_peer)
+        hdrs = sign_loom_headers(local_nid, via_peer.shared_secret, "POST", "/api/loom/v1/direct_pair/response", payload)
+        hdrs["Content-Type"] = "application/json"
+
+        async def _send_pair_response():
+            try:
+                async with httpx.AsyncClient(**get_httpx_client_kwargs(via_peer.base_url, timeout=20.0)) as client:
+                    await client.post(
+                        f"{via_peer.base_url.rstrip('/')}/api/loom/v1/direct_pair/response",
+                        headers=hdrs,
+                        content=payload,
+                    )
+            except Exception:
+                pass
+
+        asyncio.create_task(_send_pair_response())
+
+    return {"status": "ok", "decision": pr.status}
+
+
+@app.post("/api/loom/v1/direct_pair/response")
+async def loom_v1_direct_pair_response(request: Request, session: Session = Depends(get_session)):
+    settings = _require_loom_enabled(session)
+    body = await request.body()
+    peer = verify_loom_request(session, dict(request.headers), "POST", "/api/loom/v1/direct_pair/response", body)
+    if not peer or peer.id is None:
+        raise HTTPException(status_code=401, detail="Invalid Loom signature.")
+
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.")
+
+    request_id = str((payload.get("request_id") if isinstance(payload, dict) else "") or "").strip()
+    decision = str((payload.get("decision") if isinstance(payload, dict) else "") or "").strip().lower()
+    bundle = payload.get("bundle") if isinstance(payload, dict) else None
+
+    route = resolve_direct_pair_route(request_id, pop=True)
+    if route:
+        requester_peer = session.get(LoomPeer, route["requester_peer_id"])
+        if not requester_peer or not requester_peer.base_url or httpx is None:
+            raise HTTPException(status_code=502, detail="Requester peer is unavailable.")
+        fwd_payload = json.dumps({"request_id": request_id, "decision": decision, "bundle": bundle}).encode("utf-8")
+        local_nid, _ = get_peer_local_identity(session, requester_peer)
+        hdrs = sign_loom_headers(local_nid, requester_peer.shared_secret, "POST", "/api/loom/v1/direct_pair/response", fwd_payload)
+        hdrs["Content-Type"] = "application/json"
+        try:
+            async with httpx.AsyncClient(**get_httpx_client_kwargs(requester_peer.base_url, timeout=20.0)) as client:
+                await client.post(
+                    f"{requester_peer.base_url.rstrip('/')}/api/loom/v1/direct_pair/response",
+                    headers=hdrs,
+                    content=fwd_payload,
+                )
+        except Exception:
+            pass
+        return {"status": "relayed"}
+
+    if decision == "approve" and isinstance(bundle, dict):
+        if not tor_onion_manager.is_control_available():
+            await asyncio.to_thread(tor_onion_manager.ensure_tor_running, 10.0)
+        try:
+            new_peer = import_peer_bundle(session, bundle, custom_name=None)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        log_loom_peer_event(session, peer.id, "Direct Peer Pair Approved", commit=False)
+        log_loom_peer_event(session, new_peer.id, "Paired with peer", commit=False)
+        session.commit()
+        if settings["enabled"] and new_peer.base_url:
+            local_node_id, local_onion_url = get_peer_local_identity(session, new_peer)
+            asyncio.create_task(
+                _apply_loom_peer_network_update(
+                    peer_status=new_peer.status,
+                    local_onion_service_id=new_peer.local_onion_service_id,
+                    local_onion_private_key=new_peer.local_onion_private_key,
+                    loom_enabled=True,
+                    peer_base_url=new_peer.base_url or "",
+                    local_node_id=local_node_id,
+                    local_onion_url=local_onion_url,
+                    shared_secret=new_peer.shared_secret,
+                    server_fingerprint=get_loom_server_fingerprint(session),
+                )
+            )
+    elif decision == "decline":
+        log_loom_peer_event(session, peer.id, "Direct Peer Pair Declined")
+
+    return {"status": "ok"}
 
 
 @app.post("/api/loom/peers/{peer_id}/delete")
@@ -11700,12 +12149,16 @@ async def api_delete_loom_peer(
         sync_dir = get_loom_settings(session).get("sync_dir") or "/media/loom"
         if peer.local_onion_service_id:
             tor_onion_manager.delete_onion_service(peer.local_onion_service_id)
+        if peer.prev_onion_service_id and peer.prev_onion_service_id != peer.local_onion_service_id:
+            tor_onion_manager.delete_onion_service(peer.prev_onion_service_id)
         for job in session.exec(select(LoomTransferJob).where(LoomTransferJob.peer_id == peer_id)).all():
             if job.status != "completed":
                 cleanup_job_part_file(job.target_path, sync_dir=sync_dir)
             session.delete(job)
         for ev in session.exec(select(LoomPeerEvent).where(LoomPeerEvent.peer_id == peer_id)).all():
             session.delete(ev)
+        for dpr in session.exec(select(LoomDirectPairRequest).where(LoomDirectPairRequest.via_peer_id == peer_id)).all():
+            session.delete(dpr)
         session.delete(peer)
         session.commit()
     peers = session.exec(select(LoomPeer).order_by(LoomPeer.id.desc())).all()
@@ -11987,6 +12440,8 @@ async def api_queue_loom_sync(
         )
         if not is_filetype_allowed(target_path, settings["allowed_filetypes_list"]):
             continue
+        raw_sha = (str(item.get("sha256") or "")).strip().lower()
+        raw_relay_tok = (str(item.get("relay_token") or "")).strip() or None
         job = LoomTransferJob(
             peer_id=item_peer_id,
             media_type=mtype,
@@ -11997,7 +12452,9 @@ async def api_queue_loom_sync(
             episode=item.get("episode"),
             quality_label=q_label,
             target_path=target_path,
+            relay_token=raw_relay_tok,
             total_bytes=int(item.get("file_size") or 0),
+            expected_sha256=raw_sha if is_valid_sha256(raw_sha) else None,
             status="queued",
         )
         session.add(job)

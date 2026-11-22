@@ -269,13 +269,26 @@ def test_allow_relay_setting_and_relay_helpers(db_session):
     assert loom.mark_or_check_search_request_id(req_id, ttl_seconds=60.0) is True
 
     # Opaque relay token maps back to target peer item without exposing peer identity
-    tok = loom.register_relay_token(target_peer_id=7, media_type="tv", remote_item_id=42, upstream_relay_token="up-tok")
+    tok = loom.register_relay_token(
+        target_peer_id=7,
+        media_type="tv",
+        remote_item_id=42,
+        upstream_relay_token="up-tok",
+        item_label="Dexter S01E03",
+        quality_label="1080p",
+        hops_away=2,
+        hops_left=1,
+    )
     resolved = loom.resolve_relay_token(tok)
     assert resolved is not None
     assert resolved["target_peer_id"] == 7
     assert resolved["media_type"] == "tv"
     assert resolved["remote_item_id"] == 42
     assert resolved["upstream_relay_token"] == "up-tok"
+    assert resolved["item_label"] == "Dexter S01E03"
+    assert resolved["quality_label"] == "1080p"
+    assert resolved["hops_away"] == 2
+    assert resolved["hops_left"] == 1
 
 
 def test_parse_and_search_season_episode_queries(db_session, tmp_path):
@@ -614,3 +627,251 @@ def test_peer_history_logging_and_pruning(db_session):
         .order_by(loom.LoomPeerEvent.id.desc())
     ).all()
     assert [e.action for e in events] == ["Action 4", "Action 3", "Action 2"]
+
+
+def test_sha256_verification_passes_and_rejects_tampered_download(db_session, tmp_path, monkeypatch):
+    import hashlib
+
+    src = tmp_path / "source.mkv"
+    src.write_bytes(b"trusted-loom-payload" * 100)
+    expected_hash = hashlib.sha256(src.read_bytes()).hexdigest()
+    assert loom.is_valid_sha256(expected_hash) is True
+    assert loom.is_valid_sha256("not-a-hash") is False
+    assert loom.compute_file_sha256(str(src)) == expected_hash
+    # Cached hit returns same digest
+    assert loom.compute_file_sha256(str(src)) == expected_hash
+
+    vol = tmp_path / "sync"
+    vol.mkdir()
+    loom.save_loom_settings(db_session, {"enabled": True, "loom_sync_dir": str(vol)})
+
+    peer = LoomPeer(
+        name="TrustedFriend",
+        node_id="node-sha-1",
+        base_url="http://trusted.onion",
+        shared_secret="secret-sha",
+        status="approved",
+        allow_incoming=True,
+    )
+    db_session.add(peer)
+    db_session.commit()
+    db_session.refresh(peer)
+
+    class _FakeResp:
+        def __init__(self, payload: bytes, header_hash: str):
+            self.status_code = 200
+            self.headers = {"content-length": str(len(payload)), "x-loom-sha256": header_hash}
+            self._payload = payload
+
+        def iter_bytes(self, chunk_size=65536):
+            yield self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class _FakeClient:
+        def __init__(self, payload: bytes, header_hash: str):
+            self._payload = payload
+            self._header_hash = header_hash
+
+        def stream(self, method, url, headers=None):
+            return _FakeResp(self._payload, self._header_hash)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    manager = loom.LoomSyncManager()
+
+    # 1) Valid hash passes and moves file into place
+    good_target = vol / "Movies" / "Good.mkv"
+    good_job = loom.LoomTransferJob(
+        peer_id=peer.id,
+        media_type="movie",
+        remote_item_id=1,
+        title="Good Movie",
+        target_path=str(good_target),
+        status="downloading",
+    )
+    db_session.add(good_job)
+    db_session.commit()
+    db_session.refresh(good_job)
+
+    good_bytes = src.read_bytes()
+    monkeypatch.setattr(loom.httpx, "Client", lambda **kwargs: _FakeClient(good_bytes, expected_hash))
+    assert manager._download_job(good_job.id, peer.id, peer.base_url, peer.shared_secret, "local-1", "/api/loom/v1/download/movie/1", str(good_target)) is True
+    assert good_target.exists() and good_target.read_bytes() == good_bytes
+    assert not (vol / "Movies" / "Good.mkv.part").exists()
+    db_session.expire_all()
+    assert db_session.get(loom.LoomTransferJob, good_job.id).status == "completed"
+    assert db_session.get(loom.LoomTransferJob, good_job.id).expected_sha256 == expected_hash
+
+    # 2) Tampered bytes fail SHA-256 verification and delete .part without finalizing target
+    bad_target = vol / "Movies" / "Tampered.mkv"
+    bad_job = loom.LoomTransferJob(
+        peer_id=peer.id,
+        media_type="movie",
+        remote_item_id=2,
+        title="Tampered Movie",
+        target_path=str(bad_target),
+        status="downloading",
+    )
+    db_session.add(bad_job)
+    db_session.commit()
+    db_session.refresh(bad_job)
+
+    tampered_bytes = b"corrupted-or-tampered-bytes" * 50
+    monkeypatch.setattr(loom.httpx, "Client", lambda **kwargs: _FakeClient(tampered_bytes, expected_hash))
+    assert manager._download_job(bad_job.id, peer.id, peer.base_url, peer.shared_secret, "local-1", "/api/loom/v1/download/movie/2", str(bad_target)) is True
+    assert not bad_target.exists()
+    assert not (vol / "Movies" / "Tampered.mkv.part").exists()
+    db_session.expire_all()
+    refreshed_bad = db_session.get(loom.LoomTransferJob, bad_job.id)
+    assert refreshed_bad.status == "failed"
+    assert "SHA-256" in (refreshed_bad.error_message or "")
+
+
+def test_direct_pair_route_and_event_metadata(db_session):
+    loom.register_direct_pair_route("req-dp-1", requester_peer_id=10, target_peer_id=20)
+    peeked = loom.resolve_direct_pair_route("req-dp-1", pop=False)
+    assert peeked is not None
+    assert peeked["requester_peer_id"] == 10
+    assert peeked["target_peer_id"] == 20
+
+    popped = loom.resolve_direct_pair_route("req-dp-1", pop=True)
+    assert popped is not None
+    assert loom.resolve_direct_pair_route("req-dp-1") is None
+
+    peer = LoomPeer(name="MutualFriend", node_id="node-dp-1", base_url="http://mutual.onion", shared_secret="sec")
+    db_session.add(peer)
+    db_session.commit()
+    db_session.refresh(peer)
+
+    ev = loom.log_loom_peer_event(
+        db_session,
+        peer.id,
+        "Downloaded Dexter S01E03",
+        relay_token="tok-relay-1",
+        pair_request_id=77,
+    )
+    assert ev is not None
+    assert ev.relay_token == "tok-relay-1"
+    assert ev.pair_request_id == 77
+
+
+def test_duplicate_peer_protection_across_fresh_invites(db_session, monkeypatch):
+    monkeypatch.setattr(loom.tor_onion_manager, "is_control_available", lambda: True)
+    counter = {"n": 0}
+
+    def fake_create(private_key=None):
+        counter["n"] += 1
+        return f"dup{counter['n']}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", f"ED25519-V3:k{counter['n']}"
+
+    monkeypatch.setattr(loom.tor_onion_manager, "create_onion_service", fake_create)
+    monkeypatch.setattr(loom.tor_onion_manager, "delete_onion_service", lambda sid: True)
+
+    # 1) Importing a second fresh invite from the same server_fingerprint updates existing peer
+    b1 = {
+        "node_id": "remote-node-1",
+        "server_fingerprint": "fp-friend-server-1",
+        "base_url": "http://friend1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion",
+        "shared_secret": "sec-1",
+    }
+    p1 = loom.import_peer_bundle(db_session, b1, custom_name="FriendOne")
+
+    b2 = {
+        "node_id": "remote-node-2",
+        "server_fingerprint": "fp-friend-server-1",
+        "base_url": "http://friend2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion",
+        "shared_secret": "sec-2",
+    }
+    p2 = loom.import_peer_bundle(db_session, b2)
+    assert p2.id == p1.id
+    assert p2.name == "FriendOne"
+    assert p2.node_id == "remote-node-2"
+    assert p2.base_url == b2["base_url"]
+    assert p2.shared_secret == "sec-2"
+    assert len(db_session.exec(loom.select(LoomPeer)).all()) == 1
+
+    # 2) Receiving a handshake using a second exported invite from the same peer fingerprint updates existing peer
+    fresh_bundle = loom.export_peer_bundle(db_session)
+    hs_payload = json.dumps({
+        "node_id": "remote-node-3",
+        "base_url": "http://friend3aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion",
+        "server_fingerprint": "fp-friend-server-1",
+    }).encode("utf-8")
+    hdrs = loom.sign_loom_headers("remote-node-3", fresh_bundle["shared_secret"], "POST", "/api/loom/v1/handshake", hs_payload)
+
+    matched = loom.consume_issued_secret_for_handshake(
+        db_session,
+        hdrs,
+        "POST",
+        "/api/loom/v1/handshake",
+        hs_payload,
+        peer_name="FriendOneRenamed",
+        peer_base_url="http://friend3aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion",
+        peer_fingerprint="fp-friend-server-1",
+    )
+    assert matched is not None
+    assert matched.id == p1.id
+    assert matched.node_id == "remote-node-3"
+    assert len(db_session.exec(loom.select(LoomPeer)).all()) == 1
+
+
+def test_auto_rotate_addresses_and_72h_grace_period(db_session, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    assert loom.get_loom_settings(db_session)["auto_rotate_interval"] == "disabled"
+    saved = loom.save_loom_settings(db_session, {"enabled": True, "auto_rotate_interval": "daily"})
+    assert saved["auto_rotate_interval"] == "daily"
+
+    deleted = []
+    counter = {"n": 0}
+
+    def fake_create(private_key=None):
+        counter["n"] += 1
+        return f"rot{counter['n']}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", f"ED25519-V3:rk{counter['n']}"
+
+    monkeypatch.setattr(loom.tor_onion_manager, "is_control_available", lambda: True)
+    monkeypatch.setattr(loom.tor_onion_manager, "create_onion_service", fake_create)
+    monkeypatch.setattr(loom.tor_onion_manager, "delete_onion_service", lambda sid: deleted.append(sid) or True)
+
+    peer = loom.import_peer_bundle(
+        db_session,
+        {"node_id": "rot-friend-1", "base_url": "http://rotfriend1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion", "shared_secret": "sec-rot"},
+        custom_name="RotFriend",
+    )
+    old_sid = peer.local_onion_service_id
+    peer.created_at = datetime.now(timezone.utc) - timedelta(days=2)
+    db_session.add(peer)
+    db_session.commit()
+
+    # Due for daily rotation: rotates to a new onion and keeps old_sid for 72h grace period
+    now = datetime.now(timezone.utc)
+    res1 = loom.process_loom_auto_rotations(db_session, now_dt=now)
+    assert res1 == {"rotated": 1, "retired": 0}
+    db_session.refresh(peer)
+    assert peer.local_onion_service_id != old_sid
+    assert peer.prev_onion_service_id == old_sid
+    assert old_sid not in deleted
+
+    events = db_session.exec(loom.select(loom.LoomPeerEvent).where(loom.LoomPeerEvent.peer_id == peer.id)).all()
+    assert any(e.action == "Auto-rotated address" for e in events)
+
+    # Before 72 hours (e.g., 12h later): grace-period onion is still kept alive
+    res_mid = loom.process_loom_auto_rotations(db_session, now_dt=now + timedelta(hours=12))
+    assert res_mid == {"rotated": 0, "retired": 0}
+    assert old_sid not in deleted
+
+    # Switch to monthly so 73h later only tests 72h grace-period retirement (without triggering another daily rotation)
+    loom.save_loom_settings(db_session, {"auto_rotate_interval": "monthly"})
+    res_exp = loom.process_loom_auto_rotations(db_session, now_dt=now + timedelta(hours=73))
+    assert res_exp == {"rotated": 0, "retired": 1}
+    assert old_sid in deleted
+    db_session.refresh(peer)
+    assert peer.prev_onion_service_id is None

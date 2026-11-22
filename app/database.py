@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, create_engine, Session, select, text
-from .models import User, UserSession, VolumePath, Profile, WatchHistory, Watchlist, Artist, Album, Track, Playlist, PlaylistTrack, Person, LoomPeer, LoomTransferJob
+from .models import User, UserSession, VolumePath, Profile, WatchHistory, Watchlist, Artist, Album, Track, Playlist, PlaylistTrack, Person, LoomPeer, LoomPeerEvent, LoomDirectPairRequest, LoomTransferJob
 
 # This is critical: We are saving the database inside the /config folder.
 # Because of your Docker volume mount, this will actually be saved to your desktop!
@@ -446,6 +446,23 @@ def create_db_and_tables():
             session.commit()
         except Exception:
             session.rollback()
+
+        for alter_sql in (
+            "ALTER TABLE loomtransferjob ADD COLUMN expected_sha256 VARCHAR",
+            "ALTER TABLE loomtransferjob ADD COLUMN relay_token VARCHAR",
+            "ALTER TABLE loompeerevent ADD COLUMN relay_token VARCHAR",
+            "ALTER TABLE loompeerevent ADD COLUMN pair_request_id INTEGER",
+            "ALTER TABLE loompeer ADD COLUMN peer_fingerprint VARCHAR",
+            "ALTER TABLE loompeer ADD COLUMN prev_onion_service_id VARCHAR",
+            "ALTER TABLE loompeer ADD COLUMN prev_onion_private_key VARCHAR",
+            "ALTER TABLE loompeer ADD COLUMN prev_onion_expires_at DATETIME",
+            "ALTER TABLE loompeer ADD COLUMN last_rotated_at DATETIME",
+        ):
+            try:
+                session.exec(text(alter_sql))
+                session.commit()
+            except Exception:
+                session.rollback()
 
         # Database index migrations for high performance on large libraries
         indexes = [

@@ -635,7 +635,7 @@
 
             {% if recent_albums and user.music_access %}
             <div class="card">
-                <h2>Recent Music</h2>
+                <h2>Recently Added Music</h2>
                 <div class="carousel-container">
                     <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i
                             data-lucide="chevron-left"></i></button>
@@ -835,6 +835,10 @@
                         </div>`;
                     }
 
+                    const staleMenu = document.getElementById('loomSortMenu');
+                    if (staleMenu && staleMenu.parentElement === document.body) {
+                        staleMenu.remove();
+                    }
                     resultsContainer.innerHTML = html;
                     lucide.createIcons();
                     resultsContainer.style.display = 'flex';
@@ -881,7 +885,43 @@
                 event.stopPropagation();
             }
             const menu = document.getElementById('loomSortMenu');
-            if (menu) menu.classList.toggle('show');
+            const btn = document.getElementById('loomSortBtn');
+            if (!menu || !btn) return;
+
+            const isShowing = !menu.classList.contains('show');
+            if (!isShowing) {
+                menu.classList.remove('show');
+                return;
+            }
+
+            document.body.appendChild(menu);
+            menu.style.position = 'fixed';
+            menu.style.zIndex = '10050';
+            menu.style.visibility = 'hidden';
+            menu.classList.add('show');
+
+            const btnRect = btn.getBoundingClientRect();
+            const menuRect = menu.getBoundingClientRect();
+            const menuWidth = menuRect.width || 180;
+            const menuHeight = menuRect.height || 180;
+            const viewportWidth = window.innerWidth;
+            const viewportHeight = window.innerHeight;
+
+            let left = btnRect.right - menuWidth;
+            if (left < 10) left = 10;
+            if (left + menuWidth > viewportWidth - 10) {
+                left = Math.max(10, viewportWidth - menuWidth - 10);
+            }
+
+            let top = btnRect.bottom + 5;
+            if (top + menuHeight > viewportHeight - 10 && btnRect.top - menuHeight - 5 > 10) {
+                top = btnRect.top - menuHeight - 5;
+            }
+
+            menu.style.left = left + 'px';
+            menu.style.right = 'auto';
+            menu.style.top = top + 'px';
+            menu.style.visibility = 'visible';
         }
 
         function setLoomSort(mode, label) {
@@ -1312,11 +1352,12 @@
                 const resets = data.reset_requests || [];
                 const loomDownloads = data.loom_downloads || [];
                 const loomUploads = data.loom_uploads || [];
+                const loomPairRequests = data.loom_pair_requests || [];
                 const badge = document.getElementById('inboxBadge');
                 const container = document.getElementById('inboxItems');
                 if (!badge || !container) return;
 
-                const totalCount = items.length + resets.length + loomDownloads.length + loomUploads.length;
+                const totalCount = items.length + resets.length + loomDownloads.length + loomUploads.length + loomPairRequests.length;
                 const mobileBadge = document.getElementById('mobileInboxBadge');
                 const mobileContainer = document.getElementById('mobileInboxItems');
 
@@ -1345,6 +1386,15 @@
                         <div class="inbox-actions">
                             <button class="btn btn-sm" onclick="respondReset(${pr.id}, 'approve')">Approve</button>
                             <button class="btn btn-sm btn-secondary" onclick="respondReset(${pr.id}, 'deny')">Deny</button>
+                        </div>
+                    </div>
+                `).join('');
+                    html += loomPairRequests.map(pr => `
+                    <div class="inbox-item">
+                        <div><strong>${_escapeLoomHtml(pr.via_peer_name)}</strong> relayed a Direct Peer Pair Request${pr.item_label ? ` for <em>${_escapeLoomHtml(pr.item_label)}</em>` : ''}</div>
+                        <div class="inbox-actions">
+                            <button type="button" class="btn btn-sm" onclick="respondLoomDirectPair(${pr.id}, 'approve')">Approve</button>
+                            <button type="button" class="btn btn-sm btn-secondary" onclick="respondLoomDirectPair(${pr.id}, 'decline')">Decline</button>
                         </div>
                     </div>
                 `).join('');
@@ -1378,6 +1428,19 @@
         async function respondReset(id, action) {
             try {
                 await fetch(`/password_reset/${action}/${id}`, { method: 'POST' });
+                loadInbox();
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        async function respondLoomDirectPair(id, decision) {
+            try {
+                await fetch(`/api/loom/direct_pair/${id}/respond`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ decision })
+                });
                 loadInbox();
             } catch (err) {
                 console.error(err);

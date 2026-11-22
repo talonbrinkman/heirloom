@@ -250,11 +250,16 @@ class LoomPeer(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(index=True)
     node_id: str = Field(unique=True, index=True)
+    peer_fingerprint: Optional[str] = Field(default=None, index=True)
     base_url: str
     shared_secret: str
     local_node_id: Optional[str] = Field(default=None)
     local_onion_service_id: Optional[str] = Field(default=None)
     local_onion_private_key: Optional[str] = Field(default=None)
+    prev_onion_service_id: Optional[str] = Field(default=None)
+    prev_onion_private_key: Optional[str] = Field(default=None)
+    prev_onion_expires_at: Optional[datetime] = Field(default=None)
+    last_rotated_at: Optional[datetime] = Field(default=None)
     status: str = Field(default="pending", index=True)  # pending, approved, disabled
     allow_incoming: bool = Field(default=False)
     allow_outgoing: bool = Field(default=False)
@@ -278,9 +283,11 @@ class LoomTransferJob(SQLModel, table=True):
     episode: Optional[int] = Field(default=None)
     quality_label: str = Field(default="HD")
     target_path: str
+    relay_token: Optional[str] = Field(default=None)
     status: str = Field(default="queued", index=True)  # queued, downloading, paused_stream, paused_schedule, paused_cap, completed, failed, cancelled
     bytes_transferred: int = Field(default=0)
     total_bytes: int = Field(default=0)
+    expected_sha256: Optional[str] = Field(default=None)
     error_message: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -290,4 +297,16 @@ class LoomPeerEvent(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     peer_id: int = Field(foreign_key="loompeer.id", index=True)
     action: str
+    relay_token: Optional[str] = Field(default=None)
+    pair_request_id: Optional[int] = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
+class LoomDirectPairRequest(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    via_peer_id: int = Field(foreign_key="loompeer.id", index=True)
+    request_id: str = Field(index=True)
+    requester_name: str = Field(default="Anonymous")
+    item_label: str = Field(default="")
+    status: str = Field(default="pending", index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

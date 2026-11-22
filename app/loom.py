@@ -10,7 +10,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
@@ -18,7 +18,7 @@ from sqlmodel import Session, select
 
 from .database import engine, sqlite_file_name
 from .ffmpeg_setup import get_cached_media_probe, probe_media_streams
-from .models import LoomPeer, LoomPeerEvent, LoomTransferJob, Movie, Photo, SystemConfig, TVShow, Track
+from .models import LoomDirectPairRequest, LoomPeer, LoomPeerEvent, LoomTransferJob, Movie, Photo, SystemConfig, TVShow, Track
 
 try:
     import httpx
@@ -47,7 +47,16 @@ LOOM_DEFAULTS: dict[str, str] = {
     "loom_max_file_size_gb": "0",
     "loom_allowed_filetypes": DEFAULT_LOOM_ALLOWED_FILETYPES,
     "loom_searchable_volumes": "[]",
+    "loom_auto_rotate_interval": "disabled",
 }
+
+LOOM_AUTO_ROTATE_INTERVALS: dict[str, int] = {
+    "disabled": 0,
+    "daily": 86400,
+    "monthly": 30 * 86400,
+    "yearly": 365 * 86400,
+}
+LOOM_ROTATE_GRACE_SECONDS = 72 * 3600
 
 QUALITY_HEIGHT_MAP: dict[str, int] = {
     "480p": 480,
@@ -59,6 +68,42 @@ QUALITY_HEIGHT_MAP: dict[str, int] = {
     "2160p": 2160,
     "original": 99999,
 }
+
+
+_file_sha256_cache: dict[tuple[str, int, int], str] = {}
+_file_sha256_lock = threading.Lock()
+
+
+def is_valid_sha256(value: Optional[str]) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{64}", (value or "").strip().lower()))
+
+
+def compute_file_sha256(file_path: str, use_cache: bool = True) -> str:
+    """Compute (and optionally cache by path/size/mtime_ns) the lowercase hex SHA-256 digest of a file."""
+    abs_path = os.path.abspath(file_path)
+    st = os.stat(abs_path)
+    cache_key = (abs_path, int(st.st_size), int(st.st_mtime_ns))
+    if use_cache:
+        with _file_sha256_lock:
+            cached = _file_sha256_cache.get(cache_key)
+            if cached:
+                return cached
+
+    h = hashlib.sha256()
+    with open(abs_path, "rb") as fp:
+        while True:
+            chunk = fp.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    digest = h.hexdigest()
+
+    if use_cache:
+        with _file_sha256_lock:
+            if len(_file_sha256_cache) >= 512:
+                _file_sha256_cache.pop(next(iter(_file_sha256_cache)), None)
+            _file_sha256_cache[cache_key] = digest
+    return digest
 
 
 def format_loom_item_label(
@@ -79,13 +124,20 @@ def log_loom_peer_event(
     *,
     commit: bool = True,
     max_events_per_peer: int = 200,
+    relay_token: Optional[str] = None,
+    pair_request_id: Optional[int] = None,
 ) -> Optional[LoomPeerEvent]:
     if peer_id is None:
         return None
     text = str(action or "").strip()
     if not text:
         return None
-    ev = LoomPeerEvent(peer_id=int(peer_id), action=text[:240])
+    ev = LoomPeerEvent(
+        peer_id=int(peer_id),
+        action=text[:240],
+        relay_token=relay_token,
+        pair_request_id=pair_request_id,
+    )
     session.add(ev)
     if commit:
         session.commit()
@@ -125,6 +177,10 @@ def get_or_create_node_id(session: Session) -> str:
         _set_config_value(session, "loom_node_id", node_id)
         session.commit()
     return node_id
+
+
+def get_loom_server_fingerprint(session: Session) -> str:
+    return hashlib.sha256(f"loom-fp:{get_or_create_node_id(session)}".encode("utf-8")).hexdigest()[:32]
 
 
 def get_tor_socks_url() -> str:
@@ -355,6 +411,7 @@ class TorOnionManager:
         restored = 0
         restored_keys: set[str] = set()
         peers = session.exec(select(LoomPeer).where(LoomPeer.status.in_(["pending", "approved"]))).all()
+        now_utc = datetime.now(timezone.utc)
         for p in peers:
             pk = (p.local_onion_private_key or "").strip()
             if pk and pk not in restored_keys:
@@ -368,6 +425,18 @@ class TorOnionManager:
                 except Exception as e:
                     if "550" not in str(e):
                         print(f"[Loom] Failed to restore .onion for peer {p.id}: {e}")
+            prev_pk = (p.prev_onion_private_key or "").strip()
+            prev_exp = p.prev_onion_expires_at
+            if prev_exp is not None and prev_exp.tzinfo is None:
+                prev_exp = prev_exp.replace(tzinfo=timezone.utc)
+            if p.prev_onion_service_id and prev_pk and (prev_exp is None or prev_exp > now_utc) and prev_pk not in restored_keys:
+                restored_keys.add(prev_pk)
+                try:
+                    self.create_onion_service(private_key=prev_pk)
+                    restored += 1
+                except Exception as e:
+                    if "550" not in str(e):
+                        print(f"[Loom] Failed to restore grace-period .onion for peer {p.id}: {e}")
         if restored:
             session.commit()
 
@@ -503,6 +572,11 @@ def get_loom_settings(session: Session) -> dict[str, Any]:
         "allowed_filetypes": ", ".join(allowed_list),
         "allowed_filetypes_list": allowed_list,
         "searchable_volumes": _parse_searchable_volumes(raw["loom_searchable_volumes"]),
+        "auto_rotate_interval": (
+            raw["loom_auto_rotate_interval"].strip().lower()
+            if raw["loom_auto_rotate_interval"].strip().lower() in LOOM_AUTO_ROTATE_INTERVALS
+            else "disabled"
+        ),
         "tor_available": tor_onion_manager.is_control_available(),
     }
 
@@ -544,6 +618,12 @@ def save_loom_settings(session: Session, data: dict[str, Any]) -> dict[str, Any]
         "max_file_size_gb": ("loom_max_file_size_gb", lambda v: str(max(0.0, round(float(v or 0), 3)))),
         "allowed_filetypes": ("loom_allowed_filetypes", _encode_allowed_filetypes),
         "searchable_volumes": ("loom_searchable_volumes", _encode_searchable_volumes),
+        "auto_rotate_interval": (
+            "loom_auto_rotate_interval",
+            lambda v: str(v or "disabled").strip().lower()
+            if str(v or "").strip().lower() in LOOM_AUTO_ROTATE_INTERVALS
+            else "disabled",
+        ),
     }
     for field_name, (cfg_key, conv) in mapping.items():
         if field_name in data:
@@ -703,6 +783,7 @@ def export_peer_bundle(session: Session, fallback_base_url: str = "") -> dict[st
     return {
         "version": 2,
         "node_id": local_node_id,
+        "server_fingerprint": get_loom_server_fingerprint(session),
         "base_url": base_url,
         "shared_secret": secret,
         "max_hops": get_loom_settings(session)["max_hops"],
@@ -719,6 +800,7 @@ def consume_issued_secret_for_handshake(
     body: bytes,
     peer_name: str,
     peer_base_url: str,
+    peer_fingerprint: Optional[str] = None,
 ) -> Optional[LoomPeer]:
     """Allow an unseen peer to register if it signs a handshake using an unexpired exported bundle secret."""
     prune_expired_issued_secrets(session)
@@ -750,17 +832,38 @@ def consume_issued_secret_for_handshake(
     issued.pop(matched_idx)
     _save_issued_secrets(session, issued)
 
-    # Prevent duplicate peer creation if this secret or node_id already belongs to an existing peer
-    # (e.g. re-enabling a peer or self-pairing during local testing).
-    existing = session.exec(
-        select(LoomPeer).where(
-            (LoomPeer.shared_secret == matched_entry["secret"])
-            | (LoomPeer.node_id == peer_node_id)
-            | (LoomPeer.local_node_id == peer_node_id)
-        )
-    ).first()
+    peer_fp = str(peer_fingerprint or "").strip()[:64] or None
+    norm_base = (peer_base_url or "").strip().rstrip("/")
+
+    # Prevent duplicate peer creation if this secret, node_id, server_fingerprint, or base_url already belongs to an existing peer
+    cond = (
+        (LoomPeer.shared_secret == matched_entry["secret"])
+        | (LoomPeer.node_id == peer_node_id)
+        | (LoomPeer.local_node_id == peer_node_id)
+    )
+    if peer_fp:
+        cond = cond | (LoomPeer.peer_fingerprint == peer_fp)
+    if norm_base:
+        cond = cond | (LoomPeer.base_url == norm_base)
+    existing = session.exec(select(LoomPeer).where(cond)).first()
     if existing:
+        is_self = bool(existing.local_node_id and peer_node_id == existing.local_node_id)
         existing.last_seen_at = datetime.now(timezone.utc)
+        existing.shared_secret = matched_entry["secret"]
+        if peer_fp:
+            existing.peer_fingerprint = peer_fp
+        if not is_self:
+            existing.node_id = peer_node_id
+            if norm_base:
+                existing.base_url = norm_base
+            new_sid = matched_entry.get("local_onion_service_id") or None
+            if new_sid and new_sid != existing.local_onion_service_id:
+                old_sid = existing.local_onion_service_id
+                existing.local_node_id = matched_entry.get("local_node_id") or existing.local_node_id or str(uuid.uuid4())
+                existing.local_onion_service_id = new_sid
+                existing.local_onion_private_key = matched_entry.get("local_onion_private_key") or None
+                if old_sid:
+                    tor_onion_manager.delete_onion_service(old_sid)
         session.add(existing)
         session.commit()
         session.refresh(existing)
@@ -769,7 +872,8 @@ def consume_issued_secret_for_handshake(
     peer = LoomPeer(
         name=_sanitize_peer_name(peer_name),
         node_id=peer_node_id,
-        base_url=(peer_base_url or "").strip().rstrip("/"),
+        peer_fingerprint=peer_fp,
+        base_url=norm_base,
         shared_secret=matched_entry["secret"],
         local_node_id=matched_entry.get("local_node_id") or str(uuid.uuid4()),
         local_onion_service_id=matched_entry.get("local_onion_service_id") or None,
@@ -792,6 +896,7 @@ def import_peer_bundle(session: Session, bundle: dict[str, Any], custom_name: Op
     node_id = str(bundle.get("node_id") or "").strip()
     base_url = str(bundle.get("base_url") or "").strip().rstrip("/")
     shared_secret = str(bundle.get("shared_secret") or "").strip()
+    peer_fp = str(bundle.get("server_fingerprint") or "").strip()[:64] or None
     name = _sanitize_peer_name(custom_name or bundle.get("name"))
 
     local_fallback_id = get_or_create_node_id(session)
@@ -812,8 +917,15 @@ def import_peer_bundle(session: Session, bundle: dict[str, Any], custom_name: Op
         raise ValueError("Peer base_url must start with http:// or https://.")
     if base_url.startswith("http://") and not is_onion_url(base_url) and os.environ.get("LOOM_ALLOW_CLEARNET_FALLBACK") != "1":
         raise ValueError("Plaintext http:// is only allowed for .onion addresses.")
-    if node_id == local_fallback_id:
+    if node_id == local_fallback_id or (peer_fp and peer_fp == get_loom_server_fingerprint(session) and not any(
+        e.get("secret") == shared_secret for e in _get_issued_secrets(session)
+    )):
         raise ValueError("Cannot import your own server bundle as a peer.")
+
+    dup_cond = (LoomPeer.node_id == node_id) | (LoomPeer.base_url == base_url)
+    if peer_fp:
+        dup_cond = dup_cond | (LoomPeer.peer_fingerprint == peer_fp)
+    existing = session.exec(select(LoomPeer).where(dup_cond)).first()
 
     local_node_id = str(uuid.uuid4())
     local_sid = None
@@ -825,22 +937,28 @@ def import_peer_bundle(session: Session, bundle: dict[str, Any], custom_name: Op
             local_sid = issued_entry.get("local_onion_service_id") or None
             local_priv = issued_entry.get("local_onion_private_key") or None
             break
-    if not local_sid and tor_onion_manager.is_control_available():
+    if not existing and not local_sid and tor_onion_manager.is_control_available():
         local_sid, local_priv = tor_onion_manager.create_onion_service()
 
-    existing = session.exec(select(LoomPeer).where(LoomPeer.node_id == node_id)).first()
     if existing:
-        existing.name = name
+        if custom_name and str(custom_name).strip():
+            existing.name = _sanitize_peer_name(custom_name)
+        existing.node_id = node_id
         existing.base_url = base_url
         existing.shared_secret = shared_secret
+        if peer_fp:
+            existing.peer_fingerprint = peer_fp
         if not existing.local_node_id:
             existing.local_node_id = local_node_id
-        if local_sid and not existing.local_onion_service_id:
-            existing.local_onion_service_id = local_sid
-            existing.local_onion_private_key = local_priv
+        if not existing.local_onion_service_id:
+            if local_sid:
+                existing.local_onion_service_id = local_sid
+                existing.local_onion_private_key = local_priv
+            elif tor_onion_manager.is_control_available():
+                new_sid, new_priv = tor_onion_manager.create_onion_service()
+                existing.local_onion_service_id = new_sid
+                existing.local_onion_private_key = new_priv
         existing.status = "approved"
-        existing.allow_incoming = False
-        existing.allow_outgoing = False
         session.add(existing)
         session.commit()
         session.refresh(existing)
@@ -849,6 +967,7 @@ def import_peer_bundle(session: Session, bundle: dict[str, Any], custom_name: Op
     peer = LoomPeer(
         name=name,
         node_id=node_id,
+        peer_fingerprint=peer_fp,
         base_url=base_url,
         shared_secret=shared_secret,
         local_node_id=local_node_id,
@@ -873,22 +992,53 @@ def get_peer_local_identity(session: Session, peer: LoomPeer) -> tuple[str, str]
     return local_node_id, local_base_url
 
 
-def rotate_peer_onion(session: Session, peer: LoomPeer) -> str:
-    """Mint a new per-peer .onion address, update DB, and delete the previous .onion service."""
+def rotate_peer_onion(
+    session: Session,
+    peer: LoomPeer,
+    *,
+    grace_seconds: int = 0,
+    log_action: Optional[str] = None,
+    now_dt: Optional[datetime] = None,
+) -> str:
+    """Mint a new per-peer .onion address, update DB, and retire or grace-keep the previous .onion service."""
     if not tor_onion_manager.is_control_available():
         raise RuntimeError("Tor ControlPort is not reachable to rotate .onion address.")
     old_sid = peer.local_onion_service_id
+    old_priv = peer.local_onion_private_key
     new_sid, new_priv = tor_onion_manager.create_onion_service()
+    now = now_dt or datetime.now(timezone.utc)
+
+    prior_prev_sid = peer.prev_onion_service_id
+    if grace_seconds > 0 and old_sid and old_sid != new_sid:
+        if prior_prev_sid and prior_prev_sid != old_sid:
+            tor_onion_manager.delete_onion_service(prior_prev_sid)
+        peer.prev_onion_service_id = old_sid
+        peer.prev_onion_private_key = old_priv
+        peer.prev_onion_expires_at = now + timedelta(seconds=grace_seconds)
+    else:
+        if prior_prev_sid and prior_prev_sid != new_sid:
+            tor_onion_manager.delete_onion_service(prior_prev_sid)
+        peer.prev_onion_service_id = None
+        peer.prev_onion_private_key = None
+        peer.prev_onion_expires_at = None
+
     peer.local_onion_service_id = new_sid
     peer.local_onion_private_key = new_priv
+    peer.last_rotated_at = now
     session.add(peer)
+    if log_action and peer.id is not None:
+        log_loom_peer_event(session, peer.id, log_action, commit=False)
     session.commit()
     session.refresh(peer)
 
     new_url = f"http://{new_sid}.onion"
     if httpx is not None and peer.base_url and peer.status == "approved":
         local_node_id, _ = get_peer_local_identity(session, peer)
-        payload = json.dumps({"node_id": local_node_id, "base_url": new_url}).encode("utf-8")
+        payload = json.dumps({
+            "node_id": local_node_id,
+            "base_url": new_url,
+            "server_fingerprint": get_loom_server_fingerprint(session),
+        }).encode("utf-8")
         hdrs = sign_loom_headers(local_node_id, peer.shared_secret, "POST", "/api/loom/v1/handshake", payload)
         hdrs["Content-Type"] = "application/json"
         try:
@@ -897,9 +1047,61 @@ def rotate_peer_onion(session: Session, peer: LoomPeer) -> str:
         except Exception as e:
             print(f"[Loom] Best-effort onion rotation notify failed for peer {peer.id}: {e}")
 
-    if old_sid and old_sid != new_sid:
+    if grace_seconds <= 0 and old_sid and old_sid != new_sid:
         tor_onion_manager.delete_onion_service(old_sid)
     return new_url
+
+
+def process_loom_auto_rotations(session: Session, now_dt: Optional[datetime] = None) -> dict[str, int]:
+    """Retire expired 72h grace-period .onion services and auto-rotate peers whose interval has elapsed."""
+    now = now_dt or datetime.now(timezone.utc)
+    retired = 0
+    rotated = 0
+
+    peers_with_prev = session.exec(
+        select(LoomPeer).where(LoomPeer.prev_onion_service_id != None)  # noqa: E711
+    ).all()
+    for p in peers_with_prev:
+        exp = p.prev_onion_expires_at
+        if exp is not None and exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if exp is not None and exp <= now:
+            if p.prev_onion_service_id and p.prev_onion_service_id != p.local_onion_service_id:
+                tor_onion_manager.delete_onion_service(p.prev_onion_service_id)
+            p.prev_onion_service_id = None
+            p.prev_onion_private_key = None
+            p.prev_onion_expires_at = None
+            session.add(p)
+            retired += 1
+    if retired:
+        session.commit()
+
+    settings = get_loom_settings(session)
+    interval_secs = LOOM_AUTO_ROTATE_INTERVALS.get(settings["auto_rotate_interval"], 0)
+    if settings["enabled"] and interval_secs > 0 and tor_onion_manager.is_control_available():
+        approved_peers = session.exec(select(LoomPeer).where(LoomPeer.status == "approved")).all()
+        for p in approved_peers:
+            if not p.local_onion_service_id:
+                continue
+            anchor = p.last_rotated_at or p.created_at
+            if not anchor:
+                continue
+            if anchor.tzinfo is None:
+                anchor = anchor.replace(tzinfo=timezone.utc)
+            if (now - anchor).total_seconds() >= interval_secs:
+                try:
+                    rotate_peer_onion(
+                        session,
+                        p,
+                        grace_seconds=LOOM_ROTATE_GRACE_SECONDS,
+                        log_action="Auto-rotated address",
+                        now_dt=now,
+                    )
+                    rotated += 1
+                except Exception as e:
+                    print(f"[Loom] Auto-rotation failed for peer {p.id}: {e}")
+
+    return {"rotated": rotated, "retired": retired}
 
 
 def get_loom_manifest_path() -> str:
@@ -1479,6 +1681,10 @@ def register_relay_token(
     remote_item_id: int,
     upstream_relay_token: Optional[str] = None,
     ttl_seconds: float = 1800.0,
+    item_label: str = "",
+    quality_label: str = "",
+    hops_away: int = 1,
+    hops_left: int = 0,
 ) -> str:
     """Issue a short-lived opaque relay token mapping to a downstream peer item without exposing peer identity."""
     token = uuid.uuid4().hex
@@ -1492,6 +1698,10 @@ def register_relay_token(
             "media_type": str(media_type),
             "remote_item_id": int(remote_item_id),
             "upstream_relay_token": upstream_relay_token,
+            "item_label": str(item_label or ""),
+            "quality_label": str(quality_label or ""),
+            "hops_away": max(1, int(hops_away or 1)),
+            "hops_left": max(0, int(hops_left or 0)),
             "expires_at": now + ttl_seconds,
         }
     return token
@@ -1509,6 +1719,47 @@ def resolve_relay_token(token: str) -> Optional[dict[str, Any]]:
         if entry.get("expires_at", 0) <= now:
             _relay_tokens.pop(tok, None)
             return None
+        return dict(entry)
+
+
+_direct_pair_routes: dict[str, dict[str, Any]] = {}
+
+
+def register_direct_pair_route(
+    request_id: str,
+    requester_peer_id: int,
+    target_peer_id: int,
+    ttl_seconds: float = 86400.0,
+) -> None:
+    rid = (request_id or "").strip()
+    if not rid:
+        return
+    now = time.monotonic()
+    with _relay_state_lock:
+        expired = [k for k, v in _direct_pair_routes.items() if v.get("expires_at", 0) <= now]
+        for k in expired:
+            _direct_pair_routes.pop(k, None)
+        _direct_pair_routes[rid] = {
+            "requester_peer_id": int(requester_peer_id),
+            "target_peer_id": int(target_peer_id),
+            "expires_at": now + ttl_seconds,
+        }
+
+
+def resolve_direct_pair_route(request_id: str, pop: bool = False) -> Optional[dict[str, Any]]:
+    rid = (request_id or "").strip()
+    if not rid:
+        return None
+    now = time.monotonic()
+    with _relay_state_lock:
+        entry = _direct_pair_routes.get(rid)
+        if not entry:
+            return None
+        if entry.get("expires_at", 0) <= now:
+            _direct_pair_routes.pop(rid, None)
+            return None
+        if pop:
+            _direct_pair_routes.pop(rid, None)
         return dict(entry)
 
 
@@ -1790,6 +2041,9 @@ class LoomSyncManager:
                         expired_bundles = prune_expired_issued_secrets(session)
                         if expired_bundles:
                             print(f"[Loom] Pruned {expired_bundles} expired peer bundle(s).")
+                        rot_res = process_loom_auto_rotations(session)
+                        if rot_res["rotated"] or rot_res["retired"]:
+                            print(f"[Loom] Auto-rotated {rot_res['rotated']} peer address(es), retired {rot_res['retired']} grace address(es).")
                 except Exception as e:
                     print(f"[Loom] Maintenance cleanup error: {e}")
                 last_cleanup = now_mono
@@ -1850,7 +2104,11 @@ class LoomSyncManager:
             peer_url = chosen_peer.base_url.rstrip("/")
             peer_secret = chosen_peer.shared_secret
             local_node_id, _ = get_peer_local_identity(session, chosen_peer)
-            remote_path = f"/api/loom/v1/download/{chosen_job.media_type}/{chosen_job.remote_item_id}"
+            remote_path = (
+                f"/api/loom/v1/relay/{chosen_job.relay_token}"
+                if chosen_job.relay_token
+                else f"/api/loom/v1/download/{chosen_job.media_type}/{chosen_job.remote_item_id}"
+            )
             target_path = chosen_job.target_path
             chosen_job.status = "downloading"
             chosen_job.error_message = None
@@ -1888,6 +2146,7 @@ class LoomSyncManager:
         stopped_mid_stream = False
         written = existing_offset
         total_bytes = 0
+        expected_sha256: Optional[str] = None
         sync_dir_for_cleanup = os.path.dirname(target_path)
         try:
             with Session(engine) as session:
@@ -1923,15 +2182,38 @@ class LoomSyncManager:
 
                     content_len = resp.headers.get("content-length")
                     total_bytes = written + int(content_len) if (content_len and content_len.isdigit()) else 0
+                    raw_header_sha = (resp.headers.get("x-loom-sha256") or "").strip().lower()
+                    header_sha256 = raw_header_sha if is_valid_sha256(raw_header_sha) else None
 
+                    hash_mismatch = False
                     with Session(engine) as session:
                         j = session.get(LoomTransferJob, job_id)
                         if j:
-                            j.bytes_transferred = written
-                            if total_bytes > 0:
-                                j.total_bytes = total_bytes
-                            session.add(j)
-                            session.commit()
+                            pinned_sha = (j.expected_sha256 or "").strip().lower() or None
+                            if pinned_sha and header_sha256 and header_sha256 != pinned_sha:
+                                j.status = "failed"
+                                j.error_message = "SHA-256 hash mismatch from peer"
+                                j.updated_at = datetime.now(timezone.utc)
+                                session.add(j)
+                                label = format_loom_item_label(j.title, j.series_title, j.season, j.episode)
+                                log_loom_peer_event(session, j.peer_id, f"Hash mismatch: {label}", commit=False)
+                                session.commit()
+                                hash_mismatch = True
+                            else:
+                                if not pinned_sha and header_sha256:
+                                    j.expected_sha256 = header_sha256
+                                    expected_sha256 = header_sha256
+                                else:
+                                    expected_sha256 = pinned_sha
+                                j.bytes_transferred = written
+                                if total_bytes > 0:
+                                    j.total_bytes = total_bytes
+                                session.add(j)
+                                session.commit()
+                    if hash_mismatch:
+                        self._clear_job_retry(job_id)
+                        cleanup_job_part_file(target_path, sync_dir=sync_dir_for_cleanup)
+                        return True
 
                     with open(part_path, mode) as fp:
                         for chunk in resp.iter_bytes(chunk_size=65536):
@@ -2012,6 +2294,14 @@ class LoomSyncManager:
                 self._schedule_job_retry(job_id, "Connection severed mid-download", written=written)
                 return False
 
+            if expected_sha256:
+                actual_sha256 = compute_file_sha256(part_path, use_cache=False)
+                if actual_sha256 != expected_sha256:
+                    self._clear_job_retry(job_id)
+                    cleanup_job_part_file(target_path, sync_dir=sync_dir_for_cleanup)
+                    self._mark_job(job_id, "failed", "SHA-256 verification failed (file corrupted or tampered)")
+                    return True
+
             os.replace(part_path, target_path)
             self._clear_job_retry(job_id)
             with Session(engine) as session:
@@ -2025,7 +2315,13 @@ class LoomSyncManager:
                     j.updated_at = datetime.now(timezone.utc)
                     session.add(j)
                     label = format_loom_item_label(j.title, j.series_title, j.season, j.episode)
-                    log_loom_peer_event(session, j.peer_id, f"Downloaded {label}", commit=False)
+                    log_loom_peer_event(
+                        session,
+                        j.peer_id,
+                        f"Downloaded {label}",
+                        commit=False,
+                        relay_token=j.relay_token,
+                    )
                 if p:
                     if bytes_since_db_flush > 0:
                         rollover_peer_monthly_usage(session, p)

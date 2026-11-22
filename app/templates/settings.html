@@ -1363,6 +1363,15 @@
                     <label class="field-label" for="loomMaxFileSizeGb">Max File Size (GB)</label>
                     <input type="number" min="0" step="0.1" id="loomMaxFileSizeGb" value="{{ loom_settings.max_file_size_gb or 0 }}" class="w-full m-0">
                 </div>
+                <div>
+                    <label class="field-label" for="loomAutoRotateInterval">Auto-Rotate Addresses</label>
+                    <select id="loomAutoRotateInterval" class="select-input w-full m-0">
+                        <option value="disabled" {% if (loom_settings.auto_rotate_interval or 'disabled') == 'disabled' %}selected{% endif %}>Disabled</option>
+                        <option value="daily" {% if loom_settings.auto_rotate_interval == 'daily' %}selected{% endif %}>Daily</option>
+                        <option value="monthly" {% if loom_settings.auto_rotate_interval == 'monthly' %}selected{% endif %}>Monthly</option>
+                        <option value="yearly" {% if loom_settings.auto_rotate_interval == 'yearly' %}selected{% endif %}>Yearly</option>
+                    </select>
+                </div>
             </div>
 
             <div class="mb-20">
@@ -1418,18 +1427,17 @@
 
             <ul id="loomPeerList">
                 {% for p in loom_peers %}
-                <li class="list-item user-list-item" data-peer-id="{{ p.id }}">
+                <li class="list-item user-list-item" data-peer-id="{{ p.id }}" data-peer-url="{{ p.base_url }}" data-local-onion="{{ ('http://' + p.local_onion_service_id + '.onion') if p.local_onion_service_id else '' }}">
                     <div class="user-header-row align-center flex-wrap gap-10">
                         <div>
                             <div class="flex align-center gap-10">
-                                <strong>{{ p.name or 'Anonymous' }}</strong>
+                                <textarea class="peer-name-input" rows="1" wrap="off" maxlength="80" data-peer-id="{{ p.id }}" data-original-name="{{ p.name or 'Anonymous' }}" onfocus="this.select()" onkeydown="handleLoomPeerNameKeydown(event, this)" onblur="saveLoomPeerName({{ p.id }}, this)" oninput="autoResizePeerName(this)">{{ p.name or 'Anonymous' }}</textarea>
                                 <span class="code-text badge-unknown" data-peer-status-badge="{{ p.id }}">Unknown</span>
                             </div>
-                            <div class="share-link">Peer: {{ p.base_url }}</div>
-                            {% if p.local_onion_service_id %}
-                            <div class="share-link">Me: http://{{ p.local_onion_service_id }}.onion</div>
-                            {% endif %}
                         </div>
+                        {% if p.created_at %}
+                        <span class="peer-paired-date" data-paired-at="{{ (p.created_at.replace(tzinfo=None).isoformat() + 'Z') }}">Paired on {{ p.created_at.month }}/{{ p.created_at.day }}/{{ p.created_at.year }}</span>
+                        {% endif %}
                     </div>
                     <div class="user-controls-row flex flex-wrap align-center justify-between gap-10">
                         <div class="flex flex-wrap gap-10 align-center">
@@ -1442,12 +1450,12 @@
                                 <span>Share</span>
                             </label>
                         </div>
+                        <div class="peer-history-toggle" onclick="toggleLoomPeerHistory({{ p.id }}, this)">Show Peer Info</div>
                         <div class="flex flex-wrap gap-10 align-center">
                             <button type="button" class="btn btn-secondary btn-sm" onclick="rotateLoomPeerOnion({{ p.id }}, this)" title="Rotate our .onion address for this peer"><i data-lucide="refresh-cw"></i> Rotate Address</button>
                             <button type="button" class="btn btn-danger btn-sm" onclick="deleteLoomPeer({{ p.id }}, this)"><i data-lucide="trash-2"></i> Delete</button>
                         </div>
                     </div>
-                    <div class="peer-history-toggle" onclick="toggleLoomPeerHistory({{ p.id }}, this)">Show Peer History</div>
                     <div class="peer-history-panel hidden" id="loomPeerHistory-{{ p.id }}"></div>
                 </li>
                 {% else %}
@@ -1463,7 +1471,7 @@
             </form>
         </div>
         <div style="text-align: center; color: var(--text-muted); font-size: 0.75em;">
-            <strong>v2.2</strong>
+            <strong>v2.3.2</strong>
         </div>
     </div>
 
@@ -1499,16 +1507,15 @@
                 return;
             }
             list.innerHTML = peers.map(p => `
-                <li class="list-item user-list-item" data-peer-id="${escapeHtml(p.id)}">
+                <li class="list-item user-list-item" data-peer-id="${escapeHtml(p.id)}" data-peer-url="${escapeHtml(p.base_url || '')}" data-local-onion="${escapeHtml(p.local_onion_url || '')}">
                     <div class="user-header-row align-center flex-wrap gap-10">
                         <div>
                             <div class="flex align-center gap-10">
-                                <strong>${escapeHtml(p.name || 'Anonymous')}</strong>
+                                <textarea class="peer-name-input" rows="1" wrap="off" maxlength="80" data-peer-id="${escapeHtml(p.id)}" data-original-name="${escapeHtml(p.name || 'Anonymous')}" onfocus="this.select()" onkeydown="handleLoomPeerNameKeydown(event, this)" onblur="saveLoomPeerName(${p.id}, this)" oninput="autoResizePeerName(this)">${escapeHtml(p.name || 'Anonymous')}</textarea>
                                 <span class="code-text ${p.online === true ? 'badge-active' : (p.online === false ? 'badge-inactive' : 'badge-unknown')}" data-peer-status-badge="${escapeHtml(p.id)}">${p.online === true ? 'Active' : (p.online === false ? 'Inactive' : 'Unknown')}</span>
                             </div>
-                            <div class="share-link">Peer: ${escapeHtml(p.base_url)}</div>
-                            ${p.local_onion_url ? `<div class="share-link">Me: ${escapeHtml(p.local_onion_url)}</div>` : ''}
                         </div>
+                        ${p.created_at ? `<span class="peer-paired-date">${escapeHtml(formatPeerPairedDate(p.created_at))}</span>` : ''}
                     </div>
                     <div class="user-controls-row flex flex-wrap align-center justify-between gap-10">
                         <div class="flex flex-wrap gap-10 align-center">
@@ -1526,17 +1533,84 @@
                             <button type="button" class="btn btn-danger btn-sm" onclick="deleteLoomPeer(${p.id}, this)"><i data-lucide="trash-2"></i> Delete</button>
                         </div>
                     </div>
-                    <div class="peer-history-toggle" onclick="toggleLoomPeerHistory(${p.id}, this)">Show Peer History</div>
+                    <div class="peer-history-toggle" onclick="toggleLoomPeerHistory(${p.id}, this)">Show Peer Info</div>
                     <div class="peer-history-panel hidden" id="loomPeerHistory-${p.id}"></div>
                 </li>
             `).join('');
             if (window.lucide) lucide.createIcons();
+            document.querySelectorAll('.peer-name-input').forEach(autoResizePeerName);
         }
+
+        function autoResizePeerName(el) {
+            if (!el) return;
+            el.style.width = Math.max(4, (el.value || '').length + 1) + 'ch';
+            el.style.height = 'auto';
+            el.style.height = el.scrollHeight + 'px';
+        }
+
+        function handleLoomPeerNameKeydown(event, el) {
+            if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                el.blur();
+            } else if (event.key === 'Escape') {
+                el.value = el.dataset.originalName || 'Anonymous';
+                autoResizePeerName(el);
+                el.blur();
+            }
+        }
+
+        async function saveLoomPeerName(peerId, el) {
+            if (!el) return;
+            const orig = el.dataset.originalName || 'Anonymous';
+            const cleaned = (el.value || '').replace(/[\r\n]+/g, ' ').trim();
+            if (!cleaned) {
+                el.value = orig;
+                autoResizePeerName(el);
+                return;
+            }
+            if (cleaned === orig) {
+                el.value = orig;
+                autoResizePeerName(el);
+                return;
+            }
+            el.value = cleaned;
+            autoResizePeerName(el);
+            try {
+                const res = await fetch(`/api/loom/peers/${peerId}/update`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: cleaned })
+                });
+                if (res.ok) {
+                    el.dataset.originalName = cleaned;
+                } else {
+                    el.value = orig;
+                }
+            } catch (err) {
+                console.error('Failed to rename Loom peer:', err);
+                el.value = orig;
+            }
+            autoResizePeerName(el);
+        }
+
+        function formatPeerPairedDate(isoStr) {
+            const d = new Date(isoStr);
+            if (isNaN(d.getTime())) return '';
+            return `Paired on ${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            document.querySelectorAll('.peer-name-input').forEach(autoResizePeerName);
+            document.querySelectorAll('.peer-paired-date[data-paired-at]').forEach(el => {
+                const txt = formatPeerPairedDate(el.dataset.pairedAt);
+                if (txt) el.textContent = txt;
+            });
+        });
 
         function setLoomPeerRowLocked(peerId, locked) {
             const row = document.querySelector(`#loomPeerList li[data-peer-id="${peerId}"]`);
             if (!row) return;
-            row.querySelectorAll('button, input').forEach(el => {
+            row.querySelectorAll('button, input, textarea').forEach(el => {
                 el.disabled = locked;
             });
         }
@@ -1574,6 +1648,7 @@
                 max_file_size_gb: Math.max(0, Number(document.getElementById('loomMaxFileSizeGb')?.value || 0)),
                 allowed_filetypes: document.getElementById('loomAllowedFiletypes')?.value || '',
                 pause_on_active_streams: Boolean(document.getElementById('loomPauseOnStreams')?.checked),
+                auto_rotate_interval: document.getElementById('loomAutoRotateInterval')?.value || 'disabled',
                 searchable_volumes: searchableVolumes
             };
             try {
@@ -1816,35 +1891,118 @@
             const isHidden = panel.classList.contains('hidden');
             if (!isHidden) {
                 panel.classList.add('hidden');
-                toggleEl.textContent = 'Show Peer History';
+                toggleEl.textContent = 'Show Peer Info';
                 return;
             }
 
+            const row = document.querySelector(`#loomPeerList li[data-peer-id="${peerId}"]`);
+            const peerUrl = row?.dataset.peerUrl || '';
+            const localOnion = row?.dataset.localOnion || '';
+            const addressHtml = (peerUrl || localOnion) ? `
+                <div class="peer-info-addresses">
+                    ${peerUrl ? `<div class="share-link">Peer: ${escapeHtml(peerUrl)}</div>` : ''}
+                    ${localOnion ? `<div class="share-link">Me: ${escapeHtml(localOnion)}</div>` : ''}
+                </div>
+            ` : '';
+
             panel.classList.remove('hidden');
-            toggleEl.textContent = 'Hide Peer History';
-            panel.innerHTML = '<div class="peer-history-time" style="text-align: center;">Loading...</div>';
+            toggleEl.textContent = 'Hide Peer Info';
+            panel.innerHTML = `${addressHtml}<div class="peer-history-time" style="text-align: center;">Loading...</div>`;
 
             try {
                 const res = await fetch(`/api/loom/peers/${peerId}/history`);
                 if (!res.ok) {
-                    panel.innerHTML = '<div class="peer-history-time" style="text-align: center;">Failed to load history.</div>';
+                    panel.innerHTML = `${addressHtml}<div class="peer-history-time" style="text-align: center;">Failed to load history.</div>`;
                     return;
                 }
                 const data = await res.json();
                 const events = data.events || [];
                 if (events.length === 0) {
-                    panel.innerHTML = '<div class="peer-history-time" style="text-align: center;">No activity yet.</div>';
+                    panel.innerHTML = `${addressHtml}<div class="peer-history-time" style="text-align: center;">No activity yet.</div>`;
                     return;
                 }
-                panel.innerHTML = events.map(ev => `
-                    <div class="peer-history-row">
-                        <span class="peer-history-action">${escapeHtml(ev.action)}</span>
-                        <span class="peer-history-time">${escapeHtml(formatPeerHistoryTime(ev.created_at))}</span>
-                    </div>
-                `).join('');
+                const eventsHtml = events.map(ev => {
+                    let actionBtns = '';
+                    if (ev.can_request_direct_pair) {
+                        actionBtns = `
+                            <div class="peer-history-actions">
+                                <button type="button" class="btn btn-secondary btn-sm" onclick="requestDirectPeerPair(${peerId}, ${ev.id}, this)">Request Direct Peer Pair</button>
+                            </div>
+                        `;
+                    } else if (ev.pair_request && ev.pair_request.status === 'pending') {
+                        actionBtns = `
+                            <div class="peer-history-actions">
+                                <button type="button" class="btn btn-sm" onclick="respondLoomDirectPair(${ev.pair_request.id}, 'approve', ${peerId}, this)">Approve</button>
+                                <button type="button" class="btn btn-secondary btn-sm" onclick="respondLoomDirectPair(${ev.pair_request.id}, 'decline', ${peerId}, this)">Decline</button>
+                            </div>
+                        `;
+                    }
+                    return `
+                        <div class="peer-history-item">
+                            <div class="peer-history-row">
+                                <span class="peer-history-action">${escapeHtml(ev.action)}</span>
+                                <span class="peer-history-time">${escapeHtml(formatPeerHistoryTime(ev.created_at))}</span>
+                            </div>
+                            ${actionBtns}
+                        </div>
+                    `;
+                }).join('');
+                panel.innerHTML = `${addressHtml}${eventsHtml}`;
             } catch (err) {
                 console.error('Failed to load peer history:', err);
-                panel.innerHTML = '<div class="peer-history-time" style="text-align: center;">Failed to load history.</div>';
+                panel.innerHTML = `${addressHtml}<div class="peer-history-time" style="text-align: center;">Failed to load history.</div>`;
+            }
+        }
+
+        async function loadLoomPeerHistory(peerId) {
+            const panel = document.getElementById(`loomPeerHistory-${peerId}`);
+            if (!panel || panel.classList.contains('hidden')) return;
+            const toggleEl = panel.previousElementSibling;
+            panel.classList.add('hidden');
+            await toggleLoomPeerHistory(peerId, toggleEl);
+        }
+
+        async function requestDirectPeerPair(peerId, eventId, btn) {
+            if (!btn || btn.disabled) return;
+            const restoreBtn = setLoomButtonLoading(btn, 'Requesting...');
+            try {
+                const res = await fetch(`/api/loom/peers/${peerId}/request_direct_pair`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ event_id: eventId })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    restoreBtn();
+                    showLoomBundleMsg(data.error || 'Failed to send direct pair request.', true);
+                    return;
+                }
+                await loadLoomPeerHistory(peerId);
+            } catch (err) {
+                console.error('Direct pair request error:', err);
+                restoreBtn();
+            }
+        }
+
+        async function respondLoomDirectPair(reqId, decision, peerId, btn) {
+            if (btn && btn.disabled) return;
+            const restoreBtn = setLoomButtonLoading(btn, decision === 'approve' ? 'Approving...' : 'Declining...');
+            try {
+                const res = await fetch(`/api/loom/direct_pair/${reqId}/respond`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ decision })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    restoreBtn();
+                    showLoomBundleMsg(data.error || 'Failed to respond to direct pair request.', true);
+                    return;
+                }
+                await loadLoomPeerHistory(peerId);
+            } catch (err) {
+                console.error('Direct pair respond error:', err);
+                restoreBtn();
             }
         }
 
