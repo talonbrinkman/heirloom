@@ -52,47 +52,12 @@
     window.showMediaLoader = showMediaLoader;
     window.hideMediaLoader = hideMediaLoader;
 
-    // Attach click listeners to all links navigating to /movie/ or /series/
-    function handleMediaLinkClick(e) {
-        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-
-        // Skip if event was cancelled or prevented by another handler
-        if (e.defaultPrevented) return;
-
-        const link = e.target.closest('a');
-        if (!link) return;
-
-        // Skip non-navigating links: anchors, void, javascript, empty
-        const rawHref = (link.getAttribute('href') || '').trim();
-        if (!rawHref || rawHref === '#' || rawHref.startsWith('#') || rawHref.startsWith('javascript:')) {
-            return;
-        }
-
-        // Skip anchor jump links, downloads, new tabs, and explicit ignore flags
-        if (link.target === '_blank' || link.hasAttribute('download') || link.dataset.noLoader !== undefined) {
-            return;
-        }
-
-        // Skip clicks originating from dropdown toggles, buttons, or modals (but allow search bar results)
+    function maybeShowMediaLoaderForLink(link, url) {
+        if (!link || !url) return;
         const inSearchResults = Boolean(link.closest('#searchResults, .search-results'));
         if (!inSearchResults && link.closest('#inboxBtn, .inbox, .inbox-menu, #inboxMenu, .dropdown-menu, .modal-overlay, .profile-header-btn')) {
             return;
         }
-
-        let url;
-        try {
-            url = new URL(link.href, window.location.origin);
-        } catch (_) {
-            return;
-        }
-
-        if (url.origin !== window.location.origin) return;
-
-        // Skip if staying on the same page (e.g. hash change or self link)
-        if (url.pathname === window.location.pathname && (url.search === window.location.search || !rawHref.includes('?'))) {
-            return;
-        }
-
         const path = url.pathname;
 
         function extractTitleFromLink() {
@@ -137,6 +102,46 @@
                 showMediaLoader(title ? `Loading ${title}` : 'Loading Photo...', 'Fetching photo details');
             }
         }
+    }
+
+    window.maybeShowMediaLoaderForLink = maybeShowMediaLoaderForLink;
+
+    // Attach click listeners to all links navigating to /movie/ or /series/
+    function handleMediaLinkClick(e) {
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+
+        // Skip if event was cancelled or prevented by another handler
+        if (e.defaultPrevented) return;
+
+        const link = e.target.closest('a');
+        if (!link) return;
+
+        // Skip non-navigating links: anchors, void, javascript, empty
+        const rawHref = (link.getAttribute('href') || '').trim();
+        if (!rawHref || rawHref === '#' || rawHref.startsWith('#') || rawHref.startsWith('javascript:')) {
+            return;
+        }
+
+        // Skip anchor jump links, downloads, new tabs, and explicit ignore flags
+        if (link.target === '_blank' || link.hasAttribute('download') || link.dataset.noLoader !== undefined) {
+            return;
+        }
+
+        let url;
+        try {
+            url = new URL(link.href, window.location.origin);
+        } catch (_) {
+            return;
+        }
+
+        if (url.origin !== window.location.origin) return;
+
+        // Skip if staying on the same page (e.g. hash change or self link)
+        if (url.pathname === window.location.pathname && (url.search === window.location.search || !rawHref.includes('?'))) {
+            return;
+        }
+
+        maybeShowMediaLoaderForLink(link, url);
     }
 
     // Initialize listeners (bubbling phase so handlers calling preventDefault are respected)

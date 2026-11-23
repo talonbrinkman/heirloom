@@ -1,12 +1,704 @@
-<html>
+{% extends "base.html" %}
 
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Settings - Heirloom</title>
-    <link rel="stylesheet" href="/static/style.css">
-    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-    <script src="/static/password-strength.js"></script>
+{% block title %}Settings - Heirloom{% endblock %}
+
+{% block head %}
+    <script src="/static/password-strength.js" data-pjax-lib></script>
+{% endblock %}
+
+{% block content %}
+    <div class="header">
+        <div class="flex gap-15 align-center">
+            <a href="/" class="icon-link" title="Home">
+                <i data-lucide="arrow-left"></i>
+            </a>
+            <h1 class="m-0" style="font-size: 1.5rem;">Settings</h1>
+        </div>
+        <div class="flex gap-15 align-center">
+            {% if is_admin %}
+            <a href="/server-dashboard" id="serverActivityBadge" class="server-activity-badge" style="display: none;" title="Server Action">
+                <span class="activity-pulse-dot"></span>
+                <span id="serverActivityText">Scanning...</span>
+            </a>
+            {% endif %}
+        </div>
+    </div>
+    
+    <div class="container">
+        {% if can_change_password %}
+        <div class="card">
+            <div class="card-header">
+                <h2 class="m-0">My Account, {{ user.username }}</h2>
+            </div>
+
+            <form action="/settings/change_password" method="post" onsubmit="submitSaveForm(event)" class="flex gap-10 m-0" style="align-items: flex-start;">
+                <div class="flex-1">
+                    <div style="position: relative;">
+                        <input type="password" name="new_password" id="newPasswordInput" placeholder="New Password" required
+                            class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
+                        <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
+                            onclick="togglePasswordVisibility()">
+                            <i data-lucide="eye" id="togglePasswordBtn"></i>
+                        </div>
+                    </div>
+                    <div class="password-strength-container" data-for="newPasswordInput">
+                        <div class="password-strength-bar">
+                            <div class="password-strength-fill"></div>
+                        </div>
+                        <div class="password-strength-text"></div>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary"><i data-lucide="rotate-ccw-key"></i> Change
+                    Password</button>
+            </form>
+        </div>
+        {% endif %}
+
+        <div class="card">
+            <div class="card-header">
+                <h2 class="m-0">Rewind on Resume{% if current_profile and not current_profile.is_primary %} ({{ current_profile.name }}){% endif %}</h2>
+            </div>
+
+            <p style="color: var(--text-secondary); font-size: 0.9em;" class="mb-15">Set how many seconds playback will
+                automatically rewind when opening a movie or episode with saved progress. Set to 0 to disable.</p>
+
+            <form action="/settings/rewind" method="post" onsubmit="submitSaveForm(event)"
+                class="flex gap-10 align-center mb-15">
+                <div class="flex-1" style="position: relative;">
+                    <input type="number" name="rewind_seconds" id="rewindSecondsInput" class="no-arrows" min="0"
+                        max="300" step="1" value="{{ rewind_seconds if rewind_seconds is not none else (current_profile.rewind_seconds if current_profile and current_profile.rewind_seconds is not none else (user.rewind_seconds or 0)) }}"
+                        placeholder="Seconds (e.g. 5, 10)" required class="w-full m-0" style="box-sizing: border-box;">
+                </div>
+                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <div class="card-header flex align-center justify-between">
+                <h2 class="m-0">Audio & Subtitle Preferences{% if current_profile and not current_profile.is_primary %} ({{ current_profile.name }}){% endif %}</h2>
+                <span id="languageSaveStatus" style="display: none; color: #4ade80; font-size: 0.9em; font-weight: 500;" class="align-center gap-5">
+                    <i data-lucide="check" style="width: 16px; height: 16px;"></i> Saved
+                </span>
+            </div>
+            <p style="color: var(--text-secondary); font-size: 0.9em;" class="mb-15">
+                Choose the default audio and subtitle languages for video playback.
+            </p>
+            <form id="languageSettingsForm" action="/settings/language" method="post" class="m-0">
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 15px;">
+                    <div>
+                        <label for="defaultAudioLang" style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 0.9rem;">Default Audio Language</label>
+                        <select name="default_audio_lang" id="defaultAudioLang" class="select-input w-100 m-0" onchange="autoSaveLanguageSettings()">
+                            {% for code, name in available_languages %}
+                            <option value="{{ code }}" {% if default_audio_lang == code %}selected{% endif %}>{{ name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label for="defaultSubtitleLang" style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 0.9rem;">Default Subtitle Language</label>
+                        <select name="default_subtitle_lang" id="defaultSubtitleLang" class="select-input w-100 m-0" onchange="autoSaveLanguageSettings()">
+                            <option value="off" {% if default_subtitle_lang == "off" %}selected{% endif %}>Off</option>
+                            {% for code, name in available_languages %}
+                            <option value="{{ code }}" {% if default_subtitle_lang == code %}selected{% endif %}>{{ name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+            </form>
+        </div>
+
+        <div class="card">
+            <div class="card-header flex align-center justify-between">
+                <h2 class="m-0">Playback & Auto-Pause{% if current_profile and not current_profile.is_primary %} ({{ current_profile.name }}){% endif %}</h2>
+                <span id="autopauseSaveStatus" style="display: none; color: #4ade80; font-size: 0.9em; font-weight: 500;" class="align-center gap-5">
+                    <i data-lucide="check" style="width: 16px; height: 16px;"></i> Saved
+                </span>
+            </div>
+            <p style="color: var(--text-secondary); font-size: 0.9em;" class="mb-15">
+                Automatically pause consecutive TV show playback when inactive to prevent runaway overnight streaming on TVs and mobile devices.
+            </p>
+            <form id="autopauseSettingsForm" action="/settings/autopause" method="post" class="m-0">
+                <div style="max-width: 360px;">
+                    <label for="autoPauseEpisodes" style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 0.9rem;">"Are You Still Watching?" Prompt</label>
+                    <select name="auto_pause_episodes" id="autoPauseEpisodes" class="select-input w-100 m-0" onchange="autoSaveAutoPauseSettings()">
+                        <option value="2" {% if auto_pause_episodes == 2 %}selected{% endif %}>After 2 episodes</option>
+                        <option value="3" {% if auto_pause_episodes == 3 or auto_pause_episodes is none %}selected{% endif %}>After 3 episodes (Recommended)</option>
+                        <option value="4" {% if auto_pause_episodes == 4 %}selected{% endif %}>After 4 episodes</option>
+                        <option value="5" {% if auto_pause_episodes == 5 %}selected{% endif %}>After 5 episodes</option>
+                        <option value="0" {% if auto_pause_episodes == 0 %}selected{% endif %}>Never (Continuous Playback)</option>
+                    </select>
+                </div>
+            </form>
+        </div>
+
+        {% if is_admin %}
+        <div class="card">
+            <div class="card-header">
+                <h2 class="m-0">Media Volume Paths</h2>
+                <form action="/settings/rescan" method="post" class="m-0">
+                    <button type="submit" class="btn btn-secondary btn-sm"><i data-lucide="refresh-cw"></i> Rescan
+                        Library</button>
+                </form>
+            </div>
+
+            <form action="/settings/add_volume" method="post" class="flex gap-10 align-center mb-20 volume-add-form" onsubmit="submitAddVolumeForm(event)">
+                <div class="flex-1 flex gap-10 align-center volume-input-browse-group">
+                    <input type="text" name="path" id="pathInput" placeholder="/media/movies or custom volume path"
+                        required class="m-0 flex-1">
+                    <button type="button" class="btn btn-secondary volume-browse-btn" onclick="openDirBrowser()"><i
+                            data-lucide="folder"></i> Browse</button>
+                </div>
+                <div class="custom-select-container volume-select-container" style="position: relative;">
+                    <input type="hidden" name="media_type" id="mediaTypeInput" value="movie">
+                    <button type="button" class="btn btn-secondary volume-select-btn" onclick="toggleMediaTypeMenu(event)"
+                        id="mediaTypeBtn">
+                        Movies <i data-lucide="chevron-down"></i>
+                    </button>
+                    <div class="dropdown-menu settings-menu-expanded volume-select-menu" id="mediaTypeMenu"
+                        style="flex-direction: column; top: 100%; bottom: auto; right: auto; left: 0; min-width: 120px; padding: 5px; margin-top: 5px;">
+                        <button type="button" class="res-btn active"
+                            onclick="selectMediaType('movie', 'Movies', event)">Movies</button>
+                        <button type="button" class="res-btn" onclick="selectMediaType('tv', 'TV Shows', event)">TV
+                            Shows</button>
+                        <button type="button" class="res-btn"
+                            onclick="selectMediaType('photo', 'Photos', event)">Photos</button>
+                        <button type="button" class="res-btn"
+                            onclick="selectMediaType('music', 'Music', event)">Music</button>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary volume-add-btn"><i data-lucide="folder-plus"></i> Add Path</button>
+            </form>
+
+            <ul id="volumeList">
+                {% for vp in volume_paths %}
+                <li class="list-item volume-list-item" data-media-type="{{ vp.raw_media_type }}" data-volume-id="{{ vp.id }}">
+                    <div class="flex gap-10 align-center volume-info">
+                        {% if vp.exists %}
+                        <span class="code-text badge-active" style="text-transform: uppercase;" title="Active">
+                            <i data-lucide="check"></i>
+                            {{ vp.media_type }}
+                        </span>
+                        {% else %}
+                        <span class="code-text badge-inactive" style="text-transform: uppercase;" title="Inactive">
+                            <i data-lucide="x"></i>
+                            {{ vp.media_type }}
+                        </span>
+                        {% endif %}
+                        <strong>{{ vp.display_path }}</strong>
+                    </div>
+                    <form action="/settings/delete_volume/{{ vp.id }}" method="post" class="m-0 volume-delete-form" onsubmit="submitDeleteVolumeForm(event)">
+                        <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i> Delete</button>
+                    </form>
+                </li>
+                {% else %}
+                <li>No volume paths configured.</li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2 class="m-0">Users & Invitations</h2>
+                <form action="/settings/generate_invite" method="post" class="m-0" onsubmit="submitAddUserForm(event)">
+                    <input type="hidden" name="remote_url" id="hiddenRemoteUrl">
+                    <button type="submit" class="btn btn-primary btn-sm"><i data-lucide="user-plus"></i> Add
+                        User</button>
+                </form>
+            </div>
+            <ul id="userInviteList">
+                {% for u in users %}
+                <li class="list-item user-list-item">
+                    <div class="user-header-row align-center">
+                        <div class="user-name-label">
+                            <strong>{{ u.username }}</strong> {% if u.is_admin %}<span style="color: var(--text-muted); font-size: 0.85em; font-weight: normal;">(Admin)</span>{% endif %}
+                        </div>
+                        {% if not u.is_admin %}
+                        <form action="/settings/delete_user/{{ u.id }}" method="post" class="m-0 user-delete-form" onsubmit="submitDeleteUserForm(event)">
+                            <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i>
+                                Delete</button>
+                        </form>
+                        {% endif %}
+                    </div>
+                    {% if not u.is_admin %}
+                    <div class="user-controls-row">
+                        <!-- Auto-submit on change removes the need for a button -->
+                        <form action="/settings/update_user/{{ u.id }}" method="post" class="m-0 user-permissions-form">
+                            <div class="user-permissions-group">
+                                <label class="toggle-pill" data-volume-type="movie" {% if not mounted_volumes.movie %}style="display: none;"{% endif %}><input type="checkbox" name="movies_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        u.movies_access %}checked{% endif %}>
+                                    <span>Movies</span></label>
+                                <label class="toggle-pill" data-volume-type="tv" {% if not mounted_volumes.tv %}style="display: none;"{% endif %}><input type="checkbox" name="tv_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.tv_access
+                                        %}checked{% endif %}>
+                                    <span>TV Shows</span></label>
+                                <label class="toggle-pill" data-volume-type="photo" {% if not mounted_volumes.photo %}style="display: none;"{% endif %}><input type="checkbox" name="photos_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        u.photos_access %}checked{% endif %}>
+                                    <span>Photos</span></label>
+                                <label class="toggle-pill" data-volume-type="music" {% if not mounted_volumes.music %}style="display: none;"{% endif %}><input type="checkbox" name="music_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        u.music_access %}checked{% endif %}>
+                                    <span>Music</span></label>
+                            </div>
+                            <div class="user-permissions-group">
+                                <label class="toggle-pill"><input type="checkbox" name="downloads_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        u.downloads_access %}checked{% endif %}>
+                                    <span>Downloads</span></label>
+                                <label class="toggle-pill"><input type="checkbox" name="watch_together_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        u.watch_together_access %}checked{% endif %}>
+                                    <span>Watch Together</span></label>
+                                <label class="toggle-pill"><input type="checkbox" name="can_manage_profiles"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        u.can_manage_profiles %}checked{% endif %}>
+                                    <span>Household Profiles</span></label>
+                            </div>
+                        </form>
+                    </div>
+                    {% endif %}
+                </li>
+                {% endfor %}
+
+                {% for invite in invites %}
+                <li class="list-item invite-list-item">
+                    <div class="user-header-row align-center">
+                        <div class="invite-info">
+                            <strong>Pending User Invitation</strong>
+                            <div class="share-link">Expires {{ invite.expires_at.strftime('%m/%d/%y') }} (Code: {{ invite.code }})</div>
+                        </div>
+                        <div class="flex gap-10 align-center invite-actions">
+                            <button type="button" class="btn btn-secondary btn-sm"
+                                data-invite-url="{{ host_url }}/register?invite={{ invite.code }}"
+                                onclick="copyToClipboard(this.dataset.inviteUrl, this)"><i
+                                    data-lucide="copy"></i> Copy Link</button>
+                            <form action="/settings/delete_invite/{{ invite.id }}" method="post" class="m-0 invite-delete-form" onsubmit="submitDeleteInviteForm(event)">
+                                <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i>
+                                    Delete</button>
+                            </form>
+                        </div>
+                    </div>
+                    <div class="user-controls-row">
+                        <form action="/settings/update_invite/{{ invite.id }}" method="post" class="m-0 user-permissions-form">
+                            <div class="user-permissions-group">
+                                <label class="toggle-pill" data-volume-type="movie" {% if not mounted_volumes.movie %}style="display: none;"{% endif %}><input type="checkbox" name="movies_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        invite.movies_access %}checked{% endif %}>
+                                    <span>Movies</span></label>
+                                <label class="toggle-pill" data-volume-type="tv" {% if not mounted_volumes.tv %}style="display: none;"{% endif %}><input type="checkbox" name="tv_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if invite.tv_access
+                                        %}checked{% endif %}>
+                                    <span>TV Shows</span></label>
+                                <label class="toggle-pill" data-volume-type="photo" {% if not mounted_volumes.photo %}style="display: none;"{% endif %}><input type="checkbox" name="photos_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        invite.photos_access %}checked{% endif %}>
+                                    <span>Photos</span></label>
+                                <label class="toggle-pill" data-volume-type="music" {% if not mounted_volumes.music %}style="display: none;"{% endif %}><input type="checkbox" name="music_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        invite.music_access %}checked{% endif %}>
+                                    <span>Music</span></label>
+                            </div>
+                            <div class="user-permissions-group">
+                                <label class="toggle-pill"><input type="checkbox" name="downloads_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        invite.downloads_access %}checked{% endif %}>
+                                    <span>Downloads</span></label>
+                                <label class="toggle-pill"><input type="checkbox" name="watch_together_access"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        invite.watch_together_access %}checked{% endif %}>
+                                    <span>Watch Together</span></label>
+                                <label class="toggle-pill"><input type="checkbox" name="can_manage_profiles"
+                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
+                                        invite.can_manage_profiles %}checked{% endif %}>
+                                    <span>Household Profiles</span></label>
+                            </div>
+                        </form>
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2 class="mt-0">Metadata Integration (TMDB)</h2>
+            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Provide a free TMDB API key to automatically
+                enrich your library with high-resolution artwork, cast, crew, and metadata. To obtain a key, create a free account on <a href="https://www.themoviedb.org/" class="inline-link" target="_blank">The Movie Database (TMDB)</a>, navigate to <strong>Settings &gt; API</strong>, and generate an API key.</p>
+             {% if tmdb_key %}
+            <p style="color: var(--status-active); font-size: 0.9em; font-weight: bold;" class="mb-15"><i
+                    data-lucide="check-circle"
+                    style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i> TMDB API Key is
+                configured and active.</p>
+            {% endif %}
+            <form action="/settings/tmdb" method="post" onsubmit="submitSaveForm(event)"
+                class="flex gap-10 align-center m-0">
+                <div class="flex-1" style="position: relative;">
+                    <input type="password" name="tmdb_key" id="tmdbKeyInput" placeholder="Enter TMDB API Key"
+                        value="{{ tmdb_key }}" class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
+                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
+                        onclick="toggleVisibility('tmdbKeyInput', 'toggleTmdbBtn')">
+                        <i data-lucide="eye" id="toggleTmdbBtn"></i>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2 class="mt-0">Metadata Integration (TheAudioDB)</h2>
+            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Enrich your music library with artist biographies, banners, thumbnails, and online album metadata. Heirloom automatically defaults to the free public test key <code>123</code> out of the box, so <strong>no configuration is required</strong>. If you have a personal or Patreon API key from <a href="https://www.theaudiodb.com/" class="inline-link" target="_blank">TheAudioDB</a> for higher rate limits, you can enter it below.</p>
+            {% if theaudiodb_key %}
+            <p style="color: var(--status-active); font-size: 0.9em; font-weight: bold;" class="mb-15"><i
+                    data-lucide="check-circle"
+                    style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i> Custom TheAudioDB API Key is configured and active.</p>
+            {% else %}
+            <p style="color: var(--status-active); font-size: 0.9em;" class="mb-15"><i
+                    data-lucide="check-circle"
+                    style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i> Active: Using default free tier key (<code>123</code>). No configuration needed.</p>
+            {% endif %}
+            <form action="/settings/theaudiodb" method="post" onsubmit="submitSaveForm(event)"
+                class="flex gap-10 align-center m-0">
+                <div class="flex-1" style="position: relative;">
+                    <input type="password" name="theaudiodb_key" id="theaudiodbKeyInput" placeholder="Default: 123 (Leave blank for default free key)"
+                        value="{{ theaudiodb_key }}" class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
+                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
+                        onclick="toggleVisibility('theaudiodbKeyInput', 'toggleTheaudiodbBtn')">
+                        <i data-lucide="eye" id="toggleTheaudiodbBtn"></i>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2 class="mt-0">On-Demand Subtitles (OpenSubtitles)</h2>
+            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Provide a free <a href="https://www.opensubtitles.com/en/consumers" class="inline-link" target="_blank">OpenSubtitles</a> API key to search and fetch missing subtitles directly inside the video player.</p>
+            {% if opensubtitles_key %}
+            <p style="color: var(--status-active); font-size: 0.9em; font-weight: bold;" class="mb-15"><i
+                    data-lucide="check-circle"
+                    style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i> OpenSubtitles API Key is
+                configured and active.</p>
+            {% endif %}
+            <form action="/settings/opensubtitles" method="post" onsubmit="submitSaveForm(event)"
+                class="flex gap-10 align-center m-0">
+                <div class="flex-1" style="position: relative;">
+                    <input type="password" name="opensubtitles_key" id="opensubtitlesKeyInput" placeholder="Enter OpenSubtitles API Key"
+                        value="{{ opensubtitles_key }}" class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
+                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
+                        onclick="toggleVisibility('opensubtitlesKeyInput', 'toggleOpenSubtitlesBtn')">
+                        <i data-lucide="eye" id="toggleOpenSubtitlesBtn"></i>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2 class="mt-0">Network & Remote Access</h2>
+            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Configure your external URL and port if you use DDNS
+                or port forwarding. This ensures invite links work outside your local network.</p>
+            <form action="/settings/remote_access" method="post" onsubmit="submitSaveForm(event)"
+                class="flex gap-10 align-center m-0">
+                <div class="flex-1" style="position: relative;">
+                    <input type="password" name="remote_url" id="remoteUrlInput"
+                        placeholder="e.g. http://my-home.duckdns.org:8080" value="{{ remote_url }}" class="w-full m-0"
+                        style="padding-right: 40px; box-sizing: border-box;">
+                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
+                        onclick="toggleVisibility('remoteUrlInput', 'toggleRemoteUrlBtn')">
+                        <i data-lucide="eye" id="toggleRemoteUrlBtn"></i>
+                    </div>
+                </div>
+
+                <div id="testStatusBox" class="status-box m-0">
+                    <i id="testSpinner" data-lucide="loader" class="spinner"
+                        style="display: none; width: 18px; height: 18px;"></i>
+                    <i id="testCheck" data-lucide="check"
+                        style="display: none; color: var(--success); width: 18px; height: 18px;"></i>
+                    <i id="testCross" data-lucide="x"
+                        style="display: none; color: var(--failure); width: 18px; height: 18px;"></i>
+                    <span id="testStatusText" style="font-size: 16px; color: var(--text-primary);">Testing...</span>
+                </div>
+
+                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
+            </form>
+            <div id="httpsWarning" style="display: none; color: #ffaa00; font-size: 0.85em; margin-top: 10px;">
+                <i data-lucide="alert-triangle"
+                    style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i>
+                Warning: You are using HTTP. It is highly recommended to use HTTPS for remote access to ensure your
+                credentials and data are encrypted.
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="flex align-center justify-between mt-0 mb-15">
+                <h2 class="m-0">Transcoding & Processing</h2>
+                <span id="transcodeSaveStatus" style="display: none; color: #4ade80; font-size: 0.9em; font-weight: 500;" class="align-center gap-5">
+                    <i data-lucide="check" style="width: 16px; height: 16px;"></i> Saved
+                </span>
+            </div>
+            <form id="transcodeSettingsForm" action="/settings/transcoding" method="post" class="m-0">
+                <div class="mb-20">
+                    <label style="font-weight: 600; display: block; margin-bottom: 6px;">Hardware Encoder</label>
+                    <p style="color: #ccc; font-size: 0.9em;" class="mb-10">Select a hardware encoder if your server supports it
+                        to reduce CPU usage when streaming to unsupported devices or at lower resolutions.</p>
+                    <select name="hw_accel_profile" class="select-input w-100 m-0" onchange="autoSaveTranscodeSettings()">
+                        <option value="auto" {% if hw_accel_profile=='auto' or not hw_accel_profile %}selected{% endif %}>
+                            Auto (Detect best available)</option>
+                        <option value="software" {% if hw_accel_profile=='software' %}selected{% endif %}>Software (CPU /
+                            libx264)</option>
+                        <option value="nvenc" {% if hw_accel_profile=='nvenc' %}selected{% endif %}>NVIDIA NVENC
+                            (h264_nvenc)</option>
+                        <option value="qsv" {% if hw_accel_profile=='qsv' %}selected{% endif %}>Intel QuickSync (h264_qsv)
+                        </option>
+                        <option value="vaapi" {% if hw_accel_profile=='vaapi' %}selected{% endif %}>VA-API (h264_vaapi)
+                        </option>
+                        <option value="videotoolbox" {% if hw_accel_profile=='videotoolbox' %}selected{% endif %}>Apple
+                            VideoToolbox (h264_videotoolbox)</option>
+                    </select>
+                </div>
+
+                <div class="mb-20">
+                    <label style="font-weight: 600; display: block; margin-bottom: 6px;">Real-Time HDR to SDR Tone Mapping</label>
+                    <p style="color: #ccc; font-size: 0.9em;" class="mb-10">Automatically maps high dynamic range colors (BT.2020 PQ / HLG / HDR10) into standard dynamic range (BT.709 SDR) when transcoding to eliminate washed-out, grayish colors on non-HDR displays.</p>
+                    <select name="hdr_tonemapping" id="hdr_tonemapping" class="select-input w-100 m-0" onchange="autoSaveTranscodeSettings()">
+                        <option value="disabled" {% if hdr_tonemapping == 'disabled' %}selected{% endif %}>Disabled (Passthrough / No Tone Mapping)</option>
+                        <option value="hable" {% if hdr_tonemapping == 'hable' or hdr_tonemapping == 'true' or not hdr_tonemapping %}selected{% endif %}>Hable (Filmic - Recommended/Default)</option>
+                        <option value="mobius" {% if hdr_tonemapping == 'mobius' %}selected{% endif %}>Mobius (Preserves Saturated Highlights)</option>
+                        <option value="reinhard" {% if hdr_tonemapping == 'reinhard' %}selected{% endif %}>Reinhard (Preserves Shadow Details)</option>
+                        <option value="linear" {% if hdr_tonemapping == 'linear' %}selected{% endif %}>Linear (Perceptually Linear Stretch)</option>
+                        <option value="gamma" {% if hdr_tonemapping == 'gamma' %}selected{% endif %}>Gamma (Contrast Preservation)</option>
+                        <option value="clip" {% if hdr_tonemapping == 'clip' %}selected{% endif %}>Clip (Hard Clip Luminance)</option>
+                    </select>
+                </div>
+
+                <div class="mb-10">
+                    <label style="font-weight: 600; display: block; margin-bottom: 6px;">Automated Intro & Outro Detection</label>
+                    <p style="color: #ccc; font-size: 0.9em;" class="mb-10">Automatically analyzes audio across episodes in a season using acoustic fingerprinting and silence detection to identify theme songs and ending credits when chapter markers are missing.</p>
+                    <select name="auto_intro_detection" id="auto_intro_detection" class="select-input w-100 m-0" onchange="autoSaveTranscodeSettings()">
+                        <option value="true" {% if auto_intro_detection == 'true' or auto_intro_detection is none or auto_intro_detection == 'on' or auto_intro_detection == '1' %}selected{% endif %}>On</option>
+                        <option value="false" {% if auto_intro_detection == 'false' or auto_intro_detection == 'off' or auto_intro_detection == '0' %}selected{% endif %}>Off</option>
+                    </select>
+                </div>
+            </form>
+        </div>
+
+        <div class="card" id="loomSettingsCard">
+            <div class="card-header flex-wrap gap-10">
+                <div>
+                    <h2 class="m-0">The Loom (Federation)</h2>
+                    <small class="muted">Node ID: <code id="loomNodeId">{{ loom_settings.node_id }}</code></small>
+                </div>
+                <div class="flex flex-wrap gap-10 align-center">
+                    <label class="toggle-pill">
+                        <input type="checkbox" id="loomPauseOnStreams" class="hidden-checkbox" onchange="saveLoomSettings()" {% if loom_settings.pause_on_active_streams %}checked{% endif %}>
+                        <span>Pause During Streaming</span>
+                    </label>
+                    <label class="toggle-pill">
+                        <input type="checkbox" id="loomAllowRelay" class="hidden-checkbox" onchange="saveLoomSettings()" {% if loom_settings.allow_relay %}checked{% endif %}>
+                        <span>Allow Relay</span>
+                    </label>
+                    <label class="toggle-pill">
+                        <input type="checkbox" id="loomEnabledToggle" class="hidden-checkbox" onchange="saveLoomSettings()" {% if loom_settings.enabled %}checked{% endif %}>
+                        <span>Enable The Loom</span>
+                    </label>
+                </div>
+            </div>
+            <p class="hint">
+                Opt-in friend-to-friend library discovery and guarded media sync. Disabled by default; imported peers start with Receive and Share off.
+            </p>
+
+            <div class="settings-grid mb-20">
+                <div>
+                    <label class="field-label" for="loomSyncDir">Sync Directory</label>
+                    <select id="loomSyncDir" class="select-input w-full m-0">
+                        <option value="/media/loom" {% if not loom_settings.sync_dir or loom_settings.sync_dir == '/media/loom' %}selected{% endif %}>Loom: /media/loom</option>
+                        {% set active_paths = volume_paths | selectattr('exists') | list %}
+                        {% set ns = namespace(found=(not loom_settings.sync_dir or loom_settings.sync_dir == '/media/loom')) %}
+                        {% for vp in active_paths %}
+                        {% if vp.path != '/media/loom' %}
+                        {% if vp.path == loom_settings.sync_dir %}{% set ns.found = true %}{% endif %}
+                        <option value="{{ vp.path }}" {% if vp.path == loom_settings.sync_dir %}selected{% endif %}>{{ vp.media_type }}: {{ vp.path }}</option>
+                        {% endif %}
+                        {% endfor %}
+                        {% if not ns.found and loom_settings.sync_dir %}
+                        <option value="{{ loom_settings.sync_dir }}" selected>{{ loom_settings.sync_dir }}</option>
+                        {% endif %}
+                    </select>
+                </div>
+                <div>
+                    <label class="field-label" for="loomUploadBandwidthLimit">Max Upload Bandwidth (KB/s)</label>
+                    <input type="number" min="0" id="loomUploadBandwidthLimit" value="{{ loom_settings.upload_bandwidth_limit_kbps }}" class="w-full m-0">
+                </div>
+                <div>
+                    <label class="field-label" for="loomDownloadBandwidthLimit">Max Download Bandwidth (KB/s)</label>
+                    <input type="number" min="0" id="loomDownloadBandwidthLimit" value="{{ loom_settings.download_bandwidth_limit_kbps }}" class="w-full m-0">
+                </div>
+                <div>
+                    <label class="field-label" for="loomMaxQuality">Max Quality Cap</label>
+                    <select id="loomMaxQuality" class="select-input w-full m-0">
+                        <option value="720p" {% if loom_settings.max_quality == '720p' %}selected{% endif %}>720p</option>
+                        <option value="1080p" {% if loom_settings.max_quality == '1080p' %}selected{% endif %}>1080p</option>
+                        <option value="original" {% if loom_settings.max_quality == 'original' %}selected{% endif %}>Original</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="field-label" for="loomMaxSearchHops">Max Search Hops</label>
+                    <input type="number" min="1" max="10" id="loomMaxSearchHops" value="{{ loom_settings.max_search_hops or 1 }}" class="w-full m-0">
+                </div>
+                <div>
+                    <label class="field-label" for="loomMaxSendingHops">Max Sending Hops</label>
+                    <input type="number" min="1" max="10" id="loomMaxSendingHops" value="{{ loom_settings.max_sending_hops or 1 }}" class="w-full m-0">
+                </div>
+                <div>
+                    <label class="field-label" for="loomMaxConcurrentTransfers">Max Concurrent Transfers</label>
+                    <input type="number" min="1" max="20" id="loomMaxConcurrentTransfers" value="{{ loom_settings.max_concurrent_transfers or 2 }}" class="w-full m-0">
+                </div>
+                <div>
+                    <label class="field-label" for="loomMaxRequestsPerMin">Max Requests / Min</label>
+                    <input type="number" min="1" max="120" id="loomMaxRequestsPerMin" value="{{ loom_settings.max_requests_per_minute or 3 }}" class="w-full m-0">
+                </div>
+                <div>
+                    <label class="field-label" for="loomMaxFileSizeGb">Max File Size (GB)</label>
+                    <input type="number" min="0" step="0.1" id="loomMaxFileSizeGb" value="{{ loom_settings.max_file_size_gb or 0 }}" class="w-full m-0">
+                </div>
+                <div>
+                    <label class="field-label" for="loomAutoRotateInterval">Auto-Rotate Addresses</label>
+                    <select id="loomAutoRotateInterval" class="select-input w-full m-0">
+                        <option value="disabled" {% if (loom_settings.auto_rotate_interval or 'disabled') == 'disabled' %}selected{% endif %}>Disabled</option>
+                        <option value="daily" {% if loom_settings.auto_rotate_interval == 'daily' %}selected{% endif %}>Daily</option>
+                        <option value="monthly" {% if loom_settings.auto_rotate_interval == 'monthly' %}selected{% endif %}>Monthly</option>
+                        <option value="yearly" {% if loom_settings.auto_rotate_interval == 'yearly' %}selected{% endif %}>Yearly</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="mb-20">
+                <label class="field-label" for="loomAllowedFiletypes">Allowed Filetypes</label>
+                <p class="hint mt-0 mb-10">
+                    Comma-separated media extensions allowed for Loom searches and downloads. Any file outside this list is blocked.
+                </p>
+                <input type="text" id="loomAllowedFiletypes" value="{{ loom_settings.allowed_filetypes }}" placeholder=".mp4, .mkv, .mp3, .jpg, .png" class="w-full m-0">
+            </div>
+
+            <div class="mb-20">
+                <label class="field-label">Searchable Volumes</label>
+                <p class="hint mt-0 mb-10">
+                    Choose which volumes peers can query for specific titles (disabled by default). Peers can only ask if you have a specific item, never list your full library.
+                </p>
+                {% if volume_paths %}
+                <div class="user-permissions-group flex-wrap">
+                    {% for vp in volume_paths %}
+                    <label class="toggle-pill">
+                        <input type="checkbox" class="hidden-checkbox loom-searchable-volume" value="{{ vp.path }}" onchange="saveLoomSettings()" {% if vp.path in (loom_settings.searchable_volumes or []) %}checked{% endif %}>
+                        <span>{{ vp.media_type }}: {{ vp.path }}</span>
+                    </label>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="hint m-0">No media volumes configured yet.</p>
+                {% endif %}
+            </div>
+
+            <div class="flex flex-wrap gap-10 align-center mb-20">
+                <button type="button" class="btn btn-primary" onclick="saveLoomSettings(this)">
+                    <i data-lucide="save"></i> Save
+                </button>
+            </div>
+
+            <div class="mb-20">
+                <div class="flex flex-wrap align-center justify-between gap-10 mb-10">
+                    <strong>Peer Pairing</strong>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="exportLoomBundle(this)">
+                        <i data-lucide="share"></i> Share Invite
+                    </button>
+                </div>
+                <textarea id="loomExportedBundleBox" rows="3" readonly class="w-full mb-10 hidden" placeholder="Your pairing invite JSON..." onclick="copyLoomBundleText(this.value, this)"></textarea>
+                <textarea id="loomBundleInput" rows="3" placeholder="Paste a friend's invite JSON here to pair (starts with Receive and Share off)..." class="w-full mb-10"></textarea>
+                <div class="flex gap-10 align-center">
+                    <input type="text" id="loomImportAlias" placeholder="Optional peer nickname (defaults to Anonymous)" class="m-0 flex-1">
+                    <button type="button" class="btn btn-primary" onclick="importLoomBundle(this)">
+                        <i data-lucide="plus"></i> Import Peer
+                    </button>
+                </div>
+                <div id="loomBundleMsg" class="status-message hidden"></div>
+            </div>
+
+            <ul id="loomPeerList">
+                {% for p in loom_peers %}
+                <li class="list-item user-list-item" data-peer-id="{{ p.id }}" data-peer-url="{{ p.base_url }}" data-local-onion="{{ ('http://' + p.local_onion_service_id + '.onion') if p.local_onion_service_id else '' }}">
+                    <div class="user-header-row align-center flex-wrap gap-10">
+                        <div>
+                            <div class="flex align-center gap-10">
+                                <span class="code-text badge-unknown" data-peer-status-badge="{{ p.id }}"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg> Unknown</span>
+                                <textarea class="peer-name-input" rows="1" wrap="off" maxlength="80" data-peer-id="{{ p.id }}" data-original-name="{{ p.name or 'Anonymous' }}" onfocus="this.select()" onkeydown="handleLoomPeerNameKeydown(event, this)" onblur="saveLoomPeerName({{ p.id }}, this)" oninput="autoResizePeerName(this)">{{ p.name or 'Anonymous' }}</textarea>
+                            </div>
+                        </div>
+                        {% if p.created_at %}
+                        <span class="peer-paired-date" data-paired-at="{{ (p.created_at.replace(tzinfo=None).isoformat() + 'Z') }}">Paired on {{ p.created_at.month }}/{{ p.created_at.day }}/{{ p.created_at.year }}</span>
+                        {% endif %}
+                    </div>
+                    <div class="user-controls-row flex flex-wrap align-center justify-between gap-10">
+                        <div class="flex flex-wrap gap-10 align-center">
+                            <label class="toggle-pill">
+                                <input type="checkbox" class="hidden-checkbox" onchange="toggleLoomPeer({{ p.id }}, {allow_incoming: this.checked}, this)" {% if p.allow_incoming %}checked{% endif %}>
+                                <span>Receive</span>
+                            </label>
+                            <label class="toggle-pill">
+                                <input type="checkbox" class="hidden-checkbox" onchange="toggleLoomPeer({{ p.id }}, {allow_outgoing: this.checked}, this)" {% if p.allow_outgoing %}checked{% endif %}>
+                                <span>Share</span>
+                            </label>
+                            <label class="toggle-pill" title="Bypass Max File Size, Max Requests, Max Transfers, and Max Bandwidths for this peer">
+                                <input type="checkbox" class="hidden-checkbox" onchange="toggleLoomPeer({{ p.id }}, {no_limits: this.checked}, this)" {% if p.no_limits %}checked{% endif %}>
+                                <span>No Limits</span>
+                            </label>
+                        </div>
+                        <div class="peer-history-toggle" onclick="toggleLoomPeerHistory({{ p.id }}, this)">Show Peer Info</div>
+                        <div class="flex flex-wrap gap-10 align-center">
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="rotateLoomPeerOnion({{ p.id }}, this)" title="Rotate our .onion address for this peer"><i data-lucide="refresh-cw"></i> Rotate Address</button>
+                            <button type="button" class="btn btn-danger btn-sm" onclick="deleteLoomPeer({{ p.id }}, this)"><i data-lucide="trash-2"></i> Delete</button>
+                        </div>
+                    </div>
+                    <div class="peer-history-panel hidden" id="loomPeerHistory-{{ p.id }}"></div>
+                </li>
+                {% else %}
+                <li>No Loom peers configured yet.</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <div class="card">
+            <form action="/logout" method="post" class="m-0">
+                <button type="submit" class="btn btn-danger btn-block"><i data-lucide="log-out"></i> Sign Out</button>
+            </form>
+        </div>
+        <div style="text-align: center; color: var(--text-muted); font-size: 0.75em;">
+            <strong>v2.4.0</strong>
+        </div>
+    </div>
+
+    <!-- Directory Browser Modal -->
+    <div id="dirModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <h3 class="mt-0">Select Directory</h3>
+            <div class="flex gap-10 mb-10">
+                <input type="text" id="modalPath" class="m-0 flex-1" readonly>
+                <button type="button" class="btn btn-secondary" style="min-width: 80px;" onclick="loadDir('..')"><i
+                        data-lucide="arrow-up"></i> Up</button>
+            </div>
+            <div id="dirList" class="dir-list">
+                <!-- dirs loaded here -->
+            </div>
+            <div class="flex justify-end gap-10">
+                <button type="button" class="btn btn-secondary"
+                    onclick="document.getElementById('dirModal').style.display='none'">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="selectDir()"><i data-lucide="check"></i>
+                    Select</button>
+            </div>
+        </div>
+    </div>
+{% endblock %}
+
+{% block scripts %}
     <script>
         function copyToClipboard(text, btn) {
             if (navigator.clipboard && window.isSecureContext) {
@@ -416,7 +1108,7 @@
             lucide.createIcons();
         }
 
-        const userFormTimers = new Map();
+        var userFormTimers = new Map();
         function submitUserForm(form) {
             const formKey = form.action;
             if (userFormTimers.has(formKey)) {
@@ -433,7 +1125,7 @@
             userFormTimers.set(formKey, timer);
         }
 
-        let transcodeSaveTimer = null;
+        var transcodeSaveTimer = null;
         function autoSaveTranscodeSettings() {
             const form = document.getElementById('transcodeSettingsForm');
             if (!form) return;
@@ -463,7 +1155,7 @@
             });
         }
 
-        let autopauseSaveTimer = null;
+        var autopauseSaveTimer = null;
         function autoSaveAutoPauseSettings() {
             const form = document.getElementById("autopauseSettingsForm");
             if (!form) return;
@@ -493,7 +1185,7 @@
             });
         }
 
-        let languageSaveTimer = null;
+        var languageSaveTimer = null;
         function autoSaveLanguageSettings() {
             const form = document.getElementById("languageSettingsForm");
             if (!form) return;
@@ -523,7 +1215,7 @@
             });
         }
 
-        let currentDirPath = "";
+        var currentDirPath = "";
         async function openDirBrowser() {
             document.getElementById('dirModal').style.display = 'flex';
             let startPath = document.getElementById('pathInput').value;
@@ -563,13 +1255,12 @@
                 list.appendChild(item);
             }
             data.directories.forEach(d => {
-                if (d === "..") return; // Handled above
+                if (d === "..") return;
                 const item = document.createElement('div');
                 item.textContent = "📁 " + d;
                 item.style.padding = "8px";
                 item.style.cursor = "pointer";
                 item.style.borderBottom = "1px solid #333";
-                // handle windows paths correctly if needed
                 let newPath = currentDirPath.endsWith('/') || currentDirPath.endsWith('\\') ? currentDirPath + d : currentDirPath + "/" + d;
                 item.onclick = () => loadDir(newPath);
                 list.appendChild(item);
@@ -590,7 +1281,6 @@
             ];
 
             const leaf = segments[segments.length - 1];
-            // 1. Check exact match on leaf folder
             for (const item of typeKeywords) {
                 if (item.keywords.includes(leaf)) {
                     selectMediaType(item.type, item.label, null, false);
@@ -598,7 +1288,6 @@
                 }
             }
 
-            // 2. Check if leaf contains any keyword
             for (const item of typeKeywords) {
                 for (const kw of item.keywords) {
                     if (leaf.includes(kw)) {
@@ -608,7 +1297,6 @@
                 }
             }
 
-            // 3. Check any parent segment (from closest parent up to root)
             for (let i = segments.length - 2; i >= 0; i--) {
                 const seg = segments[i];
                 for (const item of typeKeywords) {
@@ -636,8 +1324,8 @@
             }
         }
 
-        let activeTestId = 0;
-        let testDebounceTimer = null;
+        var activeTestId = 0;
+        var testDebounceTimer = null;
 
         async function testRemoteAccess() {
             let url = document.getElementById('remoteUrlInput').value.trim();
@@ -708,68 +1396,13 @@
                 check.style.display = 'none';
                 cross.style.display = 'block';
                 text.textContent = 'Offline';
-                if (err.name === 'AbortError' || err === 'timeout' || controller.signal.aborted) {
+                if (err.name === 'AbortError' || err === 'timeout' || err?.message?.includes('abort')) {
                     console.warn('Remote Access Ping: Connection timed out after 6s (URL unreachable from current network)');
                 } else {
                     console.warn('Remote Access Ping failed:', err.message);
                 }
             }
         }
-
-        document.addEventListener('DOMContentLoaded', () => {
-            const remoteUrlInput = document.getElementById('remoteUrlInput');
-            if (remoteUrlInput) {
-                testRemoteAccess();
-                remoteUrlInput.addEventListener('input', () => {
-                    clearTimeout(testDebounceTimer);
-                    testDebounceTimer = setTimeout(testRemoteAccess, 400);
-                });
-            }
-
-            const urlParams = new URLSearchParams(window.location.search);
-            if (urlParams.get('rewind_success')) {
-                const btn = document.querySelector('form[action="/settings/rewind"] button[type="submit"]');
-                if (btn) flashButton(btn, "Saved!", 3000);
-                window.history.replaceState({}, document.title, window.location.pathname);
-            }
-            if (urlParams.get('pw_success')) {
-                const btn = document.querySelector('form[action="/settings/change_password"] button[type="submit"]');
-                if (btn) flashButton(btn, "Saved!", 3000);
-                window.history.replaceState({}, document.title, window.location.pathname);
-            }
-
-            // Auto-detect matching volume path for default selection: default to first unadded media type
-            const pathInput = document.getElementById('pathInput');
-            selectNextUnaddedMediaType();
-
-            if (pathInput) {
-                pathInput.addEventListener('input', () => autoDetectMediaTypeFromPath(pathInput.value));
-                pathInput.addEventListener('change', () => autoDetectMediaTypeFromPath(pathInput.value));
-            }
-
-            // Prevent spamming / double-submitting standard forms
-            document.addEventListener('submit', (e) => {
-                const form = e.target;
-                if (e.defaultPrevented) return;
-                if (form.dataset.submitting === "true") {
-                    e.preventDefault();
-                    return;
-                }
-                form.dataset.submitting = "true";
-                const submitBtn = form.querySelector('button[type="submit"]');
-                if (submitBtn) {
-                    submitBtn.style.pointerEvents = 'none';
-                    submitBtn.style.opacity = '0.7';
-                }
-                setTimeout(() => {
-                    delete form.dataset.submitting;
-                    if (submitBtn) {
-                        submitBtn.style.pointerEvents = '';
-                        submitBtn.style.opacity = '';
-                    }
-                }, 3000);
-            });
-        });
 
         function toggleMediaTypeMenu(event) {
             event.preventDefault();
@@ -786,7 +1419,7 @@
             document.getElementById('mediaTypeBtn').innerHTML = label + ' <i data-lucide="chevron-down"></i>';
             document.getElementById('mediaTypeMenu').classList.remove('show');
             document.querySelectorAll('#mediaTypeMenu .res-btn').forEach(btn => btn.classList.remove('active'));
-            
+
             const targetBtn = (ev && ev.currentTarget) || (ev && ev.target) || Array.from(document.querySelectorAll('#mediaTypeMenu .res-btn')).find(b => b.textContent.trim().toLowerCase().startsWith(label.toLowerCase()));
             if (targetBtn) targetBtn.classList.add('active');
             if (window.lucide) lucide.createIcons();
@@ -795,7 +1428,6 @@
                 return;
             }
 
-            // Do not query or auto-populate if a volume for this media type has already been added
             if (isMediaTypeAdded(value)) {
                 return;
             }
@@ -823,684 +1455,70 @@
             }
         }
 
-        document.addEventListener('click', function (event) {
+        HeirloomPjax.onReady(() => {
+            const remoteUrlInput = document.getElementById('remoteUrlInput');
+            if (remoteUrlInput) {
+                testRemoteAccess();
+                remoteUrlInput.addEventListener('input', () => {
+                    clearTimeout(testDebounceTimer);
+                    testDebounceTimer = setTimeout(testRemoteAccess, 400);
+                });
+            }
+
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.get('rewind_success')) {
+                const btn = document.querySelector('form[action="/settings/rewind"] button[type="submit"]');
+                if (btn) flashButton(btn, "Saved!", 3000);
+                window.history.replaceState({}, document.title, window.location.pathname);
+            }
+            if (urlParams.get('pw_success')) {
+                const btn = document.querySelector('form[action="/settings/change_password"] button[type="submit"]');
+                if (btn) flashButton(btn, "Saved!", 3000);
+                window.history.replaceState({}, document.title, window.location.pathname);
+            }
+
+            const pathInput = document.getElementById('pathInput');
+            selectNextUnaddedMediaType();
+
+            if (pathInput) {
+                pathInput.addEventListener('input', () => autoDetectMediaTypeFromPath(pathInput.value));
+                pathInput.addEventListener('change', () => autoDetectMediaTypeFromPath(pathInput.value));
+            }
+
+            if (typeof window.initPasswordStrength === 'function') {
+                window.initPasswordStrength();
+            }
+        });
+
+        HeirloomPjax.listen(document, 'submit', (e) => {
+            const form = e.target;
+            if (e.defaultPrevented) return;
+            if (form.dataset.submitting === "true") {
+                e.preventDefault();
+                return;
+            }
+            form.dataset.submitting = "true";
+            const submitBtn = form.querySelector('button[type="submit"]');
+            if (submitBtn) {
+                submitBtn.style.pointerEvents = 'none';
+                submitBtn.style.opacity = '0.7';
+            }
+            setTimeout(() => {
+                delete form.dataset.submitting;
+                if (submitBtn) {
+                    submitBtn.style.pointerEvents = '';
+                    submitBtn.style.opacity = '';
+                }
+            }, 3000);
+        });
+
+        HeirloomPjax.listen(document, 'click', function (event) {
             if (!event.target.closest('.custom-select-container')) {
                 const menu = document.getElementById('mediaTypeMenu');
                 if (menu) menu.classList.remove('show');
             }
         });
     </script>
-</head>
-
-<body>
-    <div class="header">
-        <div class="flex gap-15 align-center">
-            <a href="/" class="icon-link" title="Home">
-                <i data-lucide="arrow-left"></i>
-            </a>
-            <h1 class="m-0" style="font-size: 1.5rem;">Settings</h1>
-        </div>
-        <div class="flex gap-15 align-center">
-            {% if is_admin %}
-            <a href="/server-dashboard" id="serverActivityBadge" class="server-activity-badge" style="display: none;" title="Server Action">
-                <span class="activity-pulse-dot"></span>
-                <span id="serverActivityText">Scanning...</span>
-            </a>
-            {% endif %}
-        </div>
-    </div>
-    
-    <div class="container">
-        {% if can_change_password %}
-        <div class="card">
-            <div class="card-header">
-                <h2 class="m-0">My Account, {{ user.username }}</h2>
-            </div>
-
-            <form action="/settings/change_password" method="post" onsubmit="submitSaveForm(event)" class="flex gap-10 m-0" style="align-items: flex-start;">
-                <div class="flex-1">
-                    <div style="position: relative;">
-                        <input type="password" name="new_password" id="newPasswordInput" placeholder="New Password" required
-                            class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
-                        <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
-                            onclick="togglePasswordVisibility()">
-                            <i data-lucide="eye" id="togglePasswordBtn"></i>
-                        </div>
-                    </div>
-                    <div class="password-strength-container" data-for="newPasswordInput">
-                        <div class="password-strength-bar">
-                            <div class="password-strength-fill"></div>
-                        </div>
-                        <div class="password-strength-text"></div>
-                    </div>
-                </div>
-                <button type="submit" class="btn btn-primary"><i data-lucide="rotate-ccw-key"></i> Change
-                    Password</button>
-            </form>
-        </div>
-        {% endif %}
-
-        <div class="card">
-            <div class="card-header">
-                <h2 class="m-0">Rewind on Resume{% if current_profile and not current_profile.is_primary %} ({{ current_profile.name }}){% endif %}</h2>
-            </div>
-
-            <p style="color: var(--text-secondary); font-size: 0.9em;" class="mb-15">Set how many seconds playback will
-                automatically rewind when opening a movie or episode with saved progress. Set to 0 to disable.</p>
-
-            <form action="/settings/rewind" method="post" onsubmit="submitSaveForm(event)"
-                class="flex gap-10 align-center mb-15">
-                <div class="flex-1" style="position: relative;">
-                    <input type="number" name="rewind_seconds" id="rewindSecondsInput" class="no-arrows" min="0"
-                        max="300" step="1" value="{{ rewind_seconds if rewind_seconds is not none else (current_profile.rewind_seconds if current_profile and current_profile.rewind_seconds is not none else (user.rewind_seconds or 0)) }}"
-                        placeholder="Seconds (e.g. 5, 10)" required class="w-full m-0" style="box-sizing: border-box;">
-                </div>
-                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
-            </form>
-        </div>
-
-        <div class="card">
-            <div class="card-header flex align-center justify-between">
-                <h2 class="m-0">Audio & Subtitle Preferences{% if current_profile and not current_profile.is_primary %} ({{ current_profile.name }}){% endif %}</h2>
-                <span id="languageSaveStatus" style="display: none; color: #4ade80; font-size: 0.9em; font-weight: 500;" class="align-center gap-5">
-                    <i data-lucide="check" style="width: 16px; height: 16px;"></i> Saved
-                </span>
-            </div>
-            <p style="color: var(--text-secondary); font-size: 0.9em;" class="mb-15">
-                Choose the default audio and subtitle languages for video playback.
-            </p>
-            <form id="languageSettingsForm" action="/settings/language" method="post" class="m-0">
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 15px;">
-                    <div>
-                        <label for="defaultAudioLang" style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 0.9rem;">Default Audio Language</label>
-                        <select name="default_audio_lang" id="defaultAudioLang" class="select-input w-100 m-0" onchange="autoSaveLanguageSettings()">
-                            {% for code, name in available_languages %}
-                            <option value="{{ code }}" {% if default_audio_lang == code %}selected{% endif %}>{{ name }}</option>
-                            {% endfor %}
-                        </select>
-                    </div>
-                    <div>
-                        <label for="defaultSubtitleLang" style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 0.9rem;">Default Subtitle Language</label>
-                        <select name="default_subtitle_lang" id="defaultSubtitleLang" class="select-input w-100 m-0" onchange="autoSaveLanguageSettings()">
-                            <option value="off" {% if default_subtitle_lang == "off" %}selected{% endif %}>Off</option>
-                            {% for code, name in available_languages %}
-                            <option value="{{ code }}" {% if default_subtitle_lang == code %}selected{% endif %}>{{ name }}</option>
-                            {% endfor %}
-                        </select>
-                    </div>
-                </div>
-            </form>
-        </div>
-
-        <div class="card">
-            <div class="card-header flex align-center justify-between">
-                <h2 class="m-0">Playback & Auto-Pause{% if current_profile and not current_profile.is_primary %} ({{ current_profile.name }}){% endif %}</h2>
-                <span id="autopauseSaveStatus" style="display: none; color: #4ade80; font-size: 0.9em; font-weight: 500;" class="align-center gap-5">
-                    <i data-lucide="check" style="width: 16px; height: 16px;"></i> Saved
-                </span>
-            </div>
-            <p style="color: var(--text-secondary); font-size: 0.9em;" class="mb-15">
-                Automatically pause consecutive TV show playback when inactive to prevent runaway overnight streaming on TVs and mobile devices.
-            </p>
-            <form id="autopauseSettingsForm" action="/settings/autopause" method="post" class="m-0">
-                <div style="max-width: 360px;">
-                    <label for="autoPauseEpisodes" style="display: block; margin-bottom: 6px; font-weight: 600; font-size: 0.9rem;">"Are You Still Watching?" Prompt</label>
-                    <select name="auto_pause_episodes" id="autoPauseEpisodes" class="select-input w-100 m-0" onchange="autoSaveAutoPauseSettings()">
-                        <option value="2" {% if auto_pause_episodes == 2 %}selected{% endif %}>After 2 episodes</option>
-                        <option value="3" {% if auto_pause_episodes == 3 or auto_pause_episodes is none %}selected{% endif %}>After 3 episodes (Recommended)</option>
-                        <option value="4" {% if auto_pause_episodes == 4 %}selected{% endif %}>After 4 episodes</option>
-                        <option value="5" {% if auto_pause_episodes == 5 %}selected{% endif %}>After 5 episodes</option>
-                        <option value="0" {% if auto_pause_episodes == 0 %}selected{% endif %}>Never (Continuous Playback)</option>
-                    </select>
-                </div>
-            </form>
-        </div>
-
-        {% if is_admin %}
-        <div class="card">
-            <div class="card-header">
-                <h2 class="m-0">Media Volume Paths</h2>
-                <form action="/settings/rescan" method="post" class="m-0">
-                    <button type="submit" class="btn btn-secondary btn-sm"><i data-lucide="refresh-cw"></i> Rescan
-                        Library</button>
-                </form>
-            </div>
-
-            <form action="/settings/add_volume" method="post" class="flex gap-10 align-center mb-20 volume-add-form" onsubmit="submitAddVolumeForm(event)">
-                <div class="flex-1 flex gap-10 align-center volume-input-browse-group">
-                    <input type="text" name="path" id="pathInput" placeholder="/media/movies or custom volume path"
-                        required class="m-0 flex-1">
-                    <button type="button" class="btn btn-secondary volume-browse-btn" onclick="openDirBrowser()"><i
-                            data-lucide="folder"></i> Browse</button>
-                </div>
-                <div class="custom-select-container volume-select-container" style="position: relative;">
-                    <input type="hidden" name="media_type" id="mediaTypeInput" value="movie">
-                    <button type="button" class="btn btn-secondary volume-select-btn" onclick="toggleMediaTypeMenu(event)"
-                        id="mediaTypeBtn">
-                        Movies <i data-lucide="chevron-down"></i>
-                    </button>
-                    <div class="dropdown-menu settings-menu-expanded volume-select-menu" id="mediaTypeMenu"
-                        style="flex-direction: column; top: 100%; bottom: auto; right: auto; left: 0; min-width: 120px; padding: 5px; margin-top: 5px;">
-                        <button type="button" class="res-btn active"
-                            onclick="selectMediaType('movie', 'Movies', event)">Movies</button>
-                        <button type="button" class="res-btn" onclick="selectMediaType('tv', 'TV Shows', event)">TV
-                            Shows</button>
-                        <button type="button" class="res-btn"
-                            onclick="selectMediaType('photo', 'Photos', event)">Photos</button>
-                        <button type="button" class="res-btn"
-                            onclick="selectMediaType('music', 'Music', event)">Music</button>
-                    </div>
-                </div>
-                <button type="submit" class="btn btn-primary volume-add-btn"><i data-lucide="folder-plus"></i> Add Path</button>
-            </form>
-
-            <ul id="volumeList">
-                {% for vp in volume_paths %}
-                <li class="list-item volume-list-item" data-media-type="{{ vp.raw_media_type }}" data-volume-id="{{ vp.id }}">
-                    <div class="flex gap-10 align-center volume-info">
-                        {% if vp.exists %}
-                        <span class="code-text badge-active" style="text-transform: uppercase;" title="Active">
-                            <i data-lucide="check"></i>
-                            {{ vp.media_type }}
-                        </span>
-                        {% else %}
-                        <span class="code-text badge-inactive" style="text-transform: uppercase;" title="Inactive">
-                            <i data-lucide="x"></i>
-                            {{ vp.media_type }}
-                        </span>
-                        {% endif %}
-                        <strong>{{ vp.display_path }}</strong>
-                    </div>
-                    <form action="/settings/delete_volume/{{ vp.id }}" method="post" class="m-0 volume-delete-form" onsubmit="submitDeleteVolumeForm(event)">
-                        <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i> Delete</button>
-                    </form>
-                </li>
-                {% else %}
-                <li>No volume paths configured.</li>
-                {% endfor %}
-            </ul>
-        </div>
-
-        <div class="card">
-            <div class="card-header">
-                <h2 class="m-0">Users & Invitations</h2>
-                <form action="/settings/generate_invite" method="post" class="m-0" onsubmit="submitAddUserForm(event)">
-                    <input type="hidden" name="remote_url" id="hiddenRemoteUrl">
-                    <button type="submit" class="btn btn-primary btn-sm"><i data-lucide="user-plus"></i> Add
-                        User</button>
-                </form>
-            </div>
-            <ul id="userInviteList">
-                {% for u in users %}
-                <li class="list-item user-list-item">
-                    <div class="user-header-row align-center">
-                        <div class="user-name-label">
-                            <strong>{{ u.username }}</strong> {% if u.is_admin %}<span style="color: var(--text-muted); font-size: 0.85em; font-weight: normal;">(Admin)</span>{% endif %}
-                        </div>
-                        {% if not u.is_admin %}
-                        <form action="/settings/delete_user/{{ u.id }}" method="post" class="m-0 user-delete-form" onsubmit="submitDeleteUserForm(event)">
-                            <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i>
-                                Delete</button>
-                        </form>
-                        {% endif %}
-                    </div>
-                    {% if not u.is_admin %}
-                    <div class="user-controls-row">
-                        <!-- Auto-submit on change removes the need for a button -->
-                        <form action="/settings/update_user/{{ u.id }}" method="post" class="m-0 user-permissions-form">
-                            <div class="user-permissions-group">
-                                <label class="toggle-pill" data-volume-type="movie" {% if not mounted_volumes.movie %}style="display: none;"{% endif %}><input type="checkbox" name="movies_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
-                                        u.movies_access %}checked{% endif %}>
-                                    <span>Movies</span></label>
-                                <label class="toggle-pill" data-volume-type="tv" {% if not mounted_volumes.tv %}style="display: none;"{% endif %}><input type="checkbox" name="tv_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if u.tv_access
-                                        %}checked{% endif %}>
-                                    <span>TV Shows</span></label>
-                                <label class="toggle-pill" data-volume-type="photo" {% if not mounted_volumes.photo %}style="display: none;"{% endif %}><input type="checkbox" name="photos_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
-                                        u.photos_access %}checked{% endif %}>
-                                    <span>Photos</span></label>
-                                <label class="toggle-pill" data-volume-type="music" {% if not mounted_volumes.music %}style="display: none;"{% endif %}><input type="checkbox" name="music_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
-                                        u.music_access %}checked{% endif %}>
-                                    <span>Music</span></label>
-                            </div>
-                            <div class="user-permissions-group">
-                                <label class="toggle-pill"><input type="checkbox" name="downloads_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
-                                        u.downloads_access %}checked{% endif %}>
-                                    <span>Downloads</span></label>
-                                <label class="toggle-pill"><input type="checkbox" name="watch_together_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
-                                        u.watch_together_access %}checked{% endif %}>
-                                    <span>Watch Together</span></label>
-                                <label class="toggle-pill"><input type="checkbox" name="can_manage_profiles"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
-                                        u.can_manage_profiles %}checked{% endif %}>
-                                    <span>Household Profiles</span></label>
-                            </div>
-                        </form>
-                    </div>
-                    {% endif %}
-                </li>
-                {% endfor %}
-
-                {% for invite in invites %}
-                <li class="list-item invite-list-item">
-                    <div class="user-header-row align-center">
-                        <div class="invite-info">
-                            <strong>Pending User Invitation</strong>
-                            <div class="share-link">Expires {{ invite.expires_at.strftime('%m/%d/%y') }} (Code: {{ invite.code }})</div>
-                        </div>
-                        <div class="flex gap-10 align-center invite-actions">
-                            <button type="button" class="btn btn-secondary btn-sm"
-                                data-invite-url="{{ host_url }}/register?invite={{ invite.code }}"
-                                onclick="copyToClipboard(this.dataset.inviteUrl, this)"><i
-                                    data-lucide="copy"></i> Copy Link</button>
-                            <form action="/settings/delete_invite/{{ invite.id }}" method="post" class="m-0 invite-delete-form" onsubmit="submitDeleteInviteForm(event)">
-                                <button type="submit" class="btn btn-danger btn-sm"><i data-lucide="trash-2"></i>
-                                    Delete</button>
-                            </form>
-                        </div>
-                    </div>
-                    <div class="user-controls-row">
-                        <form action="/settings/update_invite/{{ invite.id }}" method="post" class="m-0 user-permissions-form">
-                            <div class="user-permissions-group">
-                                <label class="toggle-pill" data-volume-type="movie" {% if not mounted_volumes.movie %}style="display: none;"{% endif %}><input type="checkbox" name="movies_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
-                                        invite.movies_access %}checked{% endif %}>
-                                    <span>Movies</span></label>
-                                <label class="toggle-pill" data-volume-type="tv" {% if not mounted_volumes.tv %}style="display: none;"{% endif %}><input type="checkbox" name="tv_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if invite.tv_access
-                                        %}checked{% endif %}>
-                                    <span>TV Shows</span></label>
-                                <label class="toggle-pill" data-volume-type="photo" {% if not mounted_volumes.photo %}style="display: none;"{% endif %}><input type="checkbox" name="photos_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
-                                        invite.photos_access %}checked{% endif %}>
-                                    <span>Photos</span></label>
-                                <label class="toggle-pill" data-volume-type="music" {% if not mounted_volumes.music %}style="display: none;"{% endif %}><input type="checkbox" name="music_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
-                                        invite.music_access %}checked{% endif %}>
-                                    <span>Music</span></label>
-                            </div>
-                            <div class="user-permissions-group">
-                                <label class="toggle-pill"><input type="checkbox" name="downloads_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
-                                        invite.downloads_access %}checked{% endif %}>
-                                    <span>Downloads</span></label>
-                                <label class="toggle-pill"><input type="checkbox" name="watch_together_access"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
-                                        invite.watch_together_access %}checked{% endif %}>
-                                    <span>Watch Together</span></label>
-                                <label class="toggle-pill"><input type="checkbox" name="can_manage_profiles"
-                                        class="hidden-checkbox" onchange="submitUserForm(this.form)" {% if
-                                        invite.can_manage_profiles %}checked{% endif %}>
-                                    <span>Household Profiles</span></label>
-                            </div>
-                        </form>
-                    </div>
-                </li>
-                {% endfor %}
-            </ul>
-        </div>
-
-        <div class="card">
-            <h2 class="mt-0">Metadata Integration (TMDB)</h2>
-            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Provide a free TMDB API key to automatically
-                enrich your library with high-resolution artwork, cast, crew, and metadata. To obtain a key, create a free account on <a href="https://www.themoviedb.org/" class="inline-link" target="_blank">The Movie Database (TMDB)</a>, navigate to <strong>Settings &gt; API</strong>, and generate an API key.</p>
-             {% if tmdb_key %}
-            <p style="color: var(--status-active); font-size: 0.9em; font-weight: bold;" class="mb-15"><i
-                    data-lucide="check-circle"
-                    style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i> TMDB API Key is
-                configured and active.</p>
-            {% endif %}
-            <form action="/settings/tmdb" method="post" onsubmit="submitSaveForm(event)"
-                class="flex gap-10 align-center m-0">
-                <div class="flex-1" style="position: relative;">
-                    <input type="password" name="tmdb_key" id="tmdbKeyInput" placeholder="Enter TMDB API Key"
-                        value="{{ tmdb_key }}" class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
-                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
-                        onclick="toggleVisibility('tmdbKeyInput', 'toggleTmdbBtn')">
-                        <i data-lucide="eye" id="toggleTmdbBtn"></i>
-                    </div>
-                </div>
-                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
-            </form>
-        </div>
-
-        <div class="card">
-            <h2 class="mt-0">Metadata Integration (TheAudioDB)</h2>
-            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Enrich your music library with artist biographies, banners, thumbnails, and online album metadata. Heirloom automatically defaults to the free public test key <code>123</code> out of the box, so <strong>no configuration is required</strong>. If you have a personal or Patreon API key from <a href="https://www.theaudiodb.com/" class="inline-link" target="_blank">TheAudioDB</a> for higher rate limits, you can enter it below.</p>
-            {% if theaudiodb_key %}
-            <p style="color: var(--status-active); font-size: 0.9em; font-weight: bold;" class="mb-15"><i
-                    data-lucide="check-circle"
-                    style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i> Custom TheAudioDB API Key is configured and active.</p>
-            {% else %}
-            <p style="color: var(--status-active); font-size: 0.9em;" class="mb-15"><i
-                    data-lucide="check-circle"
-                    style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i> Active: Using default free tier key (<code>123</code>). No configuration needed.</p>
-            {% endif %}
-            <form action="/settings/theaudiodb" method="post" onsubmit="submitSaveForm(event)"
-                class="flex gap-10 align-center m-0">
-                <div class="flex-1" style="position: relative;">
-                    <input type="password" name="theaudiodb_key" id="theaudiodbKeyInput" placeholder="Default: 123 (Leave blank for default free key)"
-                        value="{{ theaudiodb_key }}" class="w-full m-0" style="padding-right: 40px; box-sizing: border-box;">
-                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
-                        onclick="toggleVisibility('theaudiodbKeyInput', 'toggleTheaudiodbBtn')">
-                        <i data-lucide="eye" id="toggleTheaudiodbBtn"></i>
-                    </div>
-                </div>
-                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
-            </form>
-        </div>
-
-        <div class="card">
-            <h2 class="mt-0">Network & Remote Access</h2>
-            <p style="color: #ccc; font-size: 0.9em;" class="mb-15">Configure your external URL and port if you use DDNS
-                or port forwarding. This ensures invite links work outside your local network.</p>
-            <form action="/settings/remote_access" method="post" onsubmit="submitSaveForm(event)"
-                class="flex gap-10 align-center m-0">
-                <div class="flex-1" style="position: relative;">
-                    <input type="password" name="remote_url" id="remoteUrlInput"
-                        placeholder="e.g. http://my-home.duckdns.org:8080" value="{{ remote_url }}" class="w-full m-0"
-                        style="padding-right: 40px; box-sizing: border-box;">
-                    <div style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); cursor: pointer; color: #888; display: flex;"
-                        onclick="toggleVisibility('remoteUrlInput', 'toggleRemoteUrlBtn')">
-                        <i data-lucide="eye" id="toggleRemoteUrlBtn"></i>
-                    </div>
-                </div>
-
-                <div id="testStatusBox" class="status-box m-0">
-                    <i id="testSpinner" data-lucide="loader" class="spinner"
-                        style="display: none; width: 18px; height: 18px;"></i>
-                    <i id="testCheck" data-lucide="check"
-                        style="display: none; color: var(--success); width: 18px; height: 18px;"></i>
-                    <i id="testCross" data-lucide="x"
-                        style="display: none; color: var(--failure); width: 18px; height: 18px;"></i>
-                    <span id="testStatusText" style="font-size: 16px; color: var(--text-primary);">Testing...</span>
-                </div>
-
-                <button type="submit" class="btn btn-primary"><i data-lucide="save"></i> Save</button>
-            </form>
-            <div id="httpsWarning" style="display: none; color: #ffaa00; font-size: 0.85em; margin-top: 10px;">
-                <i data-lucide="alert-triangle"
-                    style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px;"></i>
-                Warning: You are using HTTP. It is highly recommended to use HTTPS for remote access to ensure your
-                credentials and data are encrypted.
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="flex align-center justify-between mt-0 mb-15">
-                <h2 class="m-0">Transcoding & Processing</h2>
-                <span id="transcodeSaveStatus" style="display: none; color: #4ade80; font-size: 0.9em; font-weight: 500;" class="align-center gap-5">
-                    <i data-lucide="check" style="width: 16px; height: 16px;"></i> Saved
-                </span>
-            </div>
-            <form id="transcodeSettingsForm" action="/settings/transcoding" method="post" class="m-0">
-                <div class="mb-20">
-                    <label style="font-weight: 600; display: block; margin-bottom: 6px;">Hardware Encoder</label>
-                    <p style="color: #ccc; font-size: 0.9em;" class="mb-10">Select a hardware encoder if your server supports it
-                        to reduce CPU usage when streaming to unsupported devices or at lower resolutions.</p>
-                    <select name="hw_accel_profile" class="select-input w-100 m-0" onchange="autoSaveTranscodeSettings()">
-                        <option value="auto" {% if hw_accel_profile=='auto' or not hw_accel_profile %}selected{% endif %}>
-                            Auto (Detect best available)</option>
-                        <option value="software" {% if hw_accel_profile=='software' %}selected{% endif %}>Software (CPU /
-                            libx264)</option>
-                        <option value="nvenc" {% if hw_accel_profile=='nvenc' %}selected{% endif %}>NVIDIA NVENC
-                            (h264_nvenc)</option>
-                        <option value="qsv" {% if hw_accel_profile=='qsv' %}selected{% endif %}>Intel QuickSync (h264_qsv)
-                        </option>
-                        <option value="vaapi" {% if hw_accel_profile=='vaapi' %}selected{% endif %}>VA-API (h264_vaapi)
-                        </option>
-                        <option value="videotoolbox" {% if hw_accel_profile=='videotoolbox' %}selected{% endif %}>Apple
-                            VideoToolbox (h264_videotoolbox)</option>
-                    </select>
-                </div>
-
-                <div class="mb-20">
-                    <label style="font-weight: 600; display: block; margin-bottom: 6px;">Real-Time HDR to SDR Tone Mapping</label>
-                    <p style="color: #ccc; font-size: 0.9em;" class="mb-10">Automatically maps high dynamic range colors (BT.2020 PQ / HLG / HDR10) into standard dynamic range (BT.709 SDR) when transcoding to eliminate washed-out, grayish colors on non-HDR displays.</p>
-                    <select name="hdr_tonemapping" id="hdr_tonemapping" class="select-input w-100 m-0" onchange="autoSaveTranscodeSettings()">
-                        <option value="disabled" {% if hdr_tonemapping == 'disabled' %}selected{% endif %}>Disabled (Passthrough / No Tone Mapping)</option>
-                        <option value="hable" {% if hdr_tonemapping == 'hable' or hdr_tonemapping == 'true' or not hdr_tonemapping %}selected{% endif %}>Hable (Filmic - Recommended/Default)</option>
-                        <option value="mobius" {% if hdr_tonemapping == 'mobius' %}selected{% endif %}>Mobius (Preserves Saturated Highlights)</option>
-                        <option value="reinhard" {% if hdr_tonemapping == 'reinhard' %}selected{% endif %}>Reinhard (Preserves Shadow Details)</option>
-                        <option value="linear" {% if hdr_tonemapping == 'linear' %}selected{% endif %}>Linear (Perceptually Linear Stretch)</option>
-                        <option value="gamma" {% if hdr_tonemapping == 'gamma' %}selected{% endif %}>Gamma (Contrast Preservation)</option>
-                        <option value="clip" {% if hdr_tonemapping == 'clip' %}selected{% endif %}>Clip (Hard Clip Luminance)</option>
-                    </select>
-                </div>
-
-                <div class="mb-10">
-                    <label style="font-weight: 600; display: block; margin-bottom: 6px;">Automated Intro & Outro Detection</label>
-                    <p style="color: #ccc; font-size: 0.9em;" class="mb-10">Automatically analyzes audio across episodes in a season using acoustic fingerprinting and silence detection to identify theme songs and ending credits when chapter markers are missing.</p>
-                    <select name="auto_intro_detection" id="auto_intro_detection" class="select-input w-100 m-0" onchange="autoSaveTranscodeSettings()">
-                        <option value="true" {% if auto_intro_detection == 'true' or auto_intro_detection is none or auto_intro_detection == 'on' or auto_intro_detection == '1' %}selected{% endif %}>On</option>
-                        <option value="false" {% if auto_intro_detection == 'false' or auto_intro_detection == 'off' or auto_intro_detection == '0' %}selected{% endif %}>Off</option>
-                    </select>
-                </div>
-            </form>
-        </div>
-
-        <div class="card" id="loomSettingsCard">
-            <div class="card-header flex-wrap gap-10">
-                <div>
-                    <h2 class="m-0">The Loom (Federation)</h2>
-                    <small class="muted">Node ID: <code id="loomNodeId">{{ loom_settings.node_id }}</code></small>
-                </div>
-                <div class="flex flex-wrap gap-10 align-center">
-                    <label class="toggle-pill">
-                        <input type="checkbox" id="loomPauseOnStreams" class="hidden-checkbox" onchange="saveLoomSettings()" {% if loom_settings.pause_on_active_streams %}checked{% endif %}>
-                        <span>Pause During Streaming</span>
-                    </label>
-                    <label class="toggle-pill">
-                        <input type="checkbox" id="loomAllowRelay" class="hidden-checkbox" onchange="saveLoomSettings()" {% if loom_settings.allow_relay %}checked{% endif %}>
-                        <span>Allow Relay</span>
-                    </label>
-                    <label class="toggle-pill">
-                        <input type="checkbox" id="loomEnabledToggle" class="hidden-checkbox" onchange="saveLoomSettings()" {% if loom_settings.enabled %}checked{% endif %}>
-                        <span>Enable The Loom</span>
-                    </label>
-                </div>
-            </div>
-            <p class="hint">
-                Opt-in friend-to-friend library discovery and guarded media sync. Disabled by default; imported peers start with Receive and Share off.
-            </p>
-
-            <div class="settings-grid mb-20">
-                <div>
-                    <label class="field-label" for="loomSyncDir">Sync Directory</label>
-                    <select id="loomSyncDir" class="select-input w-full m-0">
-                        <option value="/media/loom" {% if not loom_settings.sync_dir or loom_settings.sync_dir == '/media/loom' %}selected{% endif %}>Loom: /media/loom</option>
-                        {% set active_paths = volume_paths | selectattr('exists') | list %}
-                        {% set ns = namespace(found=(not loom_settings.sync_dir or loom_settings.sync_dir == '/media/loom')) %}
-                        {% for vp in active_paths %}
-                        {% if vp.path != '/media/loom' %}
-                        {% if vp.path == loom_settings.sync_dir %}{% set ns.found = true %}{% endif %}
-                        <option value="{{ vp.path }}" {% if vp.path == loom_settings.sync_dir %}selected{% endif %}>{{ vp.media_type }}: {{ vp.path }}</option>
-                        {% endif %}
-                        {% endfor %}
-                        {% if not ns.found and loom_settings.sync_dir %}
-                        <option value="{{ loom_settings.sync_dir }}" selected>{{ loom_settings.sync_dir }}</option>
-                        {% endif %}
-                    </select>
-                </div>
-                <div>
-                    <label class="field-label" for="loomUploadBandwidthLimit">Max Upload Bandwidth (KB/s)</label>
-                    <input type="number" min="0" id="loomUploadBandwidthLimit" value="{{ loom_settings.upload_bandwidth_limit_kbps }}" class="w-full m-0">
-                </div>
-                <div>
-                    <label class="field-label" for="loomDownloadBandwidthLimit">Max Download Bandwidth (KB/s)</label>
-                    <input type="number" min="0" id="loomDownloadBandwidthLimit" value="{{ loom_settings.download_bandwidth_limit_kbps }}" class="w-full m-0">
-                </div>
-                <div>
-                    <label class="field-label" for="loomMaxQuality">Max Quality Cap</label>
-                    <select id="loomMaxQuality" class="select-input w-full m-0">
-                        <option value="720p" {% if loom_settings.max_quality == '720p' %}selected{% endif %}>720p</option>
-                        <option value="1080p" {% if loom_settings.max_quality == '1080p' %}selected{% endif %}>1080p</option>
-                        <option value="original" {% if loom_settings.max_quality == 'original' %}selected{% endif %}>Original</option>
-                    </select>
-                </div>
-                <div>
-                    <label class="field-label" for="loomMaxSearchHops">Max Search Hops</label>
-                    <input type="number" min="1" max="10" id="loomMaxSearchHops" value="{{ loom_settings.max_search_hops or 1 }}" class="w-full m-0">
-                </div>
-                <div>
-                    <label class="field-label" for="loomMaxSendingHops">Max Sending Hops</label>
-                    <input type="number" min="1" max="10" id="loomMaxSendingHops" value="{{ loom_settings.max_sending_hops or 1 }}" class="w-full m-0">
-                </div>
-                <div>
-                    <label class="field-label" for="loomMaxConcurrentTransfers">Max Concurrent Transfers</label>
-                    <input type="number" min="1" max="20" id="loomMaxConcurrentTransfers" value="{{ loom_settings.max_concurrent_transfers or 2 }}" class="w-full m-0">
-                </div>
-                <div>
-                    <label class="field-label" for="loomMaxRequestsPerMin">Max Requests / Min</label>
-                    <input type="number" min="1" max="120" id="loomMaxRequestsPerMin" value="{{ loom_settings.max_requests_per_minute or 3 }}" class="w-full m-0">
-                </div>
-                <div>
-                    <label class="field-label" for="loomMaxFileSizeGb">Max File Size (GB)</label>
-                    <input type="number" min="0" step="0.1" id="loomMaxFileSizeGb" value="{{ loom_settings.max_file_size_gb or 0 }}" class="w-full m-0">
-                </div>
-                <div>
-                    <label class="field-label" for="loomAutoRotateInterval">Auto-Rotate Addresses</label>
-                    <select id="loomAutoRotateInterval" class="select-input w-full m-0">
-                        <option value="disabled" {% if (loom_settings.auto_rotate_interval or 'disabled') == 'disabled' %}selected{% endif %}>Disabled</option>
-                        <option value="daily" {% if loom_settings.auto_rotate_interval == 'daily' %}selected{% endif %}>Daily</option>
-                        <option value="monthly" {% if loom_settings.auto_rotate_interval == 'monthly' %}selected{% endif %}>Monthly</option>
-                        <option value="yearly" {% if loom_settings.auto_rotate_interval == 'yearly' %}selected{% endif %}>Yearly</option>
-                    </select>
-                </div>
-            </div>
-
-            <div class="mb-20">
-                <label class="field-label" for="loomAllowedFiletypes">Allowed Filetypes</label>
-                <p class="hint mt-0 mb-10">
-                    Comma-separated media extensions allowed for Loom searches and downloads. Any file outside this list is blocked.
-                </p>
-                <input type="text" id="loomAllowedFiletypes" value="{{ loom_settings.allowed_filetypes }}" placeholder=".mp4, .mkv, .mp3, .jpg, .png" class="w-full m-0">
-            </div>
-
-            <div class="mb-20">
-                <label class="field-label">Searchable Volumes</label>
-                <p class="hint mt-0 mb-10">
-                    Choose which volumes peers can query for specific titles (disabled by default). Peers can only ask if you have a specific item, never list your full library.
-                </p>
-                {% if volume_paths %}
-                <div class="user-permissions-group flex-wrap">
-                    {% for vp in volume_paths %}
-                    <label class="toggle-pill">
-                        <input type="checkbox" class="hidden-checkbox loom-searchable-volume" value="{{ vp.path }}" onchange="saveLoomSettings()" {% if vp.path in (loom_settings.searchable_volumes or []) %}checked{% endif %}>
-                        <span>{{ vp.media_type }}: {{ vp.path }}</span>
-                    </label>
-                    {% endfor %}
-                </div>
-                {% else %}
-                <p class="hint m-0">No media volumes configured yet.</p>
-                {% endif %}
-            </div>
-
-            <div class="flex flex-wrap gap-10 align-center mb-20">
-                <button type="button" class="btn btn-primary" onclick="saveLoomSettings(this)">
-                    <i data-lucide="save"></i> Save
-                </button>
-            </div>
-
-            <div class="mb-20">
-                <div class="flex flex-wrap align-center justify-between gap-10 mb-10">
-                    <strong>Peer Pairing</strong>
-                    <button type="button" class="btn btn-secondary btn-sm" onclick="exportLoomBundle(this)">
-                        <i data-lucide="share"></i> Share Invite
-                    </button>
-                </div>
-                <textarea id="loomExportedBundleBox" rows="3" readonly class="w-full mb-10 hidden" placeholder="Your pairing invite JSON..." onclick="copyLoomBundleText(this.value, this)"></textarea>
-                <textarea id="loomBundleInput" rows="3" placeholder="Paste a friend's invite JSON here to pair (starts with Receive and Share off)..." class="w-full mb-10"></textarea>
-                <div class="flex gap-10 align-center">
-                    <input type="text" id="loomImportAlias" placeholder="Optional peer nickname (defaults to Anonymous)" class="m-0 flex-1">
-                    <button type="button" class="btn btn-primary" onclick="importLoomBundle(this)">
-                        <i data-lucide="plus"></i> Import Peer
-                    </button>
-                </div>
-                <div id="loomBundleMsg" class="status-message hidden"></div>
-            </div>
-
-            <ul id="loomPeerList">
-                {% for p in loom_peers %}
-                <li class="list-item user-list-item" data-peer-id="{{ p.id }}" data-peer-url="{{ p.base_url }}" data-local-onion="{{ ('http://' + p.local_onion_service_id + '.onion') if p.local_onion_service_id else '' }}">
-                    <div class="user-header-row align-center flex-wrap gap-10">
-                        <div>
-                            <div class="flex align-center gap-10">
-                                <span class="code-text badge-unknown" data-peer-status-badge="{{ p.id }}"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg> Unknown</span>
-                                <textarea class="peer-name-input" rows="1" wrap="off" maxlength="80" data-peer-id="{{ p.id }}" data-original-name="{{ p.name or 'Anonymous' }}" onfocus="this.select()" onkeydown="handleLoomPeerNameKeydown(event, this)" onblur="saveLoomPeerName({{ p.id }}, this)" oninput="autoResizePeerName(this)">{{ p.name or 'Anonymous' }}</textarea>
-                            </div>
-                        </div>
-                        {% if p.created_at %}
-                        <span class="peer-paired-date" data-paired-at="{{ (p.created_at.replace(tzinfo=None).isoformat() + 'Z') }}">Paired on {{ p.created_at.month }}/{{ p.created_at.day }}/{{ p.created_at.year }}</span>
-                        {% endif %}
-                    </div>
-                    <div class="user-controls-row flex flex-wrap align-center justify-between gap-10">
-                        <div class="flex flex-wrap gap-10 align-center">
-                            <label class="toggle-pill">
-                                <input type="checkbox" class="hidden-checkbox" onchange="toggleLoomPeer({{ p.id }}, {allow_incoming: this.checked}, this)" {% if p.allow_incoming %}checked{% endif %}>
-                                <span>Receive</span>
-                            </label>
-                            <label class="toggle-pill">
-                                <input type="checkbox" class="hidden-checkbox" onchange="toggleLoomPeer({{ p.id }}, {allow_outgoing: this.checked}, this)" {% if p.allow_outgoing %}checked{% endif %}>
-                                <span>Share</span>
-                            </label>
-                            <label class="toggle-pill" title="Bypass Max File Size, Max Requests, Max Transfers, and Max Bandwidths for this peer">
-                                <input type="checkbox" class="hidden-checkbox" onchange="toggleLoomPeer({{ p.id }}, {no_limits: this.checked}, this)" {% if p.no_limits %}checked{% endif %}>
-                                <span>No Limits</span>
-                            </label>
-                        </div>
-                        <div class="peer-history-toggle" onclick="toggleLoomPeerHistory({{ p.id }}, this)">Show Peer Info</div>
-                        <div class="flex flex-wrap gap-10 align-center">
-                            <button type="button" class="btn btn-secondary btn-sm" onclick="rotateLoomPeerOnion({{ p.id }}, this)" title="Rotate our .onion address for this peer"><i data-lucide="refresh-cw"></i> Rotate Address</button>
-                            <button type="button" class="btn btn-danger btn-sm" onclick="deleteLoomPeer({{ p.id }}, this)"><i data-lucide="trash-2"></i> Delete</button>
-                        </div>
-                    </div>
-                    <div class="peer-history-panel hidden" id="loomPeerHistory-{{ p.id }}"></div>
-                </li>
-                {% else %}
-                <li>No Loom peers configured yet.</li>
-                {% endfor %}
-            </ul>
-        </div>
-        {% endif %}
-
-        <div class="card">
-            <form action="/logout" method="post" class="m-0">
-                <button type="submit" class="btn btn-danger btn-block"><i data-lucide="log-out"></i> Sign Out</button>
-            </form>
-        </div>
-        <div style="text-align: center; color: var(--text-muted); font-size: 0.75em;">
-            <strong>v2.3.8</strong>
-        </div>
-    </div>
-
-    <!-- Directory Browser Modal -->
-    <div id="dirModal" class="modal-overlay" style="display: none;">
-        <div class="modal-content">
-            <h3 class="mt-0">Select Directory</h3>
-            <div class="flex gap-10 mb-10">
-                <input type="text" id="modalPath" class="m-0 flex-1" readonly>
-                <button type="button" class="btn btn-secondary" style="min-width: 80px;" onclick="loadDir('..')"><i
-                        data-lucide="arrow-up"></i> Up</button>
-            </div>
-            <div id="dirList" class="dir-list">
-                <!-- dirs loaded here -->
-            </div>
-            <div class="flex justify-end gap-10">
-                <button type="button" class="btn btn-secondary"
-                    onclick="document.getElementById('dirModal').style.display='none'">Cancel</button>
-                <button type="button" class="btn btn-primary" onclick="selectDir()"><i data-lucide="check"></i>
-                    Select</button>
-            </div>
-        </div>
-    </div>
-    <script src="/static/lucide.min.js"></script>
-    <script>lucide.createIcons();</script>
     {% if is_admin %}
     <script>
         function renderLoomPeers(peers) {
@@ -1607,7 +1625,7 @@
             return `Paired on ${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
         }
 
-        document.addEventListener('DOMContentLoaded', () => {
+        HeirloomPjax.onReady(() => {
             document.querySelectorAll('.peer-name-input').forEach(autoResizePeerName);
             document.querySelectorAll('.peer-paired-date[data-paired-at]').forEach(el => {
                 const txt = formatPeerPairedDate(el.dataset.pairedAt);
@@ -1675,7 +1693,7 @@
             }
         }
 
-        let _loomBundleMsgTimer = null;
+        var _loomBundleMsgTimer = null;
         function showLoomBundleMsg(text, isError = false) {
             const msgEl = document.getElementById('loomBundleMsg');
             if (!msgEl) return;
@@ -1731,7 +1749,6 @@
                 return JSON.stringify(data.bundle, null, 2);
             })();
 
-            // Kick off ClipboardItem synchronously inside the click gesture so browsers allow clipboard write after async fetch
             let clipboardItemPromise = null;
             if (navigator.clipboard && typeof ClipboardItem !== 'undefined' && window.isSecureContext) {
                 try {
@@ -1876,7 +1893,7 @@
 
         (function initLoomConnectivityMonitor() {
             refreshLoomPeerConnectivity();
-            setInterval(() => {
+            HeirloomPjax.interval(() => {
                 if (!document.hidden) {
                     refreshLoomPeerConnectivity();
                 }
@@ -2036,51 +2053,5 @@
             }
         }
     </script>
-    <script>
-        (function initSettingsActivityMonitor() {
-            const badge = document.getElementById('serverActivityBadge');
-            const textEl = document.getElementById('serverActivityText');
-            if (!badge || !textEl) return;
-
-            let pollDelay = 3000;
-            let timer = null;
-
-            async function checkActivity() {
-                if (document.hidden) {
-                    timer = setTimeout(checkActivity, 5000);
-                    return;
-                }
-                try {
-                    const res = await fetch('/api/scanner/status');
-                    if (res.ok) {
-                        const data = await res.json();
-                        if (data.is_scanning && data.total_items > 0) {
-                            badge.style.display = 'inline-flex';
-                            badge.classList.remove('complete');
-                            textEl.textContent = data.short_status || `Scanning (${data.items_scanned}/${data.total_items})`;
-                            badge.title = data.current_item ? `${data.action}: ${data.current_item}` : (data.action || 'Library scan in progress');
-                            pollDelay = 3000;
-                        } else {
-                            badge.style.display = 'none';
-                            badge.classList.remove('complete');
-                            pollDelay = data.is_scanning ? 3000 : 8000;
-                        }
-                    } else {
-                        badge.style.display = 'none';
-                        pollDelay = 10000;
-                    }
-                } catch (e) {
-                    badge.style.display = 'none';
-                    pollDelay = 10000;
-                } finally {
-                    timer = setTimeout(checkActivity, pollDelay);
-                }
-            }
-
-            checkActivity();
-        })();
-    </script>
     {% endif %}
-</body>
-
-</html>
+{% endblock %}

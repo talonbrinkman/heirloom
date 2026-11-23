@@ -239,9 +239,11 @@
                         <google-cast-launcher id="googleCastLauncher" style="position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; display: none; z-index: 2;"></google-cast-launcher>
                         <i id="castIcon" data-lucide="{% if is_apple %}airplay{% else %}cast{% endif %}"></i>
                     </button>
+                    {#
                     <button class="control-btn" id="aspectBtn" onclick="cycleAspectRatio()" title="Aspect Ratio">
                         <i data-lucide="proportions"></i>
                     </button>
+                    #}
                     <button class="control-btn" id="pipBtn" onclick="togglePiP()" title="Picture in Picture">
                         <i data-lucide="picture-in-picture-2"></i>
                     </button>
@@ -262,22 +264,36 @@
                             {% endif %}
 
                             <!-- Subtitles Selection -->
-                            {% if subtitle_tracks and subtitle_tracks|length > 0 %}
                             <div class="settings-section" id="subtitleSection">
                                 <div class="settings-header">Subtitles</div>
                                 <button class="sub-btn active" data-sub-id="off" onclick="setSubtitleTrack('off')">Off</button>
-                                {% for track in subtitle_tracks %}
-                                <button class="sub-btn" data-sub-id="{{ track.id }}" data-is-bitmap="{{ 'true' if not track.is_text else 'false' }}"
-                                    onclick="setSubtitleTrack('{{ track.id }}')">{{ track.label }}</button>
-                                {% endfor %}
+                                {% if subtitle_tracks and subtitle_tracks|length > 0 %}
+                                    {% for track in subtitle_tracks %}
+                                    <button class="sub-btn" data-sub-id="{{ track.id }}" data-is-bitmap="{{ 'true' if not track.is_text else 'false' }}"
+                                        onclick="setSubtitleTrack('{{ track.id }}')">{{ track.label }}</button>
+                                    {% endfor %}
+                                {% elif subtitle_url %}
+                                    <button class="sub-btn" data-sub-id="legacy" onclick="setSubtitleTrack('legacy')">External</button>
+                                {% endif %}
+                                {% if not is_trailer %}
+                                <div class="sub-search-controls" onclick="event.stopPropagation()">
+                                    <div class="custom-select-container" style="position: relative;">
+                                        <input type="hidden" id="subSearchLang" value="{{ default_subtitle_lang }}">
+                                        <button type="button" class="btn btn-secondary btn-sm w-full sub-lang-btn" id="subSearchLangBtn" onclick="toggleSubLangMenu(event)">
+                                            <span id="subSearchLangLabel">{% for code, label in available_languages %}{% if code == default_subtitle_lang %}{{ label }}{% endif %}{% endfor %}</span>
+                                            <i data-lucide="chevron-down"></i>
+                                        </button>
+                                        <div class="dropdown-menu sub-lang-menu" id="subLangMenu">
+                                            {% for code, label in available_languages %}
+                                            <button type="button" class="res-btn {% if code == default_subtitle_lang %}active{% endif %}" data-lang="{{ code }}" onclick="selectSubLang('{{ code }}', '{{ label }}', event)">{{ label }}</button>
+                                            {% endfor %}
+                                        </div>
+                                    </div>
+                                    <button type="button" class="sub-search-trigger" onclick="runSubtitleSearch(event)">Search Subtitles...</button>
+                                    <div id="subSearchResults" class="sub-search-results hidden"></div>
+                                </div>
+                                {% endif %}
                             </div>
-                            {% elif subtitle_url %}
-                            <div class="settings-section" id="subtitleSection">
-                                <div class="settings-header">Subtitles</div>
-                                <button class="sub-btn active" data-sub-id="off" onclick="setSubtitleTrack('off')">Off</button>
-                                <button class="sub-btn" data-sub-id="legacy" onclick="setSubtitleTrack('legacy')">External</button>
-                            </div>
-                            {% endif %}
 
                             <!-- Resolution -->
                             <div class="settings-section" id="resolutionSection">
@@ -1232,6 +1248,7 @@
                 const settingsMenu = document.getElementById('settingsMenu');
                 if (settingsMenu && settingsMenu.classList.contains('show')) {
                     settingsMenu.classList.remove('show');
+                    closeSubLangMenu();
                     return;
                 }
                 exitPlayer();
@@ -1647,14 +1664,15 @@
         }
 
         function applySubtitlesToVideo() {
-            if (!video.textTracks || video.textTracks.length === 0) return;
-            const trackEls = video.querySelectorAll('track');
-            
-            // If burn-in is active or subtitles are disabled, hide all text tracks so nothing displays
-            if (activeBurnSub || !subtitlesEnabled || activeSubtitleId === 'off') {
+            if (video.textTracks) {
                 for (let i = 0; i < video.textTracks.length; i++) {
                     video.textTracks[i].mode = 'hidden';
                 }
+            }
+            const trackEls = video.querySelectorAll('track');
+
+            // If burn-in is active or subtitles are disabled, keep all text tracks hidden
+            if (activeBurnSub || !subtitlesEnabled || activeSubtitleId === 'off') {
                 return;
             }
 
@@ -1665,20 +1683,16 @@
                 } else {
                     activeSubtitleId = 'off';
                     subtitlesEnabled = false;
+                    return;
                 }
             }
 
-            for (let i = 0; i < video.textTracks.length; i++) {
-                const tt = video.textTracks[i];
-                const el = trackEls[i];
-                const trackId = el ? el.getAttribute('data-track-id') : null;
-
-                if (subtitlesEnabled && activeSubtitleId !== 'off' && trackId === activeSubtitleId) {
-                    tt.mode = 'showing';
-                } else {
-                    tt.mode = 'hidden';
+            trackEls.forEach(el => {
+                const trackId = el.getAttribute('data-track-id');
+                if (el.track) {
+                    el.track.mode = (subtitlesEnabled && activeSubtitleId !== 'off' && trackId === activeSubtitleId) ? 'showing' : 'hidden';
                 }
-            }
+            });
         }
 
         function setSubtitleTrack(trackId) {
@@ -1952,6 +1966,11 @@
             updateVolumeSliderFill();
         }
 
+        function closeSubLangMenu() {
+            const menu = document.getElementById('subLangMenu');
+            if (menu) menu.classList.remove('show');
+        }
+
         function toggleSettings(event) {
             event.stopPropagation();
             const sm = document.getElementById('settingsMenu');
@@ -1962,10 +1981,197 @@
                         clearTimeout(hideTimeout);
                     }
                 } else {
+                    closeSubLangMenu();
                     if (typeof showOverlay === 'function') {
                         showOverlay();
                     }
                 }
+            }
+        }
+
+        const OPENSUBTITLES_CONFIGURED = {{ 'true' if opensubtitles_configured else 'false' }};
+        let _subSearchResultsCache = [];
+
+        function _escapeSubHtml(str) {
+            return String(str ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function toggleSubLangMenu(event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            const menu = document.getElementById('subLangMenu');
+            const btn = document.getElementById('subSearchLangBtn');
+            if (!menu || !btn) return;
+            if (menu.classList.contains('show')) {
+                menu.classList.remove('show');
+                return;
+            }
+            if (menu.parentElement !== document.body) {
+                document.body.appendChild(menu);
+            }
+            const rect = btn.getBoundingClientRect();
+            menu.classList.add('show');
+            const menuWidth = Math.max(rect.width, 160);
+            menu.style.width = `${Math.round(menuWidth)}px`;
+            const menuHeight = Math.min(menu.scrollHeight || 220, 220);
+            const openAbove = rect.top >= menuHeight + 14 || (window.innerHeight - rect.bottom < menuHeight + 14 && rect.top > window.innerHeight - rect.bottom);
+            let top = openAbove ? (rect.top - menuHeight - 6) : (rect.bottom + 6);
+            top = Math.max(8, Math.min(window.innerHeight - menuHeight - 8, top));
+            const left = Math.max(8, Math.min(window.innerWidth - menuWidth - 8, rect.left));
+            menu.style.top = `${Math.round(top)}px`;
+            menu.style.left = `${Math.round(left)}px`;
+        }
+
+        function selectSubLang(code, label, event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            const input = document.getElementById('subSearchLang');
+            const labelEl = document.getElementById('subSearchLangLabel');
+            const menu = document.getElementById('subLangMenu');
+            if (input) input.value = code;
+            if (labelEl) labelEl.textContent = label;
+            if (menu) {
+                menu.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.lang === code));
+            }
+            closeSubLangMenu();
+        }
+
+        async function runSubtitleSearch(event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            const out = document.getElementById('subSearchResults');
+            const langEl = document.getElementById('subSearchLang');
+            if (!out) return;
+            out.classList.remove('hidden');
+
+            if (!OPENSUBTITLES_CONFIGURED) {
+                out.innerHTML = '<div class="sub-search-empty">Configure an OpenSubtitles API key in Settings.</div>';
+                return;
+            }
+
+            const lang = langEl ? langEl.value : 'eng';
+            out.innerHTML = '<div class="sub-search-empty">Searching...</div>';
+
+            try {
+                const params = new URLSearchParams({ lang });
+                const res = await fetch(`/api/subtitles/search/{{ media_type }}/{{ item.id }}?${params.toString()}`);
+                const data = await res.json();
+                if (!res.ok) {
+                    out.innerHTML = `<div class="sub-search-empty">${_escapeSubHtml(data.error || 'Subtitle search failed.')}</div>`;
+                    return;
+                }
+                _subSearchResultsCache = data.results || [];
+                if (_subSearchResultsCache.length === 0) {
+                    out.innerHTML = '<div class="sub-search-empty">No subtitles found.</div>';
+                    return;
+                }
+                out.innerHTML = _subSearchResultsCache.map((r, idx) => {
+                    const meta = [];
+                    if (r.moviehash_match) meta.push('Exact Match');
+                    if (r.hearing_impaired) meta.push('SDH');
+                    if (r.download_count) meta.push(`${r.download_count} DLs`);
+                    return `
+                        <button type="button" class="version-menu-item sub-result-item" onclick="selectFetchedSubtitle(${idx}, this, event)">
+                            <span class="sub-result-title">${_escapeSubHtml(r.release)}</span>
+                            <span class="sub-result-meta">${_escapeSubHtml(meta.join(' • ') || r.language.toUpperCase())}</span>
+                        </button>
+                    `;
+                }).join('');
+            } catch (err) {
+                console.error('Subtitle search error:', err);
+                out.innerHTML = '<div class="sub-search-empty">Error searching subtitles.</div>';
+            }
+        }
+
+        async function selectFetchedSubtitle(idx, btn, event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            const item = _subSearchResultsCache[idx];
+            if (!item || !btn || btn.disabled) return;
+            btn.disabled = true;
+            const origHtml = btn.innerHTML;
+            btn.innerHTML = '<span class="sub-result-meta">Downloading...</span>';
+
+            try {
+                const langEl = document.getElementById('subSearchLang');
+                const res = await fetch(`/api/subtitles/fetch/{{ media_type }}/{{ item.id }}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        file_id: item.file_id,
+                        lang: langEl ? langEl.value : 'eng',
+                        release: item.release,
+                        hearing_impaired: Boolean(item.hearing_impaired),
+                    }),
+                });
+                const data = await res.json();
+                if (!res.ok || !data.track) {
+                    btn.disabled = false;
+                    btn.innerHTML = origHtml;
+                    const out = document.getElementById('subSearchResults');
+                    if (out) out.insertAdjacentHTML('afterbegin', `<div class="sub-search-empty">${_escapeSubHtml(data.error || 'Download failed.')}</div>`);
+                    return;
+                }
+
+                const tr = data.track;
+                if (!subtitleTracksData.some(t => t.id === tr.id)) {
+                    subtitleTracksData.push(tr);
+                }
+
+                const section = document.getElementById('subtitleSection');
+                if (section && !section.querySelector(`.sub-btn[data-sub-id="${CSS.escape(tr.id)}"]`)) {
+                    const newBtn = document.createElement('button');
+                    newBtn.className = 'sub-btn';
+                    newBtn.setAttribute('data-sub-id', tr.id);
+                    newBtn.setAttribute('data-is-bitmap', 'false');
+                    newBtn.textContent = tr.label;
+                    newBtn.onclick = () => setSubtitleTrack(tr.id);
+                    const controls = section.querySelector('.sub-search-controls');
+                    if (controls) section.insertBefore(newBtn, controls);
+                    else section.appendChild(newBtn);
+                }
+
+                if (!video.querySelector(`track[data-track-id="${CSS.escape(tr.id)}"]`)) {
+                    const trackEl = document.createElement('track');
+                    trackEl.label = tr.label;
+                    trackEl.kind = 'subtitles';
+                    trackEl.srclang = tr.language || 'en';
+                    trackEl.default = false;
+                    trackEl.setAttribute('data-track-id', tr.id);
+                    const subStart = isHlsActive ? 0 : offsetStart;
+                    let subUrl = `/subtitle/{{ media_type }}/{{ item.id }}?track_id=${encodeURIComponent(tr.id)}&start=${subStart}&res=${encodeURIComponent(currentRes)}`;
+                    {% if token %}
+                    subUrl += `&token={{ token }}`;
+                    {% endif %}
+                    trackEl.src = subUrl;
+                    video.appendChild(trackEl);
+                }
+
+                closeSubLangMenu();
+                const out = document.getElementById('subSearchResults');
+                if (out) out.classList.add('hidden');
+                setSubtitleTrack(tr.id);
+                const activeTrackEl = video.querySelector(`track[data-track-id="${CSS.escape(tr.id)}"]`);
+                if (activeTrackEl && activeTrackEl.track && !activeBurnSub && activeSubtitleId === tr.id) {
+                    activeTrackEl.track.mode = 'showing';
+                }
+            } catch (err) {
+                console.error('Failed to fetch subtitle:', err);
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
             }
         }
 
@@ -2541,8 +2747,9 @@
             // Dismiss settings menu if open and user clicked outside settings
             const settingsMenu = document.getElementById('settingsMenu');
             if (settingsMenu && settingsMenu.classList.contains('show')) {
-                if (!e.target.closest('.settings-container')) {
+                if (!e.target.closest('.settings-container, #subLangMenu')) {
                     settingsMenu.classList.remove('show');
+                    closeSubLangMenu();
                     showOverlay();
                     return;
                 }
@@ -2667,9 +2874,20 @@
                 settingsMenuEl.addEventListener(evt, () => {
                     markUserActive();
                     clearTimeout(hideTimeout);
+                    if (evt === 'scroll') closeSubLangMenu();
                 }, { passive: true });
             });
+            settingsMenuEl.addEventListener('click', (e) => {
+                if (!e.target.closest('#subSearchLangBtn, #subLangMenu')) {
+                    closeSubLangMenu();
+                }
+            });
         }
+        const subtitleSectionEl = document.getElementById('subtitleSection');
+        if (subtitleSectionEl) {
+            subtitleSectionEl.addEventListener('scroll', closeSubLangMenu, { passive: true });
+        }
+        window.addEventListener('resize', closeSubLangMenu);
 
         document.addEventListener('mousemove', (e) => {
             // Ignore synthetic mousemove events from touch taps on mobile

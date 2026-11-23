@@ -24,13 +24,14 @@ By leveraging a lightweight, API-first architecture using Python and FastAPI, He
 - Multi-Audio Track Selection
 - Multi-Track Subtitle Extraction (Embedded & Sidecar WebVTT)
 - Subtitle Bitmap Burn-In
+- On-Demand Subtitle Fetching (OpenSubtitles)
 - Adaptive Bitrate (ABR) & HLS Streaming
 - Hardware-Accelerated Transcoding
 - Multi-Version Coexistence & Instant Restart
 - Related Titles & Smart Media Discovery
 - Actor & Director Filmography Hubs ("Person" Pages)
 - Instant "Fix Match" Resolution
-- Music Library & Persistent Audio Player
+- Music Library & Persistent Audio Player (Seamless Continuous PJAX Playback)
 - The Loom (Private Tor v3 Friend-to-Friend Media Search & Sync)
 - Cross-Platform REST API
 - Frictionless Docker Deployment
@@ -120,22 +121,20 @@ Heirloom utilizes an asynchronous FastAPI backend to handle high-concurrency str
 
 - **Library & Metadata**: Add media volume paths and optional TMDB / TheAudioDB keys in **Settings** to automatically scan movies, TV shows, photos, and music. Use **Fix Match** from any card's three-dots menu to correct mismatched titles.
 - **Users & Profiles**: Admins can generate one-time invite codes and manage library/feature permissions in **Settings**. Each account supports up to 6 PIN-protected household profiles with Adult, Teen, and Child rating controls.
-- **Playback & Streaming**: Stream directly in the browser with adaptive bitrate HLS, multi-audio track switching, embedded/sidecar subtitles (with bitmap burn-in support), HDR-to-SDR tone mapping, trickplay seek previews, and auto-detected intro/credits skip prompts.
+- **Playback & Streaming**: Stream directly in the browser with adaptive bitrate HLS, multi-audio track switching, embedded/sidecar subtitles (with bitmap burn-in support), on-demand subtitle searching and downloading by language via OpenSubtitles (configured in **Settings**, saved alongside media or in `/config` when volumes are read-only), HDR-to-SDR tone mapping, trickplay seek previews, and auto-detected intro/credits skip prompts.
 - **Watch Together & Downloads**: Start synchronized Watch Together sessions from any movie or show page, or download media directly when enabled for your account.
 - **Playback Preferences**: Configure rewind-on-resume, default audio/subtitle languages, "Are You Still Watching?" episode limits, and the in-player sleep timer in **Settings** or the player menu.
-- **Music & Discovery**: Listen across pages with the persistent bottom audio player and queue drawer, explore actor/director filmography pages, and browse auto-grouped franchise collections and related titles.
+- **Music & Discovery**: Listen uninterrupted across pages with the persistent bottom audio player, queue drawer, and seamless PJAX client-side navigation (so background music never pauses or cuts out during page transitions), explore actor/director filmography pages, and browse auto-grouped franchise collections and related titles.
 - **The Loom (Friend-to-Friend Sync)**: Opt-in, disabled-by-default peer-to-peer media search and sync powered by a built-in Tor v3 daemon (no port forwarding or external Tor setup required). Pair friends with single-use 24-hour expiring `.onion` bundles in **Settings**, configure per-peer **Receive** / **Share** permissions, searchable volumes, allowed filetypes, bandwidth/quality/hop/concurrency/rate limits, and search friends' libraries directly from the Home search bar (supporting flexible season/episode queries like `S01E03` or `Season 1 E3`, exact-title ranking, and result sorting) with live progress, speed, cancellation, and automatic resume for interrupted downloads.
 
 ## 🔮 Upcoming Improvements
 
 - **Smart TV & Native Client Ecosystem**: Dedicated native client applications for Apple TV, Android TV / Google TV, Roku, and Fire TV.
 - **Mobile Offline Sync**: Transcode and download media to phones and tablets for offline airplane and travel playback.
-- **Seamless Continuous Music Streaming Across Pages**: Client-side PJAX/Turbo navigation keeping the persistent audio player and background music streaming uninterrupted across page transitions without audio pause or reload gaps.
-- **On-Demand Subtitle Fetching**: In-player and background retrieval of missing subtitle tracks and languages via external provider integrations (OpenSubtitles / Bazarr).
 
 ## 🤝 Contributing
 
-Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/talonbrinkman/heirloom/issues).
+Contributions, issues, and feature requests are welcome.
 
 ## 📝 License
 

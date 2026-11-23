@@ -1,16 +1,8 @@
-<!DOCTYPE html>
-<html lang="en">
+{% extends "base.html" %}
 
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Server Dashboard - Heirloom</title>
-    <link rel="stylesheet" href="/static/style.css">
-    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-    <script src="https://unpkg.com/lucide@latest"></script>
-</head>
+{% block title %}Server Dashboard - Heirloom{% endblock %}
 
-<body>
+{% block content %}
     <div class="header flex justify-start gap-15">
         <a href="/" class="icon-link" title="Home">
             <i data-lucide="arrow-left"></i>
@@ -350,7 +342,9 @@
             </div>
         </div>
     </div>
+{% endblock %}
 
+{% block scripts %}
     <!-- Live Telemetry Updates Script -->
     <script>
         function refreshIcons() {
@@ -358,9 +352,8 @@
                 lucide.createIcons();
             }
         }
-        document.addEventListener('DOMContentLoaded', refreshIcons);
 
-        let isFetching = false;
+        var isFetching = false;
         async function fetchLiveStats() {
             if (isFetching) return;
             isFetching = true;
@@ -410,7 +403,6 @@
         function updateMetricsUI(metrics) {
             if (!metrics) return;
 
-            // Active streams
             const kpiStreams = document.getElementById('kpiActiveStreams');
             const badgeStreams = document.getElementById('activeStreamsBadge');
             if (kpiStreams) kpiStreams.textContent = metrics.active_streams_count;
@@ -424,13 +416,11 @@
             const transcodeJobs = document.getElementById('transcodeJobsCount');
             if (transcodeJobs) transcodeJobs.textContent = metrics.transcodes_count;
 
-            // CPU
             const kpiCpu = document.getElementById('kpiCpu');
             const kpiCpuBar = document.getElementById('kpiCpuBar');
             if (kpiCpu) kpiCpu.textContent = `${metrics.cpu.percent}%`;
             if (kpiCpuBar) kpiCpuBar.style.width = `${metrics.cpu.percent}%`;
 
-            // RAM
             const kpiRam = document.getElementById('kpiRam');
             const kpiRamBar = document.getElementById('kpiRamBar');
             const kpiRamText = document.getElementById('kpiRamText');
@@ -438,16 +428,13 @@
             if (kpiRamBar) kpiRamBar.style.width = `${metrics.memory.percent}%`;
             if (kpiRamText) kpiRamText.textContent = `${metrics.memory.used_gb} GB / ${metrics.memory.total_gb} GB`;
 
-            // Uptime
             const kpiUptime = document.getElementById('kpiUptime');
             if (kpiUptime) kpiUptime.textContent = metrics.uptime_str;
 
-            // Storage & Volumes
             if (metrics.disks) {
                 renderDisks(metrics.disks);
             }
 
-            // Active Streams cards
             renderActiveStreams(metrics.active_streams);
         }
 
@@ -671,9 +658,6 @@
                 .replace(/'/g, '&#039;');
         }
 
-        // Auto-poll live telemetry every 5 seconds (standard dashboard telemetry rate)
-        setInterval(fetchLiveStats, 5000);
+        HeirloomPjax.interval(fetchLiveStats, 5000);
     </script>
-</body>
-
-</html>
+{% endblock %}

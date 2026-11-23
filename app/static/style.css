@@ -106,6 +106,14 @@ body {
     padding: 0;
 }
 
+#pjax-root {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+}
+
 img,
 video {
     max-width: 100%;
@@ -476,6 +484,8 @@ a.play-btn.play-main-btn:hover {
     color: var(--text-muted);
     display: inline-flex;
     align-items: center;
+    justify-content: center;
+    line-height: 0;
     position: relative;
     transition: color 0.3s;
 }
@@ -2276,6 +2286,78 @@ google-cast-launcher {
     display: none;
     width: 0;
     height: 0;
+}
+
+.settings-section.hidden {
+    display: none;
+}
+
+.sub-search-controls {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap);
+    margin-top: var(--gap);
+    max-width: 220px;
+}
+
+.sub-lang-btn {
+    justify-content: space-between !important;
+}
+
+.sub-lang-menu {
+    position: fixed !important;
+    z-index: 10050 !important;
+    flex-direction: column !important;
+    top: auto;
+    bottom: auto !important;
+    left: auto;
+    right: auto !important;
+    min-width: 160px !important;
+    max-height: 220px;
+    overflow-y: auto !important;
+    padding: 5px !important;
+    margin: 0 !important;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+}
+
+.sub-search-trigger {
+    color: var(--text-muted) !important;
+}
+
+.sub-search-results {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 150px;
+    overflow-x: auto;
+    overflow-y: auto;
+}
+
+.sub-search-results.hidden {
+    display: none;
+}
+
+.sub-result-item {
+    width: max-content !important;
+    min-width: 100%;
+}
+
+.sub-result-title {
+    white-space: nowrap;
+    font-size: 0.95em;
+}
+
+.sub-result-meta {
+    color: var(--text-muted);
+    font-size: 0.85em;
+    white-space: nowrap;
+}
+
+.sub-search-empty {
+    color: var(--text-muted);
+    font-size: 0.8em;
+    padding: var(--padding);
+    text-align: center;
 }
 
 .settings-section button {

@@ -181,91 +181,6 @@
     // Preload next/prev on initial load
     preloadAdjacent(currentIndex);
 
-    async function loadInbox() {
-        try {
-            const res = await fetch('/api/inbox');
-            const data = await res.json();
-            const items = data.invites;
-            const resets = data.reset_requests || [];
-            const badge = document.getElementById('inboxBadge');
-            const container = document.getElementById('inboxItems');
-            if(!badge || !container) return;
-            
-            const totalCount = items.length + resets.length;
-            if (totalCount > 0) {
-                badge.style.display = 'block';
-                let html = '';
-                html += items.map(inv => `
-                    <div class="inbox-item">
-                        <div><strong>${inv.sender}</strong> invited you to watch <em>${inv.title}</em></div>
-                        <div class="inbox-actions">
-                            <button class="btn btn-sm" onclick="respondInvite(${inv.id}, 'accept')">Accept</button>
-                            <button class="btn btn-sm btn-secondary" onclick="respondInvite(${inv.id}, 'decline')">Decline</button>
-                        </div>
-                    </div>
-                `).join('');
-                html += resets.map(pr => `
-                    <div class="inbox-item">
-                        <div><strong>${pr.username}</strong> is requesting a password reset</div>
-                        <small>Requested ${pr.created_at}</small>
-                        <div class="inbox-actions">
-                            <button class="btn btn-sm" onclick="respondReset(${pr.id}, 'approve')">Approve</button>
-                            <button class="btn btn-sm btn-secondary" onclick="respondReset(${pr.id}, 'deny')">Deny</button>
-                        </div>
-                    </div>
-                `).join('');
-                container.innerHTML = html;
-            } else {
-                badge.style.display = 'none';
-                container.innerHTML = '<div class="empty-state">No new notifications</div>';
-            }
-        } catch (err) {
-            console.error("Error loading inbox:", err);
-        }
-    }
-    
-    async function respondInvite(id, action) {
-        try {
-            const res = await fetch(`/watch_together/${action}/${id}`, { method: 'POST' });
-            const data = await res.json();
-            if (data.success && action === 'accept') {
-                window.location.href = `/play_sync/${data.session_id}`;
-            } else {
-                loadInbox();
-            }
-        } catch (err) {
-            console.error(err);
-        }
-    }
-
-    async function respondReset(id, action) {
-        try {
-            await fetch(`/password_reset/${action}/${id}`, { method: 'POST' });
-            loadInbox();
-        } catch (err) {
-            console.error(err);
-        }
-    }
-    
-    function toggleInbox(e) {
-        e.preventDefault();
-        const menu = document.getElementById('inboxMenu');
-        if (menu.style.display === 'none') {
-            menu.style.display = 'block';
-            loadInbox();
-        } else {
-            menu.style.display = 'none';
-        }
-    }
-    
-    document.addEventListener('click', function(event) {
-        const menu = document.getElementById('inboxMenu');
-        const btn = document.getElementById('inboxBtn');
-        if (menu && btn && event.target !== btn && !btn.contains(event.target) && !menu.contains(event.target)) {
-            menu.style.display = 'none';
-        }
-    });
-    
     document.addEventListener('keydown', function(e) {
         if (e.key === 'Escape') {
             const closeBtn = document.getElementById('photoCloseBtn');
@@ -278,9 +193,6 @@
             navPhoto(1);
         }
     });
-
-    setInterval(loadInbox, 10000);
-    document.addEventListener('DOMContentLoaded', loadInbox);
 </script>
 
 </body>

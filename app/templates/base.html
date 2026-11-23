@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Heirloom{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    {% block head %}{% endblock %}
+    <script src="/static/lucide.min.js"></script>
+    <script src="/static/pjax.js"></script>
+</head>
+<body {% block body_attrs %}{% endblock %}>
+    <div id="pjax-root">
+        {% block content %}{% endblock %}
+        {% block scripts %}{% endblock %}
+    </div>
+    <script src="/static/fix-match.js"></script>
+    <script src="/static/watch-toggle.js"></script>
+    <script src="/static/navigation-loader.js"></script>
+    <script src="/static/app-shell.js"></script>
+    <script src="/static/audio-player.js"></script>
+</body>
+</html>

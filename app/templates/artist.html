@@ -1,13 +1,10 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Heirloom - {{ artist.name }}</title>
-    <link rel="stylesheet" href="/static/style.css">
-    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-</head>
-<body {% if artist.banner_filename %}class="has-backdrop" style="--backdrop-url: url('/metadata/{{ artist.banner_filename }}');"{% endif %}>
+{% extends "base.html" %}
+
+{% block title %}Heirloom - {{ artist.name }}{% endblock %}
+
+{% block body_attrs %}{% if artist.banner_filename %}class="has-backdrop" style="--backdrop-url: url('/metadata/{{ artist.banner_filename }}');"{% endif %}{% endblock %}
+
+{% block content %}
     <div class="header">
         <div class="flex gap-15 align-center">
             <a href="{{ close_url or '/library/music?view=artists' }}" class="icon-link" title="Back">
@@ -176,22 +173,4 @@
             {% endif %}
         </div>
     </div>
-
-    <script src="/static/lucide.min.js"></script>
-    <script src="/static/audio-player.js"></script>
-    <script>
-        lucide.createIcons();
-
-        function toggleProfileDropdown(e) {
-            e.stopPropagation();
-            const menu = document.getElementById('profileDropdownMenu');
-            if (menu) menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
-        }
-
-        document.addEventListener('click', () => {
-            const menu = document.getElementById('profileDropdownMenu');
-            if (menu) menu.style.display = 'none';
-        });
-    </script>
-</body>
-</html>
+{% endblock %}

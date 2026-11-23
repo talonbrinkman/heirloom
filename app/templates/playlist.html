@@ -1,13 +1,10 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Heirloom - {{ playlist.name }}</title>
-    <link rel="stylesheet" href="/static/style.css">
-    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-</head>
-<body {% if cover_url %}class="has-backdrop" style="--backdrop-url: url('{{ cover_url }}');"{% endif %}>
+{% extends "base.html" %}
+
+{% block title %}Heirloom - {{ playlist.name }}{% endblock %}
+
+{% block body_attrs %}{% if cover_url %}class="has-backdrop" style="--backdrop-url: url('{{ cover_url }}');"{% endif %}{% endblock %}
+
+{% block content %}
     <div class="header">
         <div class="flex gap-15 align-center">
             <a href="{{ close_url or '/library/music?view=playlists' }}" class="icon-link" title="Back">
@@ -164,23 +161,10 @@
             </div>
         </div>
     </div>
+{% endblock %}
 
-    <script src="/static/lucide.min.js"></script>
-    <script src="/static/audio-player.js"></script>
+{% block scripts %}
     <script>
-        lucide.createIcons();
-
-        function toggleProfileDropdown(e) {
-            e.stopPropagation();
-            const menu = document.getElementById('profileDropdownMenu');
-            if (menu) menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
-        }
-
-        document.addEventListener('click', () => {
-            const menu = document.getElementById('profileDropdownMenu');
-            if (menu) menu.style.display = 'none';
-        });
-
         async function removeTrackFromCurrentPlaylist(playlistId, playlistTrackId) {
             try {
                 const res = await fetch(`/api/playlists/${playlistId}/tracks/${playlistTrackId}`, {
@@ -188,7 +172,7 @@
                 });
                 const data = await res.json();
                 if (data.success) {
-                    window.location.reload();
+                    HeirloomPjax.navigate(window.location.href, { replace: true, preserveScroll: true });
                 } else {
                     alert('Could not remove track.');
                 }
@@ -206,7 +190,7 @@
                 });
                 const data = await res.json();
                 if (data.success) {
-                    window.location.href = '/library/music?view=playlists';
+                    HeirloomPjax.navigate('/library/music?view=playlists');
                 } else {
                     alert('Could not delete playlist.');
                 }
@@ -216,5 +200,4 @@
             }
         }
     </script>
-</body>
-</html>
+{% endblock %}

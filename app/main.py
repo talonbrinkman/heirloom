@@ -79,7 +79,30 @@ from .loom import (
 )
 from .scanner import METADATA_DIR, scan_media_library, scanner_manager, is_recycle_name, is_recycle_path, download_image, async_download_image, async_fetch_additional_details, async_fetch_text_details, SafeHTTPClient, httpx, find_local_trailer, extract_tmdb_trailer_key
 from .watcher import start_watcher, stop_watcher, scanner_debouncer
-from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, get_cached_media_probe, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time, sanitize_vtt_content, get_video_transcode_pipeline, parse_burn_sub_index, get_smart_audio_pipeline, extract_video_frame
+from .ffmpeg_setup import ensure_ffmpeg, get_ffmpeg_path, get_ffprobe_path, get_video_transcode_args, get_working_encoder, probe_media_streams, get_cached_media_probe, get_sidecar_subtitles, invalidate_media_probe_cache, extract_subtitle_to_vtt, get_subtitle_cache_dir, shift_vtt_timestamps, get_keyframe_before_time, sanitize_vtt_content, get_video_transcode_pipeline, parse_burn_sub_index, get_smart_audio_pipeline, extract_video_frame
+from .subtitles import (
+    get_opensubtitles_api_key,
+    get_fetched_subtitle_dir,
+    list_fetched_subtitles,
+    search_opensubtitles,
+    fetch_opensubtitles_file,
+)
+
+
+def merge_external_subtitles(probe: dict, file_path: str, media_type: str, item_id: int) -> list[dict]:
+    """Combines probed subtitle tracks with fresh sidecar and config-fetched subtitles."""
+    tracks = list((probe or {}).get("subtitle_tracks", []))
+    seen_ids = {t.get("id") for t in tracks}
+    if file_path:
+        for sc in get_sidecar_subtitles(file_path):
+            if sc.get("id") not in seen_ids:
+                tracks.append(sc)
+                seen_ids.add(sc.get("id"))
+    for fs in list_fetched_subtitles(media_type, item_id):
+        if fs.get("id") not in seen_ids:
+            tracks.append(fs)
+            seen_ids.add(fs.get("id"))
+    return tracks
 from .hls_manager import hls_manager
 from .trickplay import (
     queue_trickplay_generation,
@@ -6811,7 +6834,7 @@ def api_playback_info(
         resume_seconds = max(0.0, resume_seconds - rewind_buffer)
 
     # Subtitles
-    subtitle_tracks = probe.get("subtitle_tracks", [])
+    subtitle_tracks = merge_external_subtitles(probe, item.file_path, media_type, item.id)
     formatted_subs = []
     for s in subtitle_tracks:
         formatted_subs.append({
@@ -7110,7 +7133,7 @@ async def play_video(
         
     probe = probe_media_streams(item.file_path)
     audio_tracks = probe.get("audio_tracks", [])
-    subtitle_tracks = probe.get("subtitle_tracks", [])
+    subtitle_tracks = merge_external_subtitles(probe, item.file_path, media_type, item.id)
 
     subtitle_url = None
     base_path = os.path.splitext(item.file_path)[0]
@@ -7227,6 +7250,8 @@ async def play_video(
         "audio_tracks": audio_tracks, "is_restart": bool(restart),
         "default_audio_lang": (current_profile.default_audio_lang if (current_profile and current_profile.default_audio_lang) else (current_user.default_audio_lang if current_user else "eng")) or "eng",
         "default_subtitle_lang": (current_profile.default_subtitle_lang if (current_profile and current_profile.default_subtitle_lang) else (current_user.default_subtitle_lang if current_user else "eng")) or "eng",
+        "available_languages": AVAILABLE_LANGUAGES,
+        "opensubtitles_configured": bool(get_opensubtitles_api_key(session)),
         "auto_pause_episodes": (current_profile.auto_pause_episodes if (current_profile and getattr(current_profile, 'auto_pause_episodes', None) is not None) else (getattr(current_user, 'auto_pause_episodes', 3) if current_user else 3))
     })
 
@@ -7295,20 +7320,21 @@ def get_subtitle(
 
     # If no track_id and no ext, fallback to first text track
     if not track_id:
-        sub_tracks = probe.get("subtitle_tracks", [])
+        sub_tracks = merge_external_subtitles(probe, file_path, media_type, item_id)
         first_text = next((s for s in sub_tracks if s.get("is_text")), None)
         if first_text:
             track_id = first_text["id"]
         else:
             return Response(status_code=404)
 
-    # 1. External sidecar subtitle
-    if track_id.startswith("sidecar:"):
-        filename = track_id.split("sidecar:", 1)[1]
+    # 1. External sidecar or fetched on-demand subtitle
+    if track_id.startswith("sidecar:") or track_id.startswith("fetched:"):
+        is_fetched = track_id.startswith("fetched:")
+        filename = track_id.split(":", 1)[1]
         # Prevent directory traversal
         if os.path.basename(filename) != filename:
             return Response(status_code=400)
-        dir_name = os.path.dirname(file_path)
+        dir_name = get_fetched_subtitle_dir(media_type, item_id) if is_fetched else os.path.dirname(file_path)
         sub_file = os.path.join(dir_name, filename)
         if not os.path.exists(sub_file):
             return Response(status_code=404)
@@ -9345,6 +9371,7 @@ async def view_settings(
 
         adb_key_config = session.exec(select(SystemConfig).where(SystemConfig.key == "theaudiodb_api_key")).first()
         theaudiodb_key = adb_key_config.value if adb_key_config else os.getenv("THEAUDIODB_API_KEY", "")
+        opensubtitles_key = get_opensubtitles_api_key(session)
         
         hw_accel_config = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
         hw_accel_profile = hw_accel_config.value if hw_accel_config else "auto"
@@ -9370,6 +9397,7 @@ async def view_settings(
     else:
         mounted_volumes = {"movie": False, "tv": False, "photo": False, "music": False}
         theaudiodb_key = ""
+        opensubtitles_key = ""
         hdr_tonemapping = "hable"
         auto_intro_detection = "true"
         loom_settings = {}
@@ -9386,7 +9414,7 @@ async def view_settings(
         "user": current_user, "current_profile": current_profile,
         "is_admin": is_admin, "can_change_password": can_change_password,
         "invites": invites, "users": users, "volume_paths": volume_paths, "mounted_volumes": mounted_volumes,
-        "host_url": host_url, "remote_url": remote_url, "tmdb_key": tmdb_key, "theaudiodb_key": theaudiodb_key,
+        "host_url": host_url, "remote_url": remote_url, "tmdb_key": tmdb_key, "theaudiodb_key": theaudiodb_key, "opensubtitles_key": opensubtitles_key,
         "hw_accel_profile": hw_accel_profile, "hdr_tonemapping": hdr_tonemapping, "auto_intro_detection": auto_intro_detection, "rewind_seconds": rewind_seconds, "default_audio_lang": default_audio_lang, "default_subtitle_lang": default_subtitle_lang, "available_languages": AVAILABLE_LANGUAGES,
         "auto_pause_episodes": auto_pause_episodes,
         "loom_settings": loom_settings, "loom_peers": loom_peers,
@@ -9557,6 +9585,121 @@ async def save_theaudiodb_key(
     session.commit()
     scanner_debouncer.trigger_scan(delay=0.5)
     return RedirectResponse(url="/settings", status_code=303)
+
+
+@app.post("/settings/opensubtitles")
+async def save_opensubtitles_key(
+    opensubtitles_key: str = Form(""),
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not is_actual_admin(current_user, current_profile):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    config = session.exec(select(SystemConfig).where(SystemConfig.key == "opensubtitles_api_key")).first()
+    if not config:
+        config = SystemConfig(key="opensubtitles_api_key", value=opensubtitles_key.strip())
+        session.add(config)
+    else:
+        config.value = opensubtitles_key.strip()
+        session.add(config)
+    session.commit()
+    return RedirectResponse(url="/settings", status_code=303)
+
+
+@app.get("/api/subtitles/search/{media_type}/{item_id}")
+async def api_search_subtitles(
+    media_type: str,
+    item_id: int,
+    lang: str = "eng",
+    q: str = "",
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if media_type not in ("movie", "tv"):
+        raise HTTPException(status_code=400, detail="Invalid media type")
+    if media_type == "movie" and not current_user.movies_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if media_type == "tv" and not current_user.tv_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    item = session.get(Movie if media_type == "movie" else TVShow, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    api_key = get_opensubtitles_api_key(session)
+    if not api_key:
+        return JSONResponse(status_code=400, content={"error": "OpenSubtitles API key not configured in Settings."})
+
+    try:
+        results = await search_opensubtitles(
+            api_key,
+            title=item.title,
+            media_type=media_type,
+            file_path=item.file_path or "",
+            year=getattr(item, "year", None),
+            tmdb_id=getattr(item, "tmdb_id", None),
+            season=getattr(item, "season", None),
+            episode=getattr(item, "episode", None),
+            language=lang,
+            custom_query=q,
+        )
+        return {"results": results}
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+@app.post("/api/subtitles/fetch/{media_type}/{item_id}")
+async def api_fetch_subtitle(
+    media_type: str,
+    item_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if media_type not in ("movie", "tv"):
+        raise HTTPException(status_code=400, detail="Invalid media type")
+    if media_type == "movie" and not current_user.movies_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if media_type == "tv" and not current_user.tv_access:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    item = session.get(Movie if media_type == "movie" else TVShow, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    api_key = get_opensubtitles_api_key(session)
+    if not api_key:
+        return JSONResponse(status_code=400, content={"error": "OpenSubtitles API key not configured in Settings."})
+
+    body = await request.json()
+    file_id = int((body.get("file_id") if isinstance(body, dict) else 0) or 0)
+    if not file_id:
+        return JSONResponse(status_code=400, content={"error": "Missing file_id."})
+
+    try:
+        track = await fetch_opensubtitles_file(
+            api_key,
+            file_id=file_id,
+            media_type=media_type,
+            item_id=item_id,
+            language=str(body.get("lang") or "eng"),
+            release_name=str(body.get("release") or ""),
+            hearing_impaired=bool(body.get("hearing_impaired")),
+            video_file_path=item.file_path or "",
+        )
+        invalidate_media_probe_cache(item.file_path or "")
+        return {"status": "ok", "track": track}
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
 
 class FixMatchRequest(BaseModel):
     media_type: str
@@ -10240,8 +10383,26 @@ async def delete_user(
         return JSONResponse({"status": "ok", "deleted_user_id": user_id, **_get_users_and_invites_context(request, session)})
     return RedirectResponse(url="/settings", status_code=303)
 
+_ping_rate_lock = threading.Lock()
+_ping_timestamps_by_ip: dict[str, list[float]] = {}
+PING_MAX_PER_MINUTE = 30
+
+
 @app.get("/ping")
-async def ping(response: Response):
+async def ping(request: Request, response: Response):
+    client_ip = (request.client.host if request.client else "") or "unknown"
+    now = time.monotonic()
+    with _ping_rate_lock:
+        recent = [ts for ts in _ping_timestamps_by_ip.get(client_ip, []) if now - ts < 60.0]
+        if len(recent) >= PING_MAX_PER_MINUTE:
+            retry_after = max(1, int(60.0 - (now - recent[0])) + 1)
+            raise HTTPException(
+                status_code=429,
+                detail="Ping rate limit exceeded.",
+                headers={"Retry-After": str(retry_after)},
+            )
+        recent.append(now)
+        _ping_timestamps_by_ip[client_ip] = recent
     response.headers["Access-Control-Allow-Origin"] = "*"
     return {"status": "ok", "app": "heirloom", "server_time": time.time()}
 
@@ -10921,6 +11082,8 @@ async def get_eligible_users(
 # ----------------- THE LOOM (FEDERATED LIBRARY SYNC) -----------------
 
 _loom_peer_online_cache: dict[int, bool] = {}
+_loom_peer_probe_ts: dict[int, float] = {}
+LOOM_PEER_PROBE_COOLDOWN_SECONDS = 25.0
 
 
 async def _probe_loom_peer_online(base_url: str, timeout: float = 10.0) -> bool:
@@ -11710,10 +11873,17 @@ async def api_loom_peers_connectivity(
     if not peers:
         return {"connectivity": {}}
 
+    now_mono = time.monotonic()
+
     async def _check(p: LoomPeer) -> tuple[int, bool]:
+        if p.id is not None:
+            last_ts = _loom_peer_probe_ts.get(p.id, 0.0)
+            if (now_mono - last_ts) < LOOM_PEER_PROBE_COOLDOWN_SECONDS and p.id in _loom_peer_online_cache:
+                return p.id, _loom_peer_online_cache[p.id]
         ok = await _probe_loom_peer_online(p.base_url, timeout=10.0)
         if p.id is not None:
             _loom_peer_online_cache[p.id] = ok
+            _loom_peer_probe_ts[p.id] = time.monotonic()
         return p.id, ok
 
     results = await asyncio.gather(*(_check(p) for p in peers if p.id is not None))

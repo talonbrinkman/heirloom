@@ -576,6 +576,11 @@ def get_cached_media_probe(file_path: str) -> Optional[dict]:
         pass
     return None
 
+def invalidate_media_probe_cache(file_path: str) -> None:
+    """Removes a cached media probe entry so newly added sidecar subtitles are picked up."""
+    if file_path:
+        _media_probe_cache.pop(file_path, None)
+
 def probe_media_streams(file_path: str) -> dict:
     """
     Probes video, audio, and subtitle streams of a media file using ffprobe.

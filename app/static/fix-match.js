@@ -246,8 +246,13 @@ async function applyFixMatch(tmdbId, btnEl) {
         }
 
         setTimeout(() => {
+            closeFixMatchModal();
             if (mediaType === 'tv' && window.location.pathname.startsWith('/series/')) {
-                window.location.href = `/series/${encodeURIComponent(data.title)}`;
+                const target = `/series/${encodeURIComponent(data.title)}`;
+                if (window.HeirloomPjax) window.HeirloomPjax.navigate(target);
+                else window.location.href = target;
+            } else if (window.HeirloomPjax) {
+                window.HeirloomPjax.navigate(window.location.href, { replace: true, preserveScroll: true });
             } else {
                 window.location.reload();
             }
