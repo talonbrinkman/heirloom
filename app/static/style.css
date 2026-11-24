@@ -1953,7 +1953,8 @@ body.has-backdrop {
     pointer-events: none;
 }
 
-.progress-hover-tooltip {
+.progress-hover-tooltip,
+.progress-container > .progress-hover-time {
     position: absolute;
     bottom: 14px;
     transform: translateX(-50%);
