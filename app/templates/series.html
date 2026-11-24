@@ -211,6 +211,11 @@
                                                 {% else %}
                                                 <img src="/thumbnail/tv/{{ ep.id }}" class="poster episode-thumbnail" loading="lazy" alt="Episode thumbnail">
                                                 {% endif %}
+                                                {% if ep.progress and ep.progress > 0 %}
+                                                <div class="progress-bg">
+                                                    <div class="progress-fill" style="width: {{ ep.progress }}%;"></div>
+                                                </div>
+                                                {% endif %}
                                             </a>
                                             <a href="/play/tv/{{ ep.id }}" class="icon-btn hover-play" onclick="event.stopPropagation()">
                                                 <i data-lucide="play" fill="currentColor"></i>
@@ -230,6 +235,11 @@
                                                 <form action="/history/mark_watched/tv/{{ ep.id }}?scope=episode" method="post">
                                                     <button type="submit">Mark as Watched</button>
                                                 </form>
+                                                {% if ep.has_progress or (ep.progress and ep.progress > 0) %}
+                                                <form action="/history/remove/tv/{{ ep.id }}" method="post" class="remove-progress-form">
+                                                    <button type="submit">Remove Watch Progress</button>
+                                                </form>
+                                                {% endif %}
                                                 {% endif %}
                                                 {% if user.watch_together_access %}
                                                 <button type="button" onclick="openWatchTogether('tv', {{ ep.id }})">Watch Together</button>
@@ -314,6 +324,19 @@
                                         <form action="/history/mark_watched/tv/{{ t.id }}?scope=series" method="post">
                                             <button type="submit">Mark Series as Watched</button>
                                         </form>
+                                        {% if t.title.strip().lower() in in_progress_tv_titles %}
+                                        <form action="/history/remove/tv/{{ t.id }}?scope=series" method="post" class="remove-progress-form">
+                                            <button type="submit">Remove Watch Progress</button>
+                                        </form>
+                                        {% endif %}
+                                        {% endif %}
+                                        {% if user.watch_together_access %}
+                                        <button type="button" onclick="openWatchTogether('tv', {{ t.id }})">Watch Together</button>
+                                        {% endif %}
+                                        {% if user.downloads_access %}
+                                        <form action="/download/tv/{{ t.id }}" method="get">
+                                            <button type="submit">Download</button>
+                                        </form>
                                         {% endif %}
                                         {% if t.id in user_watchlist_tv %}
                                         <form action="/watchlist/remove_by_item/tv/{{ t.id }}" method="post">
@@ -323,9 +346,6 @@
                                         <form action="/watchlist/add/tv/{{ t.id }}" method="post">
                                             <button type="submit">Add to Watchlist</button>
                                         </form>
-                                        {% endif %}
-                                        {% if user.watch_together_access %}
-                                        <button type="button" onclick="openWatchTogether('tv', {{ t.id }})">Watch Together</button>
                                         {% endif %}
                                         {% if user.is_admin %}
                                         <button type="button" class="refresh-meta-btn" data-media-type="tv" data-item-id="{{ t.id }}" onclick="triggerRefreshMetadata(this)">Refresh Metadata</button>

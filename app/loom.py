@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import shutil
@@ -10,6 +11,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
@@ -32,6 +34,11 @@ DEFAULT_LOOM_ALLOWED_FILETYPES = (
     ".jpg, .jpeg, .png, .webp"
 )
 
+LOOM_MAX_GLOBAL_WORKERS_DEFAULT = 3
+LOOM_MAX_GLOBAL_WORKERS_MAX = 12
+LOOM_SWARM_CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB per verified piece
+LOOM_MIN_SWARM_SIZE = 2 * LOOM_SWARM_CHUNK_SIZE  # 8 MiB threshold for multi-peer swarming
+
 LOOM_DEFAULTS: dict[str, str] = {
     "loom_enabled": "false",
     "loom_allow_relay": "false",
@@ -43,6 +50,7 @@ LOOM_DEFAULTS: dict[str, str] = {
     "loom_max_search_hops": "1",
     "loom_max_sending_hops": "1",
     "loom_max_concurrent_transfers": "2",
+    "loom_max_global_workers": str(LOOM_MAX_GLOBAL_WORKERS_DEFAULT),
     "loom_max_requests_per_minute": "3",
     "loom_max_file_size_gb": "0",
     "loom_allowed_filetypes": DEFAULT_LOOM_ALLOWED_FILETYPES,
@@ -71,6 +79,7 @@ QUALITY_HEIGHT_MAP: dict[str, int] = {
 
 
 _file_sha256_cache: dict[tuple[str, int, int], str] = {}
+_file_pieces_cache: dict[tuple[str, int, int, int], dict[str, Any]] = {}
 _file_sha256_lock = threading.Lock()
 
 
@@ -104,6 +113,72 @@ def compute_file_sha256(file_path: str, use_cache: bool = True) -> str:
                 _file_sha256_cache.pop(next(iter(_file_sha256_cache)), None)
             _file_sha256_cache[cache_key] = digest
     return digest
+
+
+def compute_file_piece_hashes(
+    file_path: str,
+    chunk_size: int = LOOM_SWARM_CHUNK_SIZE,
+    use_cache: bool = True,
+) -> dict[str, Any]:
+    """Compute per-piece and whole-file SHA-256 hashes in a single sequential pass."""
+    clamped_chunk = max(64 * 1024, min(16 * 1024 * 1024, int(chunk_size or LOOM_SWARM_CHUNK_SIZE)))
+    abs_path = os.path.abspath(file_path)
+    st = os.stat(abs_path)
+    file_size = int(st.st_size)
+    mtime_ns = int(st.st_mtime_ns)
+    cache_key = (abs_path, file_size, mtime_ns, clamped_chunk)
+
+    if use_cache:
+        with _file_sha256_lock:
+            cached = _file_pieces_cache.get(cache_key)
+            if cached:
+                return {
+                    "file_size": cached["file_size"],
+                    "chunk_size": cached["chunk_size"],
+                    "sha256": cached["sha256"],
+                    "pieces": list(cached["pieces"]),
+                }
+
+    whole_hash = hashlib.sha256()
+    pieces: list[str] = []
+    with open(abs_path, "rb") as fp:
+        remaining_total = file_size
+        while remaining_total > 0:
+            chunk_remaining = min(clamped_chunk, remaining_total)
+            piece_hash = hashlib.sha256()
+            while chunk_remaining > 0:
+                sub = fp.read(min(1024 * 1024, chunk_remaining))
+                if not sub:
+                    break
+                whole_hash.update(sub)
+                piece_hash.update(sub)
+                chunk_remaining -= len(sub)
+                remaining_total -= len(sub)
+            pieces.append(piece_hash.hexdigest())
+            if chunk_remaining > 0:
+                break
+
+    whole_digest = whole_hash.hexdigest()
+    result = {
+        "file_size": file_size,
+        "chunk_size": clamped_chunk,
+        "sha256": whole_digest,
+        "pieces": pieces,
+    }
+    if use_cache:
+        with _file_sha256_lock:
+            if len(_file_sha256_cache) >= 512:
+                _file_sha256_cache.pop(next(iter(_file_sha256_cache)), None)
+            _file_sha256_cache[(abs_path, file_size, mtime_ns)] = whole_digest
+            if len(_file_pieces_cache) >= 128:
+                _file_pieces_cache.pop(next(iter(_file_pieces_cache)), None)
+            _file_pieces_cache[cache_key] = {
+                "file_size": file_size,
+                "chunk_size": clamped_chunk,
+                "sha256": whole_digest,
+                "pieces": list(pieces),
+            }
+    return result
 
 
 def format_loom_item_label(
@@ -567,6 +642,13 @@ def get_loom_settings(session: Session) -> dict[str, Any]:
         "max_search_hops": max_search_hops,
         "max_sending_hops": max_sending_hops,
         "max_concurrent_transfers": max(1, min(20, int(float(raw["loom_max_concurrent_transfers"] or 2)))),
+        "max_global_workers": max(
+            1,
+            min(
+                LOOM_MAX_GLOBAL_WORKERS_MAX,
+                int(float(raw["loom_max_global_workers"] or LOOM_MAX_GLOBAL_WORKERS_DEFAULT)),
+            ),
+        ),
         "max_requests_per_minute": max(1, min(120, int(float(raw["loom_max_requests_per_minute"] or 3)))),
         "max_file_size_gb": max(0.0, round(float(raw["loom_max_file_size_gb"] or 0), 3)),
         "allowed_filetypes": ", ".join(allowed_list),
@@ -614,6 +696,18 @@ def save_loom_settings(session: Session, data: dict[str, Any]) -> dict[str, Any]
         "max_search_hops": ("loom_max_search_hops", lambda v: str(max(1, min(10, int(float(v or 1)))))),
         "max_sending_hops": ("loom_max_sending_hops", lambda v: str(max(1, min(10, int(float(v or 1)))))),
         "max_concurrent_transfers": ("loom_max_concurrent_transfers", lambda v: str(max(1, min(20, int(float(v or 2)))))),
+        "max_global_workers": (
+            "loom_max_global_workers",
+            lambda v: str(
+                max(
+                    1,
+                    min(
+                        LOOM_MAX_GLOBAL_WORKERS_MAX,
+                        int(float(LOOM_MAX_GLOBAL_WORKERS_DEFAULT if (v is None or str(v).strip() == "") else v)),
+                    ),
+                )
+            ),
+        ),
         "max_requests_per_minute": ("loom_max_requests_per_minute", lambda v: str(max(1, min(120, int(float(v or 3)))))),
         "max_file_size_gb": ("loom_max_file_size_gb", lambda v: str(max(0.0, round(float(v or 0), 3)))),
         "allowed_filetypes": ("loom_allowed_filetypes", _encode_allowed_filetypes),
@@ -1567,11 +1661,24 @@ def deduplicate_loom_search_results(
         for group in grouped.values():
             group_sorted = sorted(group, key=_rank_loom_source)
             best = dict(group_sorted[0])
-            unique_peers = {
-                (g.get("peer_id"), g.get("relay_token") or g.get("id"))
-                for g in group_sorted
-            }
-            best["sources_count"] = max(1, len(unique_peers))
+            sources: list[dict[str, Any]] = []
+            seen_keys: set[tuple] = set()
+            for g in group_sorted:
+                sk = (g.get("peer_id"), g.get("relay_token") or g.get("id"))
+                if sk in seen_keys:
+                    continue
+                seen_keys.add(sk)
+                raw_sha = (str(g.get("sha256") or "")).strip().lower()
+                sources.append({
+                    "peer_id": g.get("peer_id"),
+                    "id": g.get("id"),
+                    "relay_token": g.get("relay_token"),
+                    "hops": int(g.get("hops", 0) or 0),
+                    "file_size": int(g.get("file_size", 0) or 0),
+                    "sha256": raw_sha if is_valid_sha256(raw_sha) else None,
+                })
+            best["sources_count"] = max(1, len(sources))
+            best["sources"] = sources
             merged.append(best)
         return merged
 
@@ -1871,25 +1978,37 @@ def _prune_empty_parents(start_dir: str, stop_root: Optional[str] = None) -> Non
             break
 
 
+def _job_part_meta_path(target_path: str) -> str:
+    if target_path.endswith(".part.meta.json"):
+        return target_path
+    part_path = target_path if target_path.endswith(".part") else f"{target_path}.part"
+    return f"{part_path}.meta.json"
+
+
 def cleanup_job_part_file(target_path: Optional[str], sync_dir: Optional[str] = None) -> bool:
-    """Delete a job's .part file if present and prune any empty parent folders inside sync_dir."""
+    """Delete a job's .part file (and swarm .part.meta.json sidecar) if present and prune empty parent folders."""
     if not target_path:
         return False
-    part_path = target_path if target_path.endswith(".part") else f"{target_path}.part"
+    meta_path = _job_part_meta_path(target_path)
+    part_path = target_path[:-len(".meta.json")] if target_path.endswith(".part.meta.json") else (
+        target_path if target_path.endswith(".part") else f"{target_path}.part"
+    )
     removed = False
-    if os.path.exists(part_path):
-        try:
-            os.remove(part_path)
-            removed = True
-        except OSError:
-            return False
+    for path in (meta_path, part_path):
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+                removed = True
+            except OSError:
+                if path == part_path:
+                    return False
     if removed and sync_dir:
         _prune_empty_parents(os.path.dirname(part_path), stop_root=sync_dir)
     return removed
 
 
 def cleanup_orphaned_loom_part_files(session: Session) -> int:
-    """Delete any .part files under sync_dir that do not belong to an active/paused LoomTransferJob."""
+    """Delete any .part (and .part.meta.json) files under sync_dir not belonging to an active/paused job."""
     settings = get_loom_settings(session)
     sync_dir = settings.get("sync_dir") or "/media/loom"
     if not sync_dir or not os.path.isdir(sync_dir):
@@ -1907,18 +2026,25 @@ def cleanup_orphaned_loom_part_files(session: Session) -> int:
     removed_count = 0
     for root, _, files in os.walk(sync_dir):
         for fname in files:
-            if not fname.endswith(".part"):
-                continue
             full_path = os.path.join(root, fname)
-            norm_path = os.path.normcase(os.path.normpath(os.path.abspath(full_path)))
-            if norm_path not in active_parts:
-                if cleanup_job_part_file(full_path, sync_dir=sync_dir):
-                    removed_count += 1
+            if fname.endswith(".part"):
+                norm_path = os.path.normcase(os.path.normpath(os.path.abspath(full_path)))
+                if norm_path not in active_parts:
+                    if cleanup_job_part_file(full_path, sync_dir=sync_dir):
+                        removed_count += 1
+            elif fname.endswith(".part.meta.json"):
+                part_pair = full_path[:-len(".meta.json")]
+                norm_part = os.path.normcase(os.path.normpath(os.path.abspath(part_pair)))
+                if norm_part not in active_parts:
+                    try:
+                        os.remove(full_path)
+                    except OSError:
+                        pass
     return removed_count
 
 
 class LoomSyncManager:
-    """Background manager that executes queued LoomTransferJobs with download throttling and guardrail checks."""
+    """Background manager that executes queued LoomTransferJobs with multi-peer swarming and guardrails."""
 
     def __init__(self):
         self._stop_event = threading.Event()
@@ -1930,6 +2056,14 @@ class LoomSyncManager:
         self._job_speed_bps: dict[int, float] = {}
         self._job_retry_after: dict[int, float] = {}
         self._job_retry_counts: dict[int, int] = {}
+        self._pool_lock = threading.Lock()
+        self._active_job_threads: dict[int, threading.Thread] = {}
+        self._job_active_workers: dict[int, int] = {}
+        self._total_active_workers: int = 0
+
+    def get_job_active_workers(self, job_id: int) -> int:
+        with self._pool_lock:
+            return int(self._job_active_workers.get(job_id, 0))
 
     def _schedule_job_retry(self, job_id: int, reason: str, written: Optional[int] = None) -> None:
         """Re-queue an interrupted job with quick first probe (1.5s) then backoff (10s -> 20s -> 40s -> 60s) while keeping .part."""
@@ -2014,6 +2148,11 @@ class LoomSyncManager:
         self._wake_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3.0)
+        with self._pool_lock:
+            threads = list(self._active_job_threads.values())
+        for t in threads:
+            if t.is_alive():
+                t.join(timeout=3.0)
 
     def wake(self):
         self._wake_event.set()
@@ -2050,22 +2189,151 @@ class LoomSyncManager:
                 last_cleanup = now_mono
 
             try:
-                did_work = self._process_next_job()
+                did_work = self._dispatch_jobs()
             except Exception as e:
                 print(f"[Loom] Sync worker error: {e}")
                 did_work = False
+            with self._pool_lock:
+                has_active = bool(self._active_job_threads)
             if not did_work:
-                self._wake_event.wait(timeout=5.0)
+                self._wake_event.wait(timeout=1.0 if has_active else 5.0)
 
-    def _process_next_job(self) -> bool:
+    def _build_source_descriptor(
+        self,
+        session: Session,
+        peer: LoomPeer,
+        media_type: str,
+        remote_item_id: int,
+        relay_token: Optional[str] = None,
+        file_size: int = 0,
+        sha256: Optional[str] = None,
+    ) -> dict[str, Any]:
+        local_node_id, _ = get_peer_local_identity(session, peer)
+        remote_path = (
+            f"/api/loom/v1/relay/{relay_token}"
+            if relay_token
+            else f"/api/loom/v1/download/{media_type}/{remote_item_id}"
+        )
+        pieces_path = (
+            f"/api/loom/v1/relay_pieces/{relay_token}"
+            if relay_token
+            else f"/api/loom/v1/pieces/{media_type}/{remote_item_id}"
+        )
+        clean_sha = (sha256 or "").strip().lower()
+        return {
+            "peer_id": peer.id,
+            "peer_name": peer.name or "Anonymous",
+            "peer_url": peer.base_url.rstrip("/"),
+            "peer_secret": peer.shared_secret,
+            "no_limits": bool(peer.no_limits),
+            "local_node_id": local_node_id,
+            "remote_item_id": int(remote_item_id),
+            "relay_token": relay_token,
+            "remote_path": remote_path,
+            "pieces_path": pieces_path,
+            "file_size": int(file_size or 0),
+            "sha256": clean_sha if is_valid_sha256(clean_sha) else None,
+        }
+
+    def _resolve_job_sources(self, session: Session, job: LoomTransferJob) -> list[dict[str, Any]]:
+        """Build ordered list of approved incoming source descriptors for a LoomTransferJob."""
+        raw_entries: list[dict[str, Any]] = [
+            {
+                "peer_id": job.peer_id,
+                "remote_item_id": job.remote_item_id,
+                "relay_token": job.relay_token,
+                "file_size": job.total_bytes or 0,
+                "sha256": job.expected_sha256,
+            }
+        ]
+        if job.sources_json:
+            try:
+                parsed = json.loads(job.sources_json)
+                if isinstance(parsed, list):
+                    for s in parsed:
+                        if isinstance(s, dict) and s.get("peer_id") is not None:
+                            raw_entries.append({
+                                "peer_id": int(s["peer_id"]),
+                                "remote_item_id": int(s.get("remote_item_id") or s.get("id") or job.remote_item_id),
+                                "relay_token": s.get("relay_token") or None,
+                                "file_size": int(s.get("file_size") or 0),
+                                "sha256": s.get("sha256"),
+                            })
+            except Exception:
+                pass
+
+        seen: set[tuple] = set()
+        peer_cache: dict[int, Optional[LoomPeer]] = {}
+        resolved: list[dict[str, Any]] = []
+        for entry in raw_entries:
+            pid = int(entry["peer_id"])
+            rid = int(entry["remote_item_id"])
+            rtok = entry.get("relay_token")
+            key = (pid, rtok or rid)
+            if key in seen:
+                continue
+            seen.add(key)
+            if pid not in peer_cache:
+                peer_cache[pid] = session.get(LoomPeer, pid)
+            peer = peer_cache[pid]
+            if not peer or peer.status != "approved" or not peer.allow_incoming or not peer.base_url:
+                continue
+            resolved.append(
+                self._build_source_descriptor(
+                    session,
+                    peer,
+                    job.media_type,
+                    rid,
+                    relay_token=rtok,
+                    file_size=entry.get("file_size") or 0,
+                    sha256=entry.get("sha256"),
+                )
+            )
+        return resolved
+
+    @staticmethod
+    def _filter_swarm_sources(
+        sources: list[dict[str, Any]],
+        expected_sha256: Optional[str],
+        total_bytes: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Keep at most one source per distinct peer_id whose hash/size are compatible with the pinned target."""
+        pinned_sha = (expected_sha256 or "").strip().lower()
+        pinned_valid = pinned_sha if is_valid_sha256(pinned_sha) else None
+        seen_peers: set[int] = set()
+        compatible: list[dict[str, Any]] = []
+        for src in sources:
+            pid = src.get("peer_id")
+            if pid is None or pid in seen_peers:
+                continue
+            src_sha = src.get("sha256")
+            if pinned_valid and src_sha and src_sha != pinned_valid:
+                continue
+            src_size = int(src.get("file_size") or 0)
+            if total_bytes > 0 and src_size > 0 and src_size != total_bytes:
+                continue
+            seen_peers.add(pid)
+            compatible.append(src)
+        return compatible
+
+    def _reap_finished_threads(self) -> None:
+        with self._pool_lock:
+            done_ids = [jid for jid, t in self._active_job_threads.items() if not t.is_alive()]
+            for jid in done_ids:
+                self._active_job_threads.pop(jid, None)
+
+    def _dispatch_jobs(self) -> bool:
         if httpx is None:
             return False
 
+        self._reap_finished_threads()
+        dispatched = False
         with Session(engine) as session:
             settings = get_loom_settings(session)
             if not settings["enabled"]:
                 return False
 
+            max_global_workers = settings["max_global_workers"]
             candidates = session.exec(
                 select(LoomTransferJob)
                 .where(LoomTransferJob.status.in_(["queued", "paused_stream", "paused_cap"]))
@@ -2074,50 +2342,599 @@ class LoomSyncManager:
             if not candidates:
                 return False
 
-            chosen_job = None
-            chosen_peer = None
             for job in candidates:
-                if job.id is not None and self._is_job_in_backoff(job.id):
-                    continue
-                peer = session.get(LoomPeer, job.peer_id)
-                allowed, pause_status, reason = can_transfer_now(
-                    session,
-                    peer,
-                    "incoming",
-                    has_active_streams_fn=self._has_active_streams_fn,
-                )
-                if allowed:
-                    chosen_job = job
-                    chosen_peer = peer
+                with self._pool_lock:
+                    available = max_global_workers - self._total_active_workers
+                    already_active = job.id in self._active_job_threads
+                if available <= 0:
                     break
-                if job.status != pause_status or job.error_message != reason:
-                    job.status = pause_status or "paused_cap"
-                    job.error_message = reason
-                    job.updated_at = datetime.now(timezone.utc)
-                    session.add(job)
-            session.commit()
+                if job.id is None or already_active or self._is_job_in_backoff(job.id):
+                    continue
 
-            if not chosen_job or not chosen_peer:
+                resolved_sources = self._resolve_job_sources(session, job)
+                allowed_sources: list[dict[str, Any]] = []
+                last_pause_status = "paused_cap"
+                last_pause_reason = "Peer unavailable for transfer."
+                for src in resolved_sources:
+                    peer = session.get(LoomPeer, src["peer_id"])
+                    allowed, pause_status, reason = can_transfer_now(
+                        session,
+                        peer,
+                        "incoming",
+                        has_active_streams_fn=self._has_active_streams_fn,
+                    )
+                    if allowed:
+                        allowed_sources.append(src)
+                    else:
+                        last_pause_status = pause_status or "paused_cap"
+                        last_pause_reason = reason or last_pause_reason
+
+                if not allowed_sources:
+                    if job.status != last_pause_status or job.error_message != last_pause_reason:
+                        job.status = last_pause_status
+                        job.error_message = last_pause_reason
+                        job.updated_at = datetime.now(timezone.utc)
+                        session.add(job)
+                    continue
+
+                swarm_sources = self._filter_swarm_sources(
+                    allowed_sources,
+                    job.expected_sha256,
+                    job.total_bytes or 0,
+                )
+                use_swarm = (
+                    len(swarm_sources) >= 2
+                    and available >= 2
+                    and (not job.total_bytes or job.total_bytes >= LOOM_MIN_SWARM_SIZE)
+                )
+                allocated = min(len(swarm_sources), available) if use_swarm else 1
+
+                job_id = job.id
+                target_path = job.target_path
+                primary = allowed_sources[0]
+                job.status = "downloading"
+                job.error_message = None
+                job.updated_at = datetime.now(timezone.utc)
+                session.add(job)
+                session.commit()
+
+                with self._pool_lock:
+                    self._total_active_workers += allocated
+                    self._job_active_workers[job_id] = allocated
+                    worker_thread = threading.Thread(
+                        target=self._run_job_thread,
+                        args=(job_id, allocated, use_swarm, swarm_sources if use_swarm else [primary], target_path),
+                        daemon=True,
+                        name=f"loom-job-{job_id}",
+                    )
+                    self._active_job_threads[job_id] = worker_thread
+                worker_thread.start()
+                dispatched = True
+
+            session.commit()
+        return dispatched
+
+    def _run_job_thread(
+        self,
+        job_id: int,
+        allocated_workers: int,
+        use_swarm: bool,
+        sources: list[dict[str, Any]],
+        target_path: str,
+    ) -> None:
+        try:
+            if use_swarm and len(sources) >= 2:
+                self._download_job_swarm(job_id, sources, target_path, allocated_workers)
+            else:
+                primary = sources[0]
+                self._download_job(
+                    job_id,
+                    primary["peer_id"],
+                    primary["peer_url"],
+                    primary["peer_secret"],
+                    primary["local_node_id"],
+                    primary["remote_path"],
+                    target_path,
+                )
+        except Exception as e:
+            print(f"[Loom] Job #{job_id} worker error: {e}")
+        finally:
+            with self._pool_lock:
+                self._total_active_workers = max(0, self._total_active_workers - allocated_workers)
+                self._job_active_workers.pop(job_id, None)
+                self._active_job_threads.pop(job_id, None)
+            self.wake()
+
+    def _process_next_job(self) -> bool:
+        return self._dispatch_jobs()
+
+    def _fetch_piece_manifest(
+        self,
+        job_id: int,
+        sources: list[dict[str, Any]],
+        chunk_size: int = LOOM_SWARM_CHUNK_SIZE,
+    ) -> tuple[Optional[dict[str, Any]], bool]:
+        """Try fetching a piece-hash manifest from candidate sources. Returns (manifest, sender_canceled)."""
+        for idx, src in enumerate(sources):
+            peer_url = src["peer_url"]
+            pieces_path = src["pieces_path"]
+            headers = sign_loom_headers(src["local_node_id"], src["peer_secret"], "GET", pieces_path)
+            headers["X-Loom-Job-Id"] = f"{src['local_node_id']}:{job_id}"
+            try:
+                client_kwargs = get_httpx_client_kwargs(peer_url, timeout=httpx.Timeout(30.0, read=60.0))
+                with httpx.Client(**client_kwargs) as client:
+                    resp = client.get(
+                        f"{peer_url}{pieces_path}",
+                        params={"chunk_size": chunk_size},
+                        headers=headers,
+                    )
+                if resp.status_code == 410 and idx == 0:
+                    return None, True
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                file_size = int(data.get("file_size") or 0)
+                manifest_chunk = int(data.get("chunk_size") or 0)
+                manifest_sha = str(data.get("sha256") or "").strip().lower()
+                pieces = data.get("pieces")
+                if (
+                    file_size > 0
+                    and manifest_chunk > 0
+                    and is_valid_sha256(manifest_sha)
+                    and isinstance(pieces, list)
+                    and len(pieces) == math.ceil(file_size / manifest_chunk)
+                    and all(is_valid_sha256(str(p)) for p in pieces)
+                ):
+                    return {
+                        "file_size": file_size,
+                        "chunk_size": manifest_chunk,
+                        "sha256": manifest_sha,
+                        "pieces": [str(p).strip().lower() for p in pieces],
+                    }, False
+            except Exception:
+                continue
+        return None, False
+
+    def _download_job_swarm(
+        self,
+        job_id: int,
+        sources: list[dict[str, Any]],
+        target_path: str,
+        max_workers: int,
+    ) -> bool:
+        """Download a file concurrently across verified same-hash peers using per-chunk SHA-256 checks."""
+        if not sources:
+            return False
+        primary = sources[0]
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        part_path = f"{target_path}.part"
+        meta_path = _job_part_meta_path(target_path)
+
+        with Session(engine) as session:
+            dl_settings = get_loom_settings(session)
+            sync_dir_for_cleanup = dl_settings.get("sync_dir") or "/media/loom"
+            if not is_filetype_allowed(target_path, dl_settings["allowed_filetypes_list"]):
+                self._mark_job(job_id, "failed", "Filetype is not in Allowed Filetypes.")
+                cleanup_job_part_file(target_path, sync_dir=sync_dir_for_cleanup)
+                return True
+            job_row = session.get(LoomTransferJob, job_id)
+            pinned_sha = ((job_row.expected_sha256 or "") if job_row else "").strip().lower()
+            pinned_sha = pinned_sha if is_valid_sha256(pinned_sha) else None
+
+        manifest, sender_canceled = self._fetch_piece_manifest(job_id, sources, chunk_size=LOOM_SWARM_CHUNK_SIZE)
+        if sender_canceled:
+            self._clear_job_retry(job_id)
+            self._mark_job(job_id, "canceled_by_sender", "Canceled by Sender")
+            cleanup_job_part_file(target_path, sync_dir=sync_dir_for_cleanup)
+            return True
+
+        if manifest is None:
+            return self._download_job(
+                job_id,
+                primary["peer_id"],
+                primary["peer_url"],
+                primary["peer_secret"],
+                primary["local_node_id"],
+                primary["remote_path"],
+                target_path,
+            )
+
+        file_size = manifest["file_size"]
+        chunk_size = manifest["chunk_size"]
+        manifest_sha = manifest["sha256"]
+        pieces = manifest["pieces"]
+
+        if pinned_sha and manifest_sha != pinned_sha:
+            self._mark_job(job_id, "failed", "SHA-256 hash mismatch from peer")
+            with Session(engine) as session:
+                label = primary["remote_path"]
+                j = session.get(LoomTransferJob, job_id)
+                if j:
+                    label = format_loom_item_label(j.title, j.series_title, j.season, j.episode)
+                log_loom_peer_event(session, primary["peer_id"], f"Hash mismatch: {label}")
+            cleanup_job_part_file(target_path, sync_dir=sync_dir_for_cleanup)
+            return True
+
+        with Session(engine) as session:
+            j = session.get(LoomTransferJob, job_id)
+            if j:
+                j.expected_sha256 = manifest_sha
+                j.total_bytes = file_size
+                session.add(j)
+                session.commit()
+
+        active_sources = self._filter_swarm_sources(sources, manifest_sha, file_size)
+        if file_size < LOOM_MIN_SWARM_SIZE or len(pieces) < 2 or len(active_sources) < 2 or max_workers < 2:
+            fallback_src = active_sources[0] if active_sources else primary
+            return self._download_job(
+                job_id,
+                fallback_src["peer_id"],
+                fallback_src["peer_url"],
+                fallback_src["peer_secret"],
+                fallback_src["local_node_id"],
+                fallback_src["remote_path"],
+                target_path,
+            )
+
+        # Resume verified chunks from sidecar meta if .part exists and matches manifest geometry
+        done_chunks: set[int] = set()
+        if os.path.exists(part_path) and os.path.exists(meta_path):
+            try:
+                if os.path.getsize(part_path) == file_size:
+                    with open(meta_path, "r", encoding="utf-8") as mfp:
+                        meta = json.load(mfp)
+                    if (
+                        isinstance(meta, dict)
+                        and meta.get("sha256") == manifest_sha
+                        and int(meta.get("total_bytes") or 0) == file_size
+                        and int(meta.get("chunk_size") or 0) == chunk_size
+                    ):
+                        for idx in (meta.get("done_chunks") or []):
+                            if isinstance(idx, int) and 0 <= idx < len(pieces):
+                                done_chunks.add(idx)
+            except Exception:
+                done_chunks = set()
+
+        if not done_chunks:
+            with open(part_path, "wb") as fp:
+                fp.truncate(file_size)
+
+        def _chunk_len(idx: int) -> int:
+            start = idx * chunk_size
+            return min(chunk_size, file_size - start)
+
+        bytes_done_init = sum(_chunk_len(idx) for idx in done_chunks)
+        with Session(engine) as session:
+            j = session.get(LoomTransferJob, job_id)
+            if j:
+                j.bytes_transferred = bytes_done_init
+                session.add(j)
+                session.commit()
+
+        pending_chunks = deque(idx for idx in range(len(pieces)) if idx not in done_chunks)
+        state_lock = threading.Lock()
+        file_lock = threading.Lock()
+        db_lock = threading.Lock()
+        throttle_lock = threading.Lock()
+        throttle_state = {"window_start": time.monotonic(), "window_bytes": 0}
+        speed_window = {"last_time": time.monotonic(), "bytes": 0}
+
+        banned_peers: set[int] = set()
+        shared = {
+            "cancelled": False,
+            "stopped": False,
+            "paused": False,
+            "pause_status": "paused_cap",
+            "pause_reason": None,
+            "sender_canceled": False,
+            "bytes_written": bytes_done_init,
+            "participating_peers": set(),
+        }
+
+        def _write_meta_locked() -> None:
+            tmp_meta = f"{meta_path}.tmp"
+            with open(tmp_meta, "w", encoding="utf-8") as mfp:
+                json.dump(
+                    {
+                        "sha256": manifest_sha,
+                        "total_bytes": file_size,
+                        "chunk_size": chunk_size,
+                        "done_chunks": sorted(done_chunks),
+                    },
+                    mfp,
+                )
+            os.replace(tmp_meta, meta_path)
+
+        def _swarm_worker(src: dict[str, Any]) -> None:
+            pid = src["peer_id"]
+            peer_url = src["peer_url"]
+            peer_secret = src["peer_secret"]
+            local_node_id = src["local_node_id"]
+            remote_path = src["remote_path"]
+            consecutive_failures = 0
+
+            client_kwargs = get_httpx_client_kwargs(peer_url, timeout=httpx.Timeout(30.0, read=60.0))
+            with httpx.Client(**client_kwargs) as client:
+                while not self._stop_event.is_set():
+                    with state_lock:
+                        if shared["cancelled"] or shared["stopped"] or shared["paused"] or pid in banned_peers:
+                            break
+                        if not pending_chunks:
+                            break
+                        chunk_idx = pending_chunks.popleft()
+
+                    start = chunk_idx * chunk_size
+                    expected_len = _chunk_len(chunk_idx)
+                    end = start + expected_len - 1
+
+                    # Check cancellation and transfer guardrails before requesting chunk
+                    with db_lock:
+                        with Session(engine) as session:
+                            j = session.get(LoomTransferJob, job_id)
+                            p = session.get(LoomPeer, pid)
+                            dl_cfg = get_loom_settings(session)
+                            if not j or j.status == "cancelled":
+                                with state_lock:
+                                    shared["cancelled"] = True
+                                break
+                            allowed, p_status, p_reason = can_transfer_now(
+                                session, p, "incoming", has_active_streams_fn=self._has_active_streams_fn
+                            )
+                            if not allowed:
+                                with state_lock:
+                                    pending_chunks.appendleft(chunk_idx)
+                                    shared["paused"] = True
+                                    shared["pause_status"] = p_status or "paused_cap"
+                                    shared["pause_reason"] = p_reason
+                                break
+                            bw_kbps = 0 if (p and p.no_limits) else dl_cfg["download_bandwidth_limit_kbps"]
+
+                    req_headers = sign_loom_headers(local_node_id, peer_secret, "GET", remote_path)
+                    req_headers["X-Loom-Job-Id"] = f"{local_node_id}:{job_id}"
+                    req_headers["Range"] = f"bytes={start}-{end}"
+
+                    try:
+                        with client.stream("GET", f"{peer_url}{remote_path}", headers=req_headers) as resp:
+                            if resp.status_code == 410:
+                                with state_lock:
+                                    pending_chunks.appendleft(chunk_idx)
+                                    if pid == primary["peer_id"]:
+                                        shared["sender_canceled"] = True
+                                break
+                            if resp.status_code not in (200, 206):
+                                with state_lock:
+                                    pending_chunks.append(chunk_idx)
+                                consecutive_failures += 1
+                                if consecutive_failures >= 3:
+                                    break
+                                continue
+
+                            raw_hdr_sha = (resp.headers.get("x-loom-sha256") or "").strip().lower()
+                            if is_valid_sha256(raw_hdr_sha) and raw_hdr_sha != manifest_sha:
+                                with state_lock:
+                                    banned_peers.add(pid)
+                                    pending_chunks.appendleft(chunk_idx)
+                                with db_lock:
+                                    with Session(engine) as session:
+                                        j = session.get(LoomTransferJob, job_id)
+                                        lbl = format_loom_item_label(j.title, j.series_title, j.season, j.episode) if j else remote_path
+                                        log_loom_peer_event(session, pid, f"Hash mismatch: {lbl}")
+                                break
+
+                            cr_hdr = (resp.headers.get("content-range") or "").strip()
+                            if "/" in cr_hdr:
+                                try:
+                                    cr_total = cr_hdr.rsplit("/", 1)[1].strip()
+                                    if cr_total.isdigit() and int(cr_total) != file_size:
+                                        with state_lock:
+                                            banned_peers.add(pid)
+                                            pending_chunks.appendleft(chunk_idx)
+                                        break
+                                except Exception:
+                                    pass
+
+                            buf = bytearray()
+                            chunk_hasher = hashlib.sha256()
+                            for pkt in resp.iter_bytes(chunk_size=65536):
+                                if not pkt:
+                                    continue
+                                if self._stop_event.is_set():
+                                    with state_lock:
+                                        shared["stopped"] = True
+                                    break
+                                buf.extend(pkt)
+                                chunk_hasher.update(pkt)
+                                if bw_kbps > 0:
+                                    with throttle_lock:
+                                        now_m = time.monotonic()
+                                        if now_m - throttle_state["window_start"] >= 1.0:
+                                            throttle_state["window_start"] = now_m
+                                            throttle_state["window_bytes"] = 0
+                                        throttle_state["window_bytes"] += len(pkt)
+                                        elapsed = now_m - throttle_state["window_start"]
+                                        target = throttle_state["window_bytes"] / (bw_kbps * 1024.0)
+                                        sleep_for = min(2.0, target - elapsed) if target > elapsed else 0.0
+                                    if sleep_for > 0:
+                                        time.sleep(sleep_for)
+                    except Exception:
+                        with state_lock:
+                            pending_chunks.append(chunk_idx)
+                        consecutive_failures += 1
+                        if consecutive_failures >= 3:
+                            break
+                        continue
+
+                    if self._stop_event.is_set():
+                        with state_lock:
+                            pending_chunks.appendleft(chunk_idx)
+                            shared["stopped"] = True
+                        break
+
+                    if len(buf) != expected_len:
+                        with state_lock:
+                            pending_chunks.append(chunk_idx)
+                        consecutive_failures += 1
+                        if consecutive_failures >= 3:
+                            break
+                        continue
+
+                    if chunk_hasher.hexdigest() != pieces[chunk_idx]:
+                        with state_lock:
+                            banned_peers.add(pid)
+                            pending_chunks.appendleft(chunk_idx)
+                        with db_lock:
+                            with Session(engine) as session:
+                                j = session.get(LoomTransferJob, job_id)
+                                lbl = format_loom_item_label(j.title, j.series_title, j.season, j.episode) if j else remote_path
+                                log_loom_peer_event(session, pid, f"Chunk hash mismatch: {lbl}")
+                        break
+
+                    consecutive_failures = 0
+                    with file_lock:
+                        with open(part_path, "r+b") as fp:
+                            fp.seek(start)
+                            fp.write(buf)
+                            fp.flush()
+                        with state_lock:
+                            if chunk_idx not in done_chunks:
+                                done_chunks.add(chunk_idx)
+                                shared["bytes_written"] += expected_len
+                            shared["participating_peers"].add(pid)
+                            cur_total_written = shared["bytes_written"]
+                        _write_meta_locked()
+
+                    with db_lock:
+                        now_m = time.monotonic()
+                        with state_lock:
+                            speed_window["bytes"] += expected_len
+                            dt = now_m - speed_window["last_time"]
+                            if dt >= 0.4:
+                                self._set_job_speed_bps(job_id, speed_window["bytes"] / max(0.05, dt))
+                                speed_window["bytes"] = 0
+                                speed_window["last_time"] = now_m
+                        with Session(engine) as session:
+                            j = session.get(LoomTransferJob, job_id)
+                            p = session.get(LoomPeer, pid)
+                            if not j or j.status == "cancelled":
+                                with state_lock:
+                                    shared["cancelled"] = True
+                                break
+                            j.bytes_transferred = cur_total_written
+                            j.updated_at = datetime.now(timezone.utc)
+                            session.add(j)
+                            if p:
+                                rollover_peer_monthly_usage(session, p)
+                                p.bytes_received_month += expected_len
+                                p.last_seen_at = datetime.now(timezone.utc)
+                                session.add(p)
+                            session.commit()
+                        self._clear_job_retry(job_id)
+
+        try:
+            worker_sources = active_sources[:max_workers]
+            threads = [
+                threading.Thread(target=_swarm_worker, args=(src,), daemon=True, name=f"loom-swarm-{job_id}-{src['peer_id']}")
+                for src in worker_sources
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            if shared["cancelled"]:
+                self._clear_job_retry(job_id)
+                cleanup_job_part_file(target_path, sync_dir=sync_dir_for_cleanup)
+                return True
+
+            if shared["sender_canceled"] and not shared["paused"]:
+                self._clear_job_retry(job_id)
+                self._mark_job(job_id, "canceled_by_sender", "Canceled by Sender")
+                cleanup_job_part_file(target_path, sync_dir=sync_dir_for_cleanup)
+                return True
+
+            if shared["paused"]:
+                with Session(engine) as session:
+                    j = session.get(LoomTransferJob, job_id)
+                    if j and j.status not in ("cancelled", "completed"):
+                        j.status = shared["pause_status"] or "paused_cap"
+                        j.error_message = shared["pause_reason"]
+                        j.bytes_transferred = shared["bytes_written"]
+                        j.updated_at = datetime.now(timezone.utc)
+                        session.add(j)
+                        session.commit()
                 return False
 
-            job_id = chosen_job.id
-            peer_id = chosen_peer.id
-            peer_url = chosen_peer.base_url.rstrip("/")
-            peer_secret = chosen_peer.shared_secret
-            local_node_id, _ = get_peer_local_identity(session, chosen_peer)
-            remote_path = (
-                f"/api/loom/v1/relay/{chosen_job.relay_token}"
-                if chosen_job.relay_token
-                else f"/api/loom/v1/download/{chosen_job.media_type}/{chosen_job.remote_item_id}"
-            )
-            target_path = chosen_job.target_path
-            chosen_job.status = "downloading"
-            chosen_job.error_message = None
-            chosen_job.updated_at = datetime.now(timezone.utc)
-            session.add(chosen_job)
-            session.commit()
+            if shared["stopped"] or self._stop_event.is_set():
+                with Session(engine) as session:
+                    j = session.get(LoomTransferJob, job_id)
+                    if j and j.status == "downloading":
+                        j.status = "queued"
+                        j.bytes_transferred = shared["bytes_written"]
+                        j.updated_at = datetime.now(timezone.utc)
+                        session.add(j)
+                        session.commit()
+                return False
 
-        return self._download_job(job_id, peer_id, peer_url, peer_secret, local_node_id, remote_path, target_path)
+            if len(done_chunks) < len(pieces):
+                all_banned = all(s["peer_id"] in banned_peers for s in worker_sources)
+                if all_banned:
+                    self._clear_job_retry(job_id)
+                    cleanup_job_part_file(target_path, sync_dir=sync_dir_for_cleanup)
+                    self._mark_job(job_id, "failed", "SHA-256 verification failed across peers")
+                    return True
+                self._schedule_job_retry(job_id, "Swarm transfer incomplete", written=shared["bytes_written"])
+                return False
+
+            actual_sha256 = compute_file_sha256(part_path, use_cache=False)
+            if actual_sha256 != manifest_sha:
+                self._clear_job_retry(job_id)
+                cleanup_job_part_file(target_path, sync_dir=sync_dir_for_cleanup)
+                self._mark_job(job_id, "failed", "SHA-256 verification failed (file corrupted or tampered)")
+                return True
+
+            if os.path.exists(meta_path):
+                try:
+                    os.remove(meta_path)
+                except OSError:
+                    pass
+            os.replace(part_path, target_path)
+            self._clear_job_retry(job_id)
+            with Session(engine) as session:
+                j = session.get(LoomTransferJob, job_id)
+                if j:
+                    j.status = "completed"
+                    j.bytes_transferred = file_size
+                    j.total_bytes = file_size
+                    j.error_message = None
+                    j.updated_at = datetime.now(timezone.utc)
+                    session.add(j)
+                    label = format_loom_item_label(j.title, j.series_title, j.season, j.episode)
+                    peer_count = max(1, len(shared["participating_peers"]))
+                    log_loom_peer_event(
+                        session,
+                        j.peer_id,
+                        f"Downloaded {label} ({peer_count} peer{'s' if peer_count != 1 else ''})",
+                        commit=False,
+                        relay_token=j.relay_token,
+                    )
+                for pid in shared["participating_peers"]:
+                    p = session.get(LoomPeer, pid)
+                    if p:
+                        p.last_sync_at = datetime.now(timezone.utc)
+                        session.add(p)
+                session.commit()
+
+            if self._on_file_synced_fn:
+                try:
+                    self._on_file_synced_fn()
+                except Exception:
+                    pass
+            return True
+        except Exception as e:
+            self._schedule_job_retry(job_id, f"Swarm connection interrupted: {str(e)[:120]}", written=shared["bytes_written"])
+            return False
+        finally:
+            self._set_job_speed_bps(job_id, 0.0)
 
     def _download_job(
         self,

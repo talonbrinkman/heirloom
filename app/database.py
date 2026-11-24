@@ -450,6 +450,7 @@ def create_db_and_tables():
         for alter_sql in (
             "ALTER TABLE loomtransferjob ADD COLUMN expected_sha256 VARCHAR",
             "ALTER TABLE loomtransferjob ADD COLUMN relay_token VARCHAR",
+            "ALTER TABLE loomtransferjob ADD COLUMN sources_json VARCHAR",
             "ALTER TABLE loompeerevent ADD COLUMN relay_token VARCHAR",
             "ALTER TABLE loompeerevent ADD COLUMN pair_request_id INTEGER",
             "ALTER TABLE loompeer ADD COLUMN peer_fingerprint VARCHAR",

@@ -576,7 +576,7 @@ input[type="checkbox"]:checked {
     display: none;
 }
 
-.toggle-pill span {
+.toggle-pill > span {
     display: inline-block;
     padding: calc(var(--padding) * 0.5) var(--padding);
     background-color: var(--surface-hover);
@@ -588,7 +588,7 @@ input[type="checkbox"]:checked {
     transition: 0.2s;
 }
 
-.toggle-pill span:hover {
+.toggle-pill > span:hover {
     color: var(--text);
 }
 
@@ -940,9 +940,9 @@ button.hover-play:active {
 .three-dots-btn,
 button.three-dots-btn {
     position: absolute;
-    top: 5px;
-    right: 5px;
-    width: 1.8em;
+    top: var(--gap);
+    right: var(--gap);
+    width: 1.6rem;
     aspect-ratio: 1;
     flex-shrink: 0;
     opacity: 0;
@@ -953,9 +953,9 @@ button.three-dots-btn {
 
 .three-dots-btn svg,
 .three-dots-btn i {
-    width: 50%;
-    height: 50%;
-    aspect-ratio: 1 / 1;
+    width: 1rem;
+    height: 1rem;
+    aspect-ratio: 1;
 }
 
 .poster-container:hover .hover-play,
@@ -968,23 +968,24 @@ button.three-dots-btn {
     position: absolute;
     bottom: var(--gap);
     right: var(--gap);
-    width: 10%;
-    aspect-ratio: 1/1;
+    width: 1.6rem;
+    aspect-ratio: 1;
     color: var(--text);
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 5;
     pointer-events: none;
+    border-radius: 100%;
+    background-color: var(--accent);
 }
 
 .watched-badge svg,
 .watched-badge i {
-    width: 100%;
-    height: 100%;
-    aspect-ratio: 1/1;
+    width: 1rem;
+    height: 1rem;
+    aspect-ratio: 1;
     stroke: var(--text);
-    stroke-width: 2.8px;
 }
 
 /* Photo album folder tile */
@@ -1052,11 +1053,6 @@ button.three-dots-btn {
 
 .episode-card .hover-play {
     width: 2.6em;
-}
-
-.episode-card .three-dots-btn {
-    top: 6px;
-    right: 6px;
 }
 
 .episode-card .media-year {

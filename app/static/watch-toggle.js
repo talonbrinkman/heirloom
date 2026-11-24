@@ -104,6 +104,10 @@
 
             const posterContainer = findPosterContainer(form);
             updatePosterWatchedUI(posterContainer, watched);
+            const menu = form.closest('.dropdown-menu');
+            if (menu) {
+                menu.querySelectorAll('.remove-progress-form').forEach(rpForm => rpForm.remove());
+            }
         }
     }
 
@@ -162,6 +166,39 @@
     document.addEventListener('submit', async (e) => {
         const form = e.target;
         if (!(form instanceof HTMLFormElement)) return;
+
+        if (form.classList.contains('remove-progress-form')) {
+            e.preventDefault();
+            const actionUrl = form.getAttribute('action') || form.action;
+            const dropdown = form.closest('.dropdown-menu');
+            if (dropdown) dropdown.classList.remove('show');
+            try {
+                const response = await fetch(actionUrl, {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'Accept': 'application/json'
+                    }
+                });
+                if (response.status === 401) {
+                    window.location.href = '/login';
+                    return;
+                }
+                if (!response.ok) {
+                    throw new Error(`Request failed with status ${response.status}`);
+                }
+                const posterContainer = findPosterContainer(form);
+                if (posterContainer) {
+                    const progressBg = posterContainer.querySelector('.progress-bg');
+                    if (progressBg) progressBg.remove();
+                }
+                form.remove();
+            } catch (err) {
+                console.error('[WatchToggle] Failed to remove watch progress:', err);
+            }
+            return;
+        }
 
         const parsed = parseWatchAction(form.getAttribute('action') || form.action);
         if (!parsed) return;

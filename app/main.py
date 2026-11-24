@@ -71,6 +71,8 @@ from .loom import (
     cleanup_job_part_file,
     get_manifest_quality_label,
     compute_file_sha256,
+    compute_file_piece_hashes,
+    LOOM_SWARM_CHUNK_SIZE,
     is_valid_sha256,
     format_loom_item_label,
     log_loom_peer_event,
@@ -2522,6 +2524,43 @@ def get_user_watched_status(session: Session, user_id: int, prof_id: Optional[in
             
     return watched_movie_ids, watched_tv_episode_ids, watched_tv_titles
 
+
+def get_user_in_progress_status(session: Session, user_id: int, prof_id: Optional[int] = None) -> tuple[set[int], set[str]]:
+    """Return (in_progress_movie_ids, in_progress_tv_titles) for items with 0 < progress < 95."""
+    from sqlmodel import or_
+    hist_q = select(WatchHistory).where(
+        WatchHistory.user_id == user_id,
+        WatchHistory.progress > 0.0,
+        WatchHistory.progress < 95.0,
+    )
+    if prof_id:
+        hist_q = hist_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
+    records = session.exec(hist_q).all()
+
+    in_progress_movie_ids = {h.item_id for h in records if h.media_type == "movie"}
+    if in_progress_movie_ids:
+        all_movies = session.exec(select(Movie.id, Movie.tmdb_id, Movie.title).where(Movie.id.in_(list(in_progress_movie_ids)))).all()
+        tmdb_ids = {m[1] for m in all_movies if m[1]}
+        titles = {m[2].strip().lower() for m in all_movies if m[2]}
+        conditions = []
+        if tmdb_ids:
+            conditions.append(Movie.tmdb_id.in_(list(tmdb_ids)))
+        if titles:
+            conditions.append(func.lower(Movie.title).in_(list(titles)))
+        if conditions:
+            sibling_ids = session.exec(select(Movie.id).where(or_(*conditions))).all()
+            in_progress_movie_ids.update(sibling_ids)
+
+    in_progress_tv_ep_ids = {h.item_id for h in records if h.media_type == "tv"}
+    in_progress_tv_titles: set[str] = set()
+    if in_progress_tv_ep_ids:
+        tv_titles = session.exec(
+            select(TVShow.title).where(TVShow.id.in_(list(in_progress_tv_ep_ids))).distinct()
+        ).all()
+        in_progress_tv_titles = {t.strip().lower() for t in tv_titles if t}
+
+    return in_progress_movie_ids, in_progress_tv_titles
+
 def _build_home_recommended(
     session: Session,
     current_user: User,
@@ -2771,6 +2810,7 @@ def root(
     user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
 
     watched_movie_ids, watched_tv_episode_ids, watched_tv_titles = get_user_watched_status(session, current_user.id, prof_id)
+    in_progress_movie_ids, in_progress_tv_titles = get_user_in_progress_status(session, current_user.id, prof_id)
 
     if "application/json" in request.headers.get("Accept", ""):
         return {
@@ -2793,7 +2833,9 @@ def root(
             "user_watchlist_tv": user_watchlist_tv,
             "watched_movie_ids": list(watched_movie_ids),
             "watched_tv_episode_ids": list(watched_tv_episode_ids),
-            "watched_tv_titles": list(watched_tv_titles)
+            "watched_tv_titles": list(watched_tv_titles),
+            "in_progress_movie_ids": list(in_progress_movie_ids),
+            "in_progress_tv_titles": list(in_progress_tv_titles),
         }
 
     avail_vols = get_available_volumes(session)
@@ -2804,6 +2846,7 @@ def root(
         "recommended": recommended,
         "user_watchlist_movies": user_watchlist_movies, "user_watchlist_tv": user_watchlist_tv,
         "watched_movie_ids": watched_movie_ids, "watched_tv_episode_ids": watched_tv_episode_ids, "watched_tv_titles": watched_tv_titles,
+        "in_progress_movie_ids": in_progress_movie_ids, "in_progress_tv_titles": in_progress_tv_titles,
         "has_movies": avail_vols["movie"], "has_tv": avail_vols["tv"], "has_photos": avail_vols["photo"], "has_music": avail_vols["music"],
         "loom_enabled": loom_enabled
     })
@@ -3122,13 +3165,16 @@ def api_library(
         result = all_items[(page - 1) * limit : page * limit]
     else:
         watched_movie_ids, _, watched_tv_titles = get_user_watched_status(session, current_user.id, prof_id)
+        in_progress_movie_ids, in_progress_tv_titles = get_user_in_progress_status(session, current_user.id, prof_id)
         for item in items:
             if media_type == "tv":
                 url_path = f"/series/{urllib.parse.quote(item.title)}"
                 is_w = item.title.strip().lower() in watched_tv_titles
+                has_prog = (not is_w) and (item.title.strip().lower() in in_progress_tv_titles)
             else:
                 url_path = f"/movie/{item.id}"
                 is_w = item.id in watched_movie_ids
+                has_prog = (not is_w) and (item.id in in_progress_movie_ids)
             
             result.append({
                 "id": item.id,
@@ -3141,7 +3187,8 @@ def api_library(
                 "album": None,
                 "url": url_path,
                 "in_watchlist": item.id in user_watchlist if hasattr(item, 'id') else False,
-                "is_watched": is_w
+                "is_watched": is_w,
+                "has_progress": has_prog,
             })
         
     return {"items": result}
@@ -4350,6 +4397,23 @@ def library_view(
         
     user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
 
+    lib_watched_movie_ids = set()
+    lib_watched_tv_titles = set()
+    lib_in_progress_movie_ids = set()
+    lib_in_progress_tv_titles = set()
+    lib_watchlist_movies = set()
+    lib_watchlist_tv = set()
+    if media_type in ("movie", "tv") and current_view == "recommended":
+        lib_watched_movie_ids, _, lib_watched_tv_titles = get_user_watched_status(session, current_user.id, prof_id)
+        lib_in_progress_movie_ids, lib_in_progress_tv_titles = get_user_in_progress_status(session, current_user.id, prof_id)
+        wl_m = select(Watchlist.item_id).where(Watchlist.user_id == current_user.id, Watchlist.media_type == "movie")
+        wl_t = select(Watchlist.item_id).where(Watchlist.user_id == current_user.id, Watchlist.media_type == "tv")
+        if prof_id:
+            wl_m = wl_m.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+            wl_t = wl_t.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+        lib_watchlist_movies = set(session.exec(wl_m).all())
+        lib_watchlist_tv = set(session.exec(wl_t).all())
+
     response = templates.TemplateResponse(request=request, name="library.html", context={
         "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
         "media_type": media_type, "total_count": total_count, "album": clean_album, "album_breadcrumbs": album_breadcrumbs,
@@ -4360,6 +4424,12 @@ def library_view(
         "active_collection": active_collection,
         "categories": categories,
         "collections": collections,
+        "watched_movie_ids": lib_watched_movie_ids,
+        "watched_tv_titles": lib_watched_tv_titles,
+        "in_progress_movie_ids": lib_in_progress_movie_ids,
+        "in_progress_tv_titles": lib_in_progress_tv_titles,
+        "user_watchlist_movies": lib_watchlist_movies,
+        "user_watchlist_tv": lib_watchlist_tv,
         "recommended_items": recommended_items,
         "recently_added": recently_added,
         "recently_released": recently_released,
@@ -4725,6 +4795,7 @@ def movie_view(
     in_watchlist = bool(session.exec(wl_q).first())
 
     watched_movie_ids, _, _ = get_user_watched_status(session, current_user.id, prof_id)
+    in_progress_movie_ids, _ = get_user_in_progress_status(session, current_user.id, prof_id)
     is_watched = movie.id in watched_movie_ids
 
     user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
@@ -4740,7 +4811,7 @@ def movie_view(
         "user": current_user, "current_profile": current_profile, "user_profiles": user_profiles,
         "movie": movie, "cast_list": cast_list, "has_progress": has_progress, "in_watchlist": in_watchlist,
         "is_watched": is_watched, "movie_versions": movie_versions, "current_version": current_version,
-        "related_movies": related_movies, "watched_movie_ids": watched_movie_ids, "user_watchlist_movies": user_watchlist_movies,
+        "related_movies": related_movies, "watched_movie_ids": watched_movie_ids, "in_progress_movie_ids": in_progress_movie_ids, "user_watchlist_movies": user_watchlist_movies,
         "needs_text_meta": needs_text_meta, "needs_image_meta": needs_image_meta
     })
 
@@ -5425,6 +5496,7 @@ def series_view(
     in_watchlist = bool(session.exec(wl_q).first())
 
     _, watched_tv_episode_ids, watched_tv_titles = get_user_watched_status(session, current_user.id, prof_id)
+    _, in_progress_tv_titles = get_user_in_progress_status(session, current_user.id, prof_id)
     is_series_watched = title.strip().lower() in watched_tv_titles
 
     ep_hist_q = select(WatchHistory).where(
@@ -5436,14 +5508,22 @@ def series_view(
         ep_hist_q = ep_hist_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
     ep_histories = session.exec(ep_hist_q).all()
     progress_map = {}
-    for h in ep_histories:
-        if h.item_id not in progress_map or (h.last_watched and (h.progress or 0) > 0):
-            progress_map[h.item_id] = bool(0 < (h.progress or 0) < 95.0)
+    progress_pct_map = {}
+    ep_histories_sorted = sorted(
+        ep_histories,
+        key=lambda h: (1 if (prof_id and h.profile_id == prof_id) else 0, h.last_watched or datetime.min),
+    )
+    for h in ep_histories_sorted:
+        pct_val = round(float(h.progress or 0.0), 1)
+        in_progress = 0 < pct_val < 95.0
+        progress_map[h.item_id] = in_progress
+        progress_pct_map[h.item_id] = pct_val if in_progress else 0.0
         
     episodes = []
     for ep_dict in episodes_template:
         ep_copy = dict(ep_dict)
         ep_copy["has_progress"] = progress_map.get(ep_dict["id"], False)
+        ep_copy["progress"] = progress_pct_map.get(ep_dict["id"], 0.0)
         ep_copy["is_watched"] = ep_dict["id"] in watched_tv_episode_ids
         episodes.append(ep_copy)
     
@@ -5486,7 +5566,7 @@ def series_view(
         "title": title, "episodes": episodes, "seasons": sorted_seasons, "series": selected_episode, "cast_list": cast_list,
         "has_progress": has_progress, "in_watchlist": in_watchlist, "resume_link": resume_link, "selected_ep_id": selected_episode.id,
         "selected_ep_dict": selected_ep_dict, "is_series_watched": is_series_watched,
-        "related_shows": related_shows, "watched_tv_titles": watched_tv_titles, "user_watchlist_tv": user_watchlist_tv,
+        "related_shows": related_shows, "watched_tv_titles": watched_tv_titles, "in_progress_tv_titles": in_progress_tv_titles, "user_watchlist_tv": user_watchlist_tv,
         "needs_text_meta": needs_text_meta, "needs_image_meta": needs_image_meta
     })
 
@@ -6076,6 +6156,7 @@ async def person_view(
                     tmdb_tv_titles.add(c["name"].strip().lower())
 
     watched_movie_ids, _, watched_tv_titles = get_user_watched_status(session, current_user.id, prof_id)
+    in_progress_movie_ids, in_progress_tv_titles = get_user_in_progress_status(session, current_user.id, prof_id)
 
     wl_m_q = select(Watchlist.item_id).where(Watchlist.user_id == current_user.id, Watchlist.media_type == 'movie')
     if prof_id:
@@ -6123,6 +6204,7 @@ async def person_view(
                 "url": f"/movie/{m.id}",
                 "play_url": f"/play/movie/{m.id}",
                 "is_watched": m.id in watched_movie_ids,
+                "has_progress": (m.id not in watched_movie_ids) and (m.id in in_progress_movie_ids),
                 "in_watchlist": m.id in user_watchlist_movies,
                 "director": m.director or "",
                 "cast": m.cast or ""
@@ -6169,6 +6251,7 @@ async def person_view(
                 "url": f"/series/{urllib.parse.quote(t.title)}",
                 "play_url": f"/play/tv/{t.id}",
                 "is_watched": norm_t in watched_tv_titles,
+                "has_progress": (norm_t not in watched_tv_titles) and (norm_t in in_progress_tv_titles),
                 "in_watchlist": t.id in user_watchlist_tv,
                 "director": t.director or "",
                 "cast": t.cast or ""
@@ -8568,6 +8651,7 @@ async def remove_history(
     request: Request,
     media_type: str,
     item_id: int,
+    scope: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
@@ -8577,7 +8661,16 @@ async def remove_history(
             return Response(content='{"status": "unauthorized"}', media_type="application/json", status_code=401)
         return RedirectResponse(url="/login", status_code=303)
     prof_id = current_profile.id if current_profile else None
-    q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id == item_id).where(WatchHistory.media_type == media_type)
+    target_ids = [item_id]
+    if media_type == "tv" and scope == "series":
+        show = session.get(TVShow, item_id)
+        if show and show.title:
+            ep_ids = session.exec(
+                select(TVShow.id).where(func.lower(TVShow.title) == show.title.strip().lower())
+            ).all()
+            if ep_ids:
+                target_ids = list(ep_ids)
+    q = select(WatchHistory).where(WatchHistory.user_id == current_user.id).where(WatchHistory.item_id.in_(target_ids)).where(WatchHistory.media_type == media_type)
     if prof_id:
         q = q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
     history_entries = session.exec(q).all()
@@ -11320,6 +11413,14 @@ def _serialize_loom_peer(p: LoomPeer) -> dict:
 
 def _serialize_loom_job(j: LoomTransferJob) -> dict:
     pct = round((j.bytes_transferred / j.total_bytes) * 100, 1) if j.total_bytes and j.total_bytes > 0 else 0.0
+    sources_count = 1
+    if j.sources_json:
+        try:
+            parsed_sources = json.loads(j.sources_json)
+            if isinstance(parsed_sources, list) and parsed_sources:
+                sources_count = len(parsed_sources)
+        except Exception:
+            pass
     return {
         "id": j.id,
         "peer_id": j.peer_id,
@@ -11336,6 +11437,8 @@ def _serialize_loom_job(j: LoomTransferJob) -> dict:
         "total_bytes": j.total_bytes or 0,
         "progress_pct": pct,
         "speed_bps": round(loom_sync_manager.get_job_speed_bps(j.id), 1) if (j.status == "downloading" and j.id is not None) else 0.0,
+        "active_workers": loom_sync_manager.get_job_active_workers(j.id) if (j.status == "downloading" and j.id is not None) else 0,
+        "sources_count": sources_count,
         "error_message": j.error_message,
         "updated_at": j.updated_at.isoformat() if j.updated_at else None,
     }
@@ -11768,6 +11871,124 @@ async def loom_v1_relay_download(
     )
 
 
+def _resolve_loom_download_item(
+    session: Session,
+    peer: LoomPeer,
+    settings: dict,
+    media_type: str,
+    item_id: int,
+):
+    """Validate and return (item, file_path, file_size) for an authorized Loom download/pieces request."""
+    if media_type == "movie":
+        item = session.get(Movie, item_id)
+    elif media_type == "tv":
+        item = session.get(TVShow, item_id)
+    elif media_type == "photo":
+        item = session.get(Photo, item_id)
+    elif media_type == "music":
+        item = session.get(Track, item_id)
+    else:
+        raise HTTPException(status_code=400, detail="Invalid media_type.")
+
+    if not item or not item.file_path or not os.path.exists(item.file_path):
+        raise HTTPException(status_code=404, detail="Media file not found.")
+    if not is_path_in_volumes(item.file_path, settings["searchable_volumes"]):
+        raise HTTPException(status_code=403, detail="Item is not in a searchable volume.")
+    if not is_filetype_allowed(item.file_path, settings["allowed_filetypes_list"]):
+        raise HTTPException(status_code=403, detail="Filetype is not allowed by Loom settings.")
+
+    file_path = item.file_path
+    file_size = os.path.getsize(file_path)
+    if not peer.no_limits and not is_file_size_allowed(file_size, settings["max_file_size_gb"]):
+        raise HTTPException(status_code=403, detail="File exceeds Max File Size limit.")
+    return item, file_path, file_size
+
+
+@app.get("/api/loom/v1/pieces/{media_type}/{item_id}")
+async def loom_v1_pieces(
+    request: Request,
+    media_type: str,
+    item_id: int,
+    chunk_size: int = Query(default=LOOM_SWARM_CHUNK_SIZE),
+    session: Session = Depends(get_session),
+):
+    settings = _require_loom_enabled(session)
+    req_path = f"/api/loom/v1/pieces/{media_type}/{item_id}"
+    peer = verify_loom_request(session, dict(request.headers), "GET", req_path)
+    if not peer:
+        raise HTTPException(status_code=401, detail="Invalid Loom signature.")
+
+    remote_job_id = (request.headers.get("x-loom-job-id") or "").strip()
+    if peer.id is not None and loom_upload_tracker.is_transfer_cancelled_by_sender(peer.id, remote_job_id, media_type, item_id):
+        return JSONResponse(status_code=410, content={"detail": "Canceled by Sender", "code": "canceled_by_sender"})
+
+    allowed, _, reason = can_transfer_now(
+        session,
+        peer,
+        "outgoing",
+        has_active_streams_fn=lambda: bool(active_stream_manager.get_active_streams()),
+    )
+    if not allowed:
+        raise HTTPException(status_code=429, detail=reason or "Transfer paused by Loom guardrails.")
+
+    _, file_path, _ = _resolve_loom_download_item(session, peer, settings, media_type, item_id)
+    return await asyncio.to_thread(compute_file_piece_hashes, file_path, chunk_size)
+
+
+@app.get("/api/loom/v1/relay_pieces/{relay_token}")
+async def loom_v1_relay_pieces(
+    request: Request,
+    relay_token: str,
+    chunk_size: int = Query(default=LOOM_SWARM_CHUNK_SIZE),
+    session: Session = Depends(get_session),
+):
+    settings = _require_loom_enabled(session)
+    if not settings["allow_relay"]:
+        raise HTTPException(status_code=403, detail="Relaying is disabled on this server.")
+    req_path = f"/api/loom/v1/relay_pieces/{relay_token}"
+    peer = verify_loom_request(session, dict(request.headers), "GET", req_path)
+    if not peer:
+        raise HTTPException(status_code=401, detail="Invalid Loom signature.")
+
+    allowed, _, reason = can_transfer_now(
+        session,
+        peer,
+        "outgoing",
+        has_active_streams_fn=lambda: bool(active_stream_manager.get_active_streams()),
+    )
+    if not allowed:
+        raise HTTPException(status_code=429, detail=reason or "Transfer paused by Loom guardrails.")
+
+    mapping = resolve_relay_token(relay_token)
+    if not mapping:
+        raise HTTPException(status_code=404, detail="Relay token expired or invalid.")
+    target_peer = session.get(LoomPeer, mapping["target_peer_id"])
+    if not target_peer or target_peer.status != "approved" or not target_peer.allow_incoming or not target_peer.base_url:
+        raise HTTPException(status_code=502, detail="Upstream relay peer is unavailable.")
+    if httpx is None:
+        raise HTTPException(status_code=500, detail="httpx is required for Loom relaying.")
+
+    upstream_tok = mapping.get("upstream_relay_token")
+    upstream_path = (
+        f"/api/loom/v1/relay_pieces/{upstream_tok}"
+        if upstream_tok
+        else f"/api/loom/v1/pieces/{mapping['media_type']}/{mapping['remote_item_id']}"
+    )
+    local_nid, _ = get_peer_local_identity(session, target_peer)
+    hdrs = sign_loom_headers(local_nid, target_peer.shared_secret, "GET", upstream_path)
+    if request.headers.get("x-loom-job-id"):
+        hdrs["X-Loom-Job-Id"] = request.headers["x-loom-job-id"]
+    upstream_url = f"{target_peer.base_url.rstrip('/')}{upstream_path}"
+    try:
+        async with httpx.AsyncClient(**get_httpx_client_kwargs(target_peer.base_url, timeout=60.0)) as client:
+            res = await client.get(upstream_url, params={"chunk_size": chunk_size}, headers=hdrs)
+    except Exception:
+        raise HTTPException(status_code=502, detail="Failed to reach upstream relay peer.")
+    if res.status_code != 200:
+        return Response(status_code=res.status_code)
+    return res.json()
+
+
 @app.get("/api/loom/v1/download/{media_type}/{item_id}")
 async def loom_v1_download(
     request: Request,
@@ -11794,29 +12015,7 @@ async def loom_v1_download(
     if not allowed:
         raise HTTPException(status_code=429, detail=reason or "Transfer paused by Loom guardrails.")
 
-    if media_type == "movie":
-        item = session.get(Movie, item_id)
-    elif media_type == "tv":
-        item = session.get(TVShow, item_id)
-    elif media_type == "photo":
-        item = session.get(Photo, item_id)
-    elif media_type == "music":
-        item = session.get(Track, item_id)
-    else:
-        raise HTTPException(status_code=400, detail="Invalid media_type.")
-
-    if not item or not item.file_path or not os.path.exists(item.file_path):
-        raise HTTPException(status_code=404, detail="Media file not found.")
-
-    if not is_path_in_volumes(item.file_path, settings["searchable_volumes"]):
-        raise HTTPException(status_code=403, detail="Item is not in a searchable volume.")
-    if not is_filetype_allowed(item.file_path, settings["allowed_filetypes_list"]):
-        raise HTTPException(status_code=403, detail="Filetype is not allowed by Loom settings.")
-
-    file_path = item.file_path
-    file_size = os.path.getsize(file_path)
-    if not peer.no_limits and not is_file_size_allowed(file_size, settings["max_file_size_gb"]):
-        raise HTTPException(status_code=403, detail="File exceeds Max File Size limit.")
+    item, file_path, file_size = _resolve_loom_download_item(session, peer, settings, media_type, item_id)
     range_header = request.headers.get("range")
     start = 0
     end = file_size - 1
@@ -12818,7 +13017,52 @@ async def api_queue_loom_sync(
         if not is_filetype_allowed(target_path, settings["allowed_filetypes_list"]):
             continue
         raw_sha = (str(item.get("sha256") or "")).strip().lower()
+        pinned_sha = raw_sha if is_valid_sha256(raw_sha) else None
         raw_relay_tok = (str(item.get("relay_token") or "")).strip() or None
+        raw_total = int(item.get("file_size") or 0)
+
+        candidate_sources = [
+            {
+                "peer_id": item_peer_id,
+                "remote_item_id": remote_id,
+                "relay_token": raw_relay_tok,
+                "hops": int(item.get("hops", 0) or 0),
+                "file_size": raw_total,
+                "sha256": pinned_sha,
+            }
+        ]
+        seen_src_keys = {(item_peer_id, raw_relay_tok or remote_id)}
+        for src in (item.get("sources") or []):
+            if not isinstance(src, dict) or src.get("peer_id") is None:
+                continue
+            spid = int(src["peer_id"])
+            if spid not in peer_cache:
+                peer_cache[spid] = session.get(LoomPeer, spid)
+            speer = peer_cache[spid]
+            if not speer or speer.status != "approved" or not speer.allow_incoming:
+                continue
+            s_rid = int(src.get("id") or src.get("remote_item_id") or remote_id)
+            s_rtok = (str(src.get("relay_token") or "")).strip() or None
+            sk = (spid, s_rtok or s_rid)
+            if sk in seen_src_keys:
+                continue
+            seen_src_keys.add(sk)
+            s_sha = (str(src.get("sha256") or "")).strip().lower()
+            s_valid_sha = s_sha if is_valid_sha256(s_sha) else None
+            s_size = int(src.get("file_size") or 0)
+            if pinned_sha and s_valid_sha and s_valid_sha != pinned_sha:
+                continue
+            if raw_total > 0 and s_size > 0 and s_size != raw_total:
+                continue
+            candidate_sources.append({
+                "peer_id": spid,
+                "remote_item_id": s_rid,
+                "relay_token": s_rtok,
+                "hops": int(src.get("hops", 0) or 0),
+                "file_size": s_size,
+                "sha256": s_valid_sha,
+            })
+
         job = LoomTransferJob(
             peer_id=item_peer_id,
             media_type=mtype,
@@ -12830,8 +13074,9 @@ async def api_queue_loom_sync(
             quality_label=q_label,
             target_path=target_path,
             relay_token=raw_relay_tok,
-            total_bytes=int(item.get("file_size") or 0),
-            expected_sha256=raw_sha if is_valid_sha256(raw_sha) else None,
+            sources_json=json.dumps(candidate_sources),
+            total_bytes=raw_total,
+            expected_sha256=pinned_sha,
             status="queued",
         )
         session.add(job)

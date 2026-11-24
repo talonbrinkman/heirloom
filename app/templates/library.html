@@ -406,14 +406,24 @@
                         Recommended
                     </h2>
                 </div>
-                {% if recommended_items %}
-                <div style="margin-bottom: 30px;">
-                    <h3 style="margin: 0 0 15px 0; font-size: 1.15rem;">Recommended For You</h3>
+                {% for sec_title, sec_items in [
+                    ('Recommended For You', recommended_items),
+                    ('Recently Added', recently_added),
+                    ('Recently Released', recently_released),
+                    ('Top Rated', top_rated_items)
+                ] %}
+                {% if sec_items %}
+                {% set sec_idx = loop.index0 %}
+                <div style="{% if not loop.last %}margin-bottom: 30px;{% endif %}">
+                    <h3 style="margin: 0 0 15px 0; font-size: 1.15rem;">{{ sec_title }}</h3>
                     <div class="carousel-container">
                         <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
                         <div class="carousel-row">
-                            {% for m in recommended_items %}
+                            {% for m in sec_items %}
                             {% set item_url = ('/series/' ~ (m.title | urlencode)) if media_type == 'tv' else ('/movie/' ~ m.id) %}
+                            {% set is_watched_item = (m.title.strip().lower() in watched_tv_titles) if media_type == 'tv' else (m.id in watched_movie_ids) %}
+                            {% set has_progress_item = (not is_watched_item) and ((m.title.strip().lower() in in_progress_tv_titles) if media_type == 'tv' else (m.id in in_progress_movie_ids)) %}
+                            {% set in_wl_item = (m.id in user_watchlist_tv) if media_type == 'tv' else (m.id in user_watchlist_movies) %}
                             <div class="media-card">
                                 <div class="poster-container">
                                     <a href="{{ item_url }}">
@@ -426,6 +436,49 @@
                                     <a href="/play/{{ media_type }}/{{ m.id }}" class="icon-btn hover-play">
                                         <i data-lucide="play" fill="currentColor"></i>
                                     </a>
+                                    <button class="icon-btn three-dots-btn" onclick="toggleMenu(event, 'menu-rec-{{ media_type }}-{{ sec_idx }}-{{ loop.index0 }}')">
+                                        <i data-lucide="more-vertical" fill="white"></i>
+                                    </button>
+                                    {% if is_watched_item %}
+                                    <div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>
+                                    {% endif %}
+                                    <div class="dropdown-menu" id="menu-rec-{{ media_type }}-{{ sec_idx }}-{{ loop.index0 }}">
+                                        {% if is_watched_item %}
+                                        <form action="/history/mark_unwatched/{{ media_type }}/{{ m.id }}" method="post">
+                                            <button type="submit">Mark as Unwatched</button>
+                                        </form>
+                                        {% else %}
+                                        <form action="/history/mark_watched/{{ media_type }}/{{ m.id }}" method="post">
+                                            <button type="submit">Mark as Watched</button>
+                                        </form>
+                                        {% if has_progress_item %}
+                                        <form action="/history/remove/{{ media_type }}/{{ m.id }}{% if media_type == 'tv' %}?scope=series{% endif %}" method="post" class="remove-progress-form">
+                                            <button type="submit">Remove Watch Progress</button>
+                                        </form>
+                                        {% endif %}
+                                        {% endif %}
+                                        {% if user.watch_together_access %}
+                                        <button type="button" onclick="openWatchTogether('{{ media_type }}', {{ m.id }})">Watch Together</button>
+                                        {% endif %}
+                                        {% if user.downloads_access %}
+                                        <form action="/download/{{ media_type }}/{{ m.id }}" method="get">
+                                            <button type="submit">Download</button>
+                                        </form>
+                                        {% endif %}
+                                        {% if in_wl_item %}
+                                        <form action="/watchlist/remove_by_item/{{ media_type }}/{{ m.id }}" method="post">
+                                            <button type="submit">Remove from Watchlist</button>
+                                        </form>
+                                        {% else %}
+                                        <form action="/watchlist/add/{{ media_type }}/{{ m.id }}" method="post">
+                                            <button type="submit">Add to Watchlist</button>
+                                        </form>
+                                        {% endif %}
+                                        {% if user.is_admin %}
+                                        <button type="button" class="refresh-meta-btn" data-media-type="{{ media_type }}" data-item-id="{{ m.id }}" onclick="triggerRefreshMetadata(this)">Refresh Metadata</button>
+                                        <button type="button" class="fix-match-btn" data-media-type="{{ media_type }}" data-item-id="{{ m.id }}" data-title="{{ m.title }}" data-year="{{ m.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
+                                        {% endif %}
+                                    </div>
                                 </div>
                                 <div class="media-title"><a href="{{ item_url }}">{{ m.title }}</a></div>
                                 {% if m.year %}<div class="media-year">{{ m.year }}</div>{% endif %}
@@ -442,117 +495,7 @@
                     </div>
                 </div>
                 {% endif %}
-
-                {% if recently_added %}
-                <div style="margin-bottom: 30px;">
-                    <h3 style="margin: 0 0 15px 0; font-size: 1.15rem;">Recently Added</h3>
-                    <div class="carousel-container">
-                        <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
-                        <div class="carousel-row">
-                            {% for m in recently_added %}
-                            {% set item_url = ('/series/' ~ (m.title | urlencode)) if media_type == 'tv' else ('/movie/' ~ m.id) %}
-                            <div class="media-card">
-                                <div class="poster-container">
-                                    <a href="{{ item_url }}">
-                                        {% if m.poster_filename %}
-                                        <img src="/metadata/{{ m.poster_filename }}" class="poster">
-                                        {% else %}
-                                        <div class="poster-placeholder"><i data-lucide="{% if media_type == 'photo' %}image{% elif media_type == 'music' %}sixteenth-notes{% elif media_type == 'tv' %}tv{% else %}film{% endif %}"></i></div>
-                                        {% endif %}
-                                    </a>
-                                    <a href="/play/{{ media_type }}/{{ m.id }}" class="icon-btn hover-play">
-                                        <i data-lucide="play" fill="currentColor"></i>
-                                    </a>
-                                </div>
-                                <div class="media-title"><a href="{{ item_url }}">{{ m.title }}</a></div>
-                                {% if m.year %}<div class="media-year">{{ m.year }}</div>{% endif %}
-                                {% if m.rating %}
-                                <div class="media-rating">
-                                    <i data-lucide="star"></i>
-                                    <span>{{ "%.1f"|format(m.rating) }}</span>
-                                </div>
-                                {% endif %}
-                            </div>
-                            {% endfor %}
-                        </div>
-                        <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
-                    </div>
-                </div>
-                {% endif %}
-
-                {% if recently_released %}
-                <div style="margin-bottom: 30px;">
-                    <h3 style="margin: 0 0 15px 0; font-size: 1.15rem;">Recently Released</h3>
-                    <div class="carousel-container">
-                        <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
-                        <div class="carousel-row">
-                            {% for m in recently_released %}
-                            {% set item_url = ('/series/' ~ (m.title | urlencode)) if media_type == 'tv' else ('/movie/' ~ m.id) %}
-                            <div class="media-card">
-                                <div class="poster-container">
-                                    <a href="{{ item_url }}">
-                                        {% if m.poster_filename %}
-                                        <img src="/metadata/{{ m.poster_filename }}" class="poster">
-                                        {% else %}
-                                        <div class="poster-placeholder"><i data-lucide="{% if media_type == 'photo' %}image{% elif media_type == 'music' %}sixteenth-notes{% elif media_type == 'tv' %}tv{% else %}film{% endif %}"></i></div>
-                                        {% endif %}
-                                    </a>
-                                    <a href="/play/{{ media_type }}/{{ m.id }}" class="icon-btn hover-play">
-                                        <i data-lucide="play" fill="currentColor"></i>
-                                    </a>
-                                </div>
-                                <div class="media-title"><a href="{{ item_url }}">{{ m.title }}</a></div>
-                                {% if m.year %}<div class="media-year">{{ m.year }}</div>{% endif %}
-                                {% if m.rating %}
-                                <div class="media-rating">
-                                    <i data-lucide="star"></i>
-                                    <span>{{ "%.1f"|format(m.rating) }}</span>
-                                </div>
-                                {% endif %}
-                            </div>
-                            {% endfor %}
-                        </div>
-                        <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
-                    </div>
-                </div>
-                {% endif %}
-
-                {% if top_rated_items %}
-                <div>
-                    <h3 style="margin: 0 0 15px 0; font-size: 1.15rem;">Top Rated</h3>
-                    <div class="carousel-container">
-                        <button class="icon-btn carousel-arrow left" onclick="scrollCarousel(this, -1)"><i data-lucide="chevron-left"></i></button>
-                        <div class="carousel-row">
-                            {% for m in top_rated_items %}
-                            {% set item_url = ('/series/' ~ (m.title | urlencode)) if media_type == 'tv' else ('/movie/' ~ m.id) %}
-                            <div class="media-card">
-                                <div class="poster-container">
-                                    <a href="{{ item_url }}">
-                                        {% if m.poster_filename %}
-                                        <img src="/metadata/{{ m.poster_filename }}" class="poster">
-                                        {% else %}
-                                        <div class="poster-placeholder"><i data-lucide="{% if media_type == 'photo' %}image{% elif media_type == 'music' %}sixteenth-notes{% elif media_type == 'tv' %}tv{% else %}film{% endif %}"></i></div>
-                                        {% endif %}
-                                    </a>
-                                    <a href="/play/{{ media_type }}/{{ m.id }}" class="icon-btn hover-play">
-                                        <i data-lucide="play" fill="currentColor"></i>
-                                    </a>
-                                </div>
-                                <div class="media-title"><a href="{{ item_url }}">{{ m.title }}</a></div>
-                                {% if m.year %}<div class="media-year">{{ m.year }}</div>{% endif %}
-                                {% if m.rating %}
-                                <div class="media-rating">
-                                    <i data-lucide="star"></i>
-                                    <span>{{ "%.1f"|format(m.rating) }}</span>
-                                </div>
-                                {% endif %}
-                            </div>
-                            {% endfor %}
-                        </div>
-                        <button class="icon-btn carousel-arrow right" onclick="scrollCarousel(this, 1)"><i data-lucide="chevron-right"></i></button>
-                    </div>
-                </div>
-                {% endif %}
+                {% endfor %}
 
                 {% if not recommended_items and not recently_added and not recently_released and not top_rated_items %}
                 <p class="text-muted" style="margin-top: 20px;">No recommendations available yet. Start watching media to receive personalized recommendations!</p>
@@ -804,7 +747,7 @@
 
                     const watchToggleForm = (mediaType === 'photo' || mediaType === 'music' || isAlbum) ? '' : (m.is_watched
                         ? `<form action="/history/mark_unwatched/${mediaType}/${m.id}" method="post"><button type="submit">Mark as Unwatched</button></form>`
-                        : `<form action="/history/mark_watched/${mediaType}/${m.id}" method="post"><button type="submit">Mark as Watched</button></form>`);
+                        : `<form action="/history/mark_watched/${mediaType}/${m.id}" method="post"><button type="submit">Mark as Watched</button></form>${m.has_progress ? `<form action="/history/remove/${mediaType}/${m.id}${mediaType === 'tv' ? '?scope=series' : ''}" method="post" class="remove-progress-form"><button type="submit">Remove Watch Progress</button></form>` : ''}`);
 
                     const watchedBadgeHtml = (mediaType !== 'photo' && mediaType !== 'music' && !isAlbum && m.is_watched)
                         ? `<div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>`

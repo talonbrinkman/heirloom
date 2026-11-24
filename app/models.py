@@ -285,6 +285,7 @@ class LoomTransferJob(SQLModel, table=True):
     quality_label: str = Field(default="HD")
     target_path: str
     relay_token: Optional[str] = Field(default=None)
+    sources_json: Optional[str] = Field(default=None)
     status: str = Field(default="queued", index=True)  # queued, downloading, paused_stream, paused_schedule, paused_cap, completed, failed, cancelled
     bytes_transferred: int = Field(default=0)
     total_bytes: int = Field(default=0)

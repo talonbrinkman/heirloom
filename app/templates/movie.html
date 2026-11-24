@@ -256,6 +256,19 @@
                                         <form action="/history/mark_watched/movie/{{ m.id }}" method="post">
                                             <button type="submit">Mark as Watched</button>
                                         </form>
+                                        {% if m.id in in_progress_movie_ids %}
+                                        <form action="/history/remove/movie/{{ m.id }}" method="post" class="remove-progress-form">
+                                            <button type="submit">Remove Watch Progress</button>
+                                        </form>
+                                        {% endif %}
+                                        {% endif %}
+                                        {% if user.watch_together_access %}
+                                        <button type="button" onclick="openWatchTogether('movie', {{ m.id }})">Watch Together</button>
+                                        {% endif %}
+                                        {% if user.downloads_access %}
+                                        <form action="/download/movie/{{ m.id }}" method="get">
+                                            <button type="submit">Download</button>
+                                        </form>
                                         {% endif %}
                                         {% if m.id in user_watchlist_movies %}
                                         <form action="/watchlist/remove_by_item/movie/{{ m.id }}" method="post">
@@ -264,14 +277,6 @@
                                         {% else %}
                                         <form action="/watchlist/add/movie/{{ m.id }}" method="post">
                                             <button type="submit">Add to Watchlist</button>
-                                        </form>
-                                        {% endif %}
-                                        {% if user.watch_together_access %}
-                                        <button type="button" onclick="openWatchTogether('movie', {{ m.id }})">Watch Together</button>
-                                        {% endif %}
-                                        {% if user.downloads_access %}
-                                        <form action="/download/movie/{{ m.id }}" method="get">
-                                            <button type="submit">Download</button>
                                         </form>
                                         {% endif %}
                                         {% if user.is_admin %}

@@ -148,44 +148,19 @@
                                 <div class="watched-badge" title="Watched"><i data-lucide="check"></i></div>
                                 {% endif %}
                                 <div class="dropdown-menu" id="menu-kf-{{ item.media_type }}-{{ item.id }}">
-                                    {% if item.media_type == 'tv' %}
-                                        {% if item.is_watched %}
-                                        <form action="/history/mark_unwatched/tv/{{ item.id }}?scope=series" method="post">
-                                            <button type="submit">Mark Series as Unwatched</button>
-                                        </form>
-                                        {% else %}
-                                        <form action="/history/mark_watched/tv/{{ item.id }}?scope=series" method="post">
-                                            <button type="submit">Mark Series as Watched</button>
-                                        </form>
-                                        {% endif %}
-                                        {% if item.in_watchlist %}
-                                        <form action="/watchlist/remove_by_item/tv/{{ item.id }}" method="post">
-                                            <button type="submit">Remove from Watchlist</button>
-                                        </form>
-                                        {% else %}
-                                        <form action="/watchlist/add/tv/{{ item.id }}" method="post">
-                                            <button type="submit">Add to Watchlist</button>
-                                        </form>
-                                        {% endif %}
+                                    {% if item.is_watched %}
+                                    <form action="/history/mark_unwatched/{{ item.media_type }}/{{ item.id }}{% if item.media_type == 'tv' %}?scope=series{% endif %}" method="post">
+                                        <button type="submit">{% if item.media_type == 'tv' %}Mark Series as Unwatched{% else %}Mark as Unwatched{% endif %}</button>
+                                    </form>
                                     {% else %}
-                                        {% if item.is_watched %}
-                                        <form action="/history/mark_unwatched/movie/{{ item.id }}" method="post">
-                                            <button type="submit">Mark as Unwatched</button>
-                                        </form>
-                                        {% else %}
-                                        <form action="/history/mark_watched/movie/{{ item.id }}" method="post">
-                                            <button type="submit">Mark as Watched</button>
-                                        </form>
-                                        {% endif %}
-                                        {% if item.in_watchlist %}
-                                        <form action="/watchlist/remove_by_item/movie/{{ item.id }}" method="post">
-                                            <button type="submit">Remove from Watchlist</button>
-                                        </form>
-                                        {% else %}
-                                        <form action="/watchlist/add/movie/{{ item.id }}" method="post">
-                                            <button type="submit">Add to Watchlist</button>
-                                        </form>
-                                        {% endif %}
+                                    <form action="/history/mark_watched/{{ item.media_type }}/{{ item.id }}{% if item.media_type == 'tv' %}?scope=series{% endif %}" method="post">
+                                        <button type="submit">{% if item.media_type == 'tv' %}Mark Series as Watched{% else %}Mark as Watched{% endif %}</button>
+                                    </form>
+                                    {% if item.has_progress %}
+                                    <form action="/history/remove/{{ item.media_type }}/{{ item.id }}{% if item.media_type == 'tv' %}?scope=series{% endif %}" method="post" class="remove-progress-form">
+                                        <button type="submit">Remove Watch Progress</button>
+                                    </form>
+                                    {% endif %}
                                     {% endif %}
                                     {% if user.watch_together_access %}
                                     <button type="button" onclick="openWatchTogether('{{ item.media_type }}', {{ item.id }})">Watch Together</button>
@@ -193,6 +168,15 @@
                                     {% if user.downloads_access %}
                                     <form action="/download/{{ item.media_type }}/{{ item.id }}" method="get">
                                         <button type="submit">Download</button>
+                                    </form>
+                                    {% endif %}
+                                    {% if item.in_watchlist %}
+                                    <form action="/watchlist/remove_by_item/{{ item.media_type }}/{{ item.id }}" method="post">
+                                        <button type="submit">Remove from Watchlist</button>
+                                    </form>
+                                    {% else %}
+                                    <form action="/watchlist/add/{{ item.media_type }}/{{ item.id }}" method="post">
+                                        <button type="submit">Add to Watchlist</button>
                                     </form>
                                     {% endif %}
                                     {% if user.is_admin %}

@@ -911,3 +911,301 @@ def test_peer_no_limits_bypasses_file_size_in_search(db_session, tmp_path):
         unlimited = loom.search_loom_manifest(db_session, "Huge Movie", bypass_file_size_limit=True)
         assert limited["movies"] == []
         assert len(unlimited["movies"]) == 1
+
+
+def test_max_global_workers_setting_defaults_and_clamping(db_session):
+    defaults = loom.get_loom_settings(db_session)
+    assert defaults["max_global_workers"] == 3
+
+    saved_low = loom.save_loom_settings(db_session, {"max_global_workers": 0})
+    assert saved_low["max_global_workers"] == 1
+
+    saved_high = loom.save_loom_settings(db_session, {"max_global_workers": 99})
+    assert saved_high["max_global_workers"] == 12
+
+    saved_mid = loom.save_loom_settings(db_session, {"max_global_workers": 5})
+    assert saved_mid["max_global_workers"] == 5
+
+
+def test_compute_file_piece_hashes_single_pass_and_cache(tmp_path):
+    import hashlib
+
+    sample = tmp_path / "sample.mkv"
+    payload = (b"HEIRLOOM_PIECE_BLOCK_" * 12000)  # ~252 KB
+    sample.write_bytes(payload)
+
+    chunk_size = 64 * 1024
+    res = loom.compute_file_piece_hashes(str(sample), chunk_size=chunk_size)
+    assert res["file_size"] == len(payload)
+    assert res["chunk_size"] == chunk_size
+    assert res["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert res["sha256"] == loom.compute_file_sha256(str(sample))
+    expected_pieces = [
+        hashlib.sha256(payload[i:i + chunk_size]).hexdigest()
+        for i in range(0, len(payload), chunk_size)
+    ]
+    assert res["pieces"] == expected_pieces
+
+    cached = loom.compute_file_piece_hashes(str(sample), chunk_size=chunk_size)
+    assert cached == res
+
+
+def test_deduplicate_loom_search_results_preserves_sources():
+    sha = "a" * 64
+    movies = [
+        {"id": 1, "title": "Dune", "year": "2021", "quality_label": "1080p", "file_size": 5000, "hops": 1, "peer_id": 11, "sha256": sha},
+        {"id": 2, "title": "Dune", "year": "2021", "quality_label": "1080p", "file_size": 5000, "hops": 0, "peer_id": 22, "sha256": sha},
+    ]
+    deduped = loom.deduplicate_loom_search_results(movies, [], [], [])
+    assert len(deduped["movies"]) == 1
+    entry = deduped["movies"][0]
+    assert entry["sources_count"] == 2
+    assert entry["peer_id"] == 22
+    assert [s["peer_id"] for s in entry["sources"]] == [22, 11]
+    assert all(s["sha256"] == sha for s in entry["sources"])
+
+
+def test_swarm_download_spreads_chunks_across_peers(db_session, tmp_path, monkeypatch):
+    import hashlib
+    import re
+    import threading
+    import time
+
+    chunk_size = 64 * 1024
+    monkeypatch.setattr(loom, "LOOM_SWARM_CHUNK_SIZE", chunk_size)
+    monkeypatch.setattr(loom, "LOOM_MIN_SWARM_SIZE", 2 * chunk_size)
+
+    src = tmp_path / "swarm_src.mkv"
+    payload = os.urandom(4 * chunk_size + 1234)  # 5 chunks
+    src.write_bytes(payload)
+    manifest = loom.compute_file_piece_hashes(str(src), chunk_size=chunk_size, use_cache=False)
+
+    vol = tmp_path / "sync"
+    vol.mkdir()
+    loom.save_loom_settings(db_session, {"enabled": True, "sync_dir": str(vol), "max_global_workers": 3})
+
+    p1 = LoomPeer(name="PeerOne", node_id="n-swarm-1", base_url="http://peer1.onion", shared_secret="sec1", status="approved", allow_incoming=True)
+    p2 = LoomPeer(name="PeerTwo", node_id="n-swarm-2", base_url="http://peer2.onion", shared_secret="sec2", status="approved", allow_incoming=True)
+    db_session.add(p1)
+    db_session.add(p2)
+    db_session.commit()
+    db_session.refresh(p1)
+    db_session.refresh(p2)
+
+    target = vol / "Movies" / "SwarmMovie.mkv"
+    job = loom.LoomTransferJob(
+        peer_id=p1.id,
+        media_type="movie",
+        remote_item_id=101,
+        title="Swarm Movie",
+        target_path=str(target),
+        total_bytes=len(payload),
+        expected_sha256=manifest["sha256"],
+        sources_json=json.dumps([
+            {"peer_id": p1.id, "remote_item_id": 101, "hops": 0, "file_size": len(payload), "sha256": manifest["sha256"]},
+            {"peer_id": p2.id, "remote_item_id": 202, "hops": 0, "file_size": len(payload), "sha256": manifest["sha256"]},
+        ]),
+        status="downloading",
+    )
+    db_session.add(job)
+    db_session.commit()
+    db_session.refresh(job)
+
+    served_by: dict[str, list[int]] = {"peer1.onion": [], "peer2.onion": []}
+    hit_lock = threading.Lock()
+
+    class _FakeResp:
+        def __init__(self, status_code, headers=None, body=b"", json_data=None):
+            self.status_code = status_code
+            self.headers = headers or {}
+            self._body = body
+            self._json = json_data
+
+        def json(self):
+            return self._json
+
+        def iter_bytes(self, chunk_size=65536):
+            time.sleep(0.02)
+            yield self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class _FakeSwarmClient:
+        def get(self, url, params=None, headers=None):
+            return _FakeResp(200, json_data=manifest)
+
+        def stream(self, method, url, headers=None):
+            rng = (headers or {}).get("Range") or ""
+            m = re.match(r"bytes=(\d+)-(\d+)", rng)
+            start, end = int(m.group(1)), int(m.group(2))
+            host = "peer1.onion" if "peer1.onion" in url else "peer2.onion"
+            with hit_lock:
+                served_by[host].append(start // chunk_size)
+            slice_bytes = payload[start:end + 1]
+            return _FakeResp(
+                206,
+                headers={
+                    "content-length": str(len(slice_bytes)),
+                    "content-range": f"bytes {start}-{end}/{len(payload)}",
+                    "x-loom-sha256": manifest["sha256"],
+                },
+                body=slice_bytes,
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(loom.httpx, "Client", lambda **kwargs: _FakeSwarmClient())
+
+    manager = loom.LoomSyncManager()
+    resolved = manager._resolve_job_sources(db_session, job)
+    swarm_sources = manager._filter_swarm_sources(resolved, job.expected_sha256, job.total_bytes)
+    assert len(swarm_sources) == 2
+
+    assert manager._download_job_swarm(job.id, swarm_sources, str(target), max_workers=2) is True
+    assert target.exists() and target.read_bytes() == payload
+    assert not (vol / "Movies" / "SwarmMovie.mkv.part").exists()
+    assert not (vol / "Movies" / "SwarmMovie.mkv.part.meta.json").exists()
+    assert len(served_by["peer1.onion"]) >= 1
+    assert len(served_by["peer2.onion"]) >= 1
+    assert sorted(served_by["peer1.onion"] + served_by["peer2.onion"]) == [0, 1, 2, 3, 4]
+
+    db_session.expire_all()
+    done_job = db_session.get(loom.LoomTransferJob, job.id)
+    assert done_job.status == "completed"
+    assert done_job.bytes_transferred == len(payload)
+    p1_after = db_session.get(LoomPeer, p1.id)
+    p2_after = db_session.get(LoomPeer, p2.id)
+    assert p1_after.bytes_received_month > 0
+    assert p2_after.bytes_received_month > 0
+    assert p1_after.bytes_received_month + p2_after.bytes_received_month == len(payload)
+
+
+def test_swarm_download_bans_poisoned_peer_and_recovers_chunk(db_session, tmp_path, monkeypatch):
+    import re
+    import time
+
+    chunk_size = 64 * 1024
+    monkeypatch.setattr(loom, "LOOM_SWARM_CHUNK_SIZE", chunk_size)
+    monkeypatch.setattr(loom, "LOOM_MIN_SWARM_SIZE", 2 * chunk_size)
+
+    src = tmp_path / "poison_src.mkv"
+    payload = b"ABCD1234" * (3 * chunk_size // 8)  # 3 exact 64 KB chunks
+    src.write_bytes(payload)
+    manifest = loom.compute_file_piece_hashes(str(src), chunk_size=chunk_size, use_cache=False)
+
+    vol = tmp_path / "sync_poison"
+    vol.mkdir()
+    loom.save_loom_settings(db_session, {"enabled": True, "sync_dir": str(vol), "max_global_workers": 2})
+
+    p_bad = LoomPeer(name="BadPeer", node_id="n-bad-1", base_url="http://badpeer.onion", shared_secret="sbad", status="approved", allow_incoming=True)
+    p_good = LoomPeer(name="GoodPeer", node_id="n-good-2", base_url="http://goodpeer.onion", shared_secret="sgood", status="approved", allow_incoming=True)
+    db_session.add(p_bad)
+    db_session.add(p_good)
+    db_session.commit()
+    db_session.refresh(p_bad)
+    db_session.refresh(p_good)
+
+    target = vol / "Movies" / "RecoveredMovie.mkv"
+    job = loom.LoomTransferJob(
+        peer_id=p_bad.id,
+        media_type="movie",
+        remote_item_id=10,
+        title="Recovered Movie",
+        target_path=str(target),
+        total_bytes=len(payload),
+        expected_sha256=manifest["sha256"],
+        sources_json=json.dumps([
+            {"peer_id": p_bad.id, "remote_item_id": 10, "hops": 0, "file_size": len(payload), "sha256": manifest["sha256"]},
+            {"peer_id": p_good.id, "remote_item_id": 20, "hops": 0, "file_size": len(payload), "sha256": manifest["sha256"]},
+        ]),
+        status="downloading",
+    )
+    db_session.add(job)
+    db_session.commit()
+    db_session.refresh(job)
+
+    class _FakeResp:
+        def __init__(self, status_code, headers=None, body=b"", json_data=None):
+            self.status_code = status_code
+            self.headers = headers or {}
+            self._body = body
+            self._json = json_data
+
+        def json(self):
+            return self._json
+
+        def iter_bytes(self, chunk_size=65536):
+            time.sleep(0.01)
+            yield self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class _FakePoisonClient:
+        def get(self, url, params=None, headers=None):
+            return _FakeResp(200, json_data=manifest)
+
+        def stream(self, method, url, headers=None):
+            rng = (headers or {}).get("Range") or ""
+            m = re.match(r"bytes=(\d+)-(\d+)", rng)
+            start, end = int(m.group(1)), int(m.group(2))
+            slice_bytes = payload[start:end + 1]
+            if "badpeer.onion" in url:
+                slice_bytes = b"\xff" * len(slice_bytes)  # Poisoned chunk bytes
+            return _FakeResp(
+                206,
+                headers={
+                    "content-length": str(len(slice_bytes)),
+                    "content-range": f"bytes {start}-{end}/{len(payload)}",
+                    "x-loom-sha256": manifest["sha256"],
+                },
+                body=slice_bytes,
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(loom.httpx, "Client", lambda **kwargs: _FakePoisonClient())
+
+    manager = loom.LoomSyncManager()
+    resolved = manager._resolve_job_sources(db_session, job)
+    swarm_sources = manager._filter_swarm_sources(resolved, job.expected_sha256, job.total_bytes)
+
+    assert manager._download_job_swarm(job.id, swarm_sources, str(target), max_workers=2) is True
+    assert target.exists() and target.read_bytes() == payload
+
+    db_session.expire_all()
+    done_job = db_session.get(loom.LoomTransferJob, job.id)
+    assert done_job.status == "completed"
+    bad_events = db_session.exec(loom.select(loom.LoomPeerEvent).where(loom.LoomPeerEvent.peer_id == p_bad.id)).all()
+    assert any("Chunk hash mismatch" in (e.action or "") for e in bad_events)
+    assert db_session.get(LoomPeer, p_bad.id).bytes_received_month == 0
+    assert db_session.get(LoomPeer, p_good.id).bytes_received_month == len(payload)
+
+
+def test_swarm_excludes_mismatched_sha256_and_duplicate_peers():
+    good_sha = "a" * 64
+    other_sha = "b" * 64
+    sources = [
+        {"peer_id": 1, "sha256": good_sha, "file_size": 1000},
+        {"peer_id": 1, "sha256": good_sha, "file_size": 1000},  # duplicate peer_id
+        {"peer_id": 2, "sha256": other_sha, "file_size": 1000},  # different encode
+        {"peer_id": 3, "sha256": good_sha, "file_size": 999},  # mismatched size
+        {"peer_id": 4, "sha256": good_sha, "file_size": 1000},
+    ]
+    filtered = loom.LoomSyncManager._filter_swarm_sources(sources, good_sha, total_bytes=1000)
+    assert [s["peer_id"] for s in filtered] == [1, 4]

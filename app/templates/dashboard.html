@@ -269,6 +269,11 @@
                                     <form action="/history/mark_watched/{{ h.media_type }}/{{ h.item.id }}{% if h.media_type == 'tv' %}?scope=episode{% endif %}" method="post">
                                         <button type="submit">Mark as Watched</button>
                                     </form>
+                                    {% if h.progress and h.progress > 0 %}
+                                    <form action="/history/remove/{{ h.media_type }}/{{ h.item.id }}" method="post" class="remove-progress-form">
+                                        <button type="submit">Remove Watch Progress</button>
+                                    </form>
+                                    {% endif %}
                                     {% endif %}
                                     {% if user.watch_together_access %}<button type="button"
                                         onclick="openWatchTogether('{{ h.media_type }}', {{ h.item.id }})">Watch
@@ -278,9 +283,6 @@
                                         <button type="submit">Download</button>
                                     </form>
                                     {% endif %}
-                                    <form action="/history/remove/{{ h.media_type }}/{{ h.item.id }}" method="post">
-                                        <button type="submit">Remove from Continue Watching</button>
-                                    </form>
                                     {% if (h.media_type == 'movie' and h.item.id in user_watchlist_movies) or
                                     (h.media_type == 'tv' and h.item.id in user_watchlist_tv) %}
                                     <form action="/watchlist/remove_by_item/{{ h.media_type }}/{{ h.item.id }}"
@@ -346,6 +348,11 @@
                                     <form action="/history/mark_watched/{{ r.media_type }}/{{ r.item.id }}" method="post">
                                         <button type="submit">Mark as Watched</button>
                                     </form>
+                                    {% if (r.media_type == 'movie' and r.item.id in in_progress_movie_ids) or (r.media_type == 'tv' and r.item.title.strip().lower() in in_progress_tv_titles) %}
+                                    <form action="/history/remove/{{ r.media_type }}/{{ r.item.id }}{% if r.media_type == 'tv' %}?scope=series{% endif %}" method="post" class="remove-progress-form">
+                                        <button type="submit">Remove Watch Progress</button>
+                                    </form>
+                                    {% endif %}
                                     {% endif %}
                                     {% if user.watch_together_access %}<button type="button"
                                         onclick="openWatchTogether('{{ r.media_type }}', {{ r.item.id }})">Watch
@@ -419,6 +426,11 @@
                                     <form action="/history/mark_watched/{{ w.media_type }}/{{ w.item.id }}" method="post">
                                         <button type="submit">Mark as Watched</button>
                                     </form>
+                                    {% if (w.media_type == 'movie' and w.item.id in in_progress_movie_ids) or (w.media_type == 'tv' and w.item.title.strip().lower() in in_progress_tv_titles) %}
+                                    <form action="/history/remove/{{ w.media_type }}/{{ w.item.id }}{% if w.media_type == 'tv' %}?scope=series{% endif %}" method="post" class="remove-progress-form">
+                                        <button type="submit">Remove Watch Progress</button>
+                                    </form>
+                                    {% endif %}
                                     {% endif %}
                                     {% if user.watch_together_access %}<button type="button"
                                         onclick="openWatchTogether('{{ w.media_type }}', {{ w.item.id }})">Watch
@@ -484,6 +496,11 @@
                                     <form action="/history/mark_watched/movie/{{ m.id }}" method="post">
                                         <button type="submit">Mark as Watched</button>
                                     </form>
+                                    {% if m.id in in_progress_movie_ids %}
+                                    <form action="/history/remove/movie/{{ m.id }}" method="post" class="remove-progress-form">
+                                        <button type="submit">Remove Watch Progress</button>
+                                    </form>
+                                    {% endif %}
                                     {% endif %}
                                     {% if user.watch_together_access %}<button type="button"
                                         onclick="openWatchTogether('movie', {{ m.id }})">Watch Together</button>{% endif
@@ -555,6 +572,11 @@
                                     <form action="/history/mark_watched/tv/{{ t.id }}" method="post">
                                         <button type="submit">Mark as Watched</button>
                                     </form>
+                                    {% if t.title.strip().lower() in in_progress_tv_titles %}
+                                    <form action="/history/remove/tv/{{ t.id }}?scope=series" method="post" class="remove-progress-form">
+                                        <button type="submit">Remove Watch Progress</button>
+                                    </form>
+                                    {% endif %}
                                     {% endif %}
                                     {% if user.watch_together_access %}<button type="button"
                                         onclick="openWatchTogether('tv', {{ t.id }})">Watch Together</button>{% endif %}

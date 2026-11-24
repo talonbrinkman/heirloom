@@ -483,20 +483,17 @@
 
         <div class="card" id="loomSettingsCard">
             <div class="card-header flex-wrap gap-10">
-                <div>
-                    <h2 class="m-0">The Loom (Federation)</h2>
-                    <small class="muted">Node ID: <code id="loomNodeId">{{ loom_settings.node_id }}</code></small>
-                </div>
+                <h2 class="m-0">The Loom (Federation)</h2>
                 <div class="flex flex-wrap gap-10 align-center">
-                    <label class="toggle-pill">
+                    <label class="toggle-pill" title="Automatically pauses Loom transfers whenever someone is actively streaming media on this server.">
                         <input type="checkbox" id="loomPauseOnStreams" class="hidden-checkbox" onchange="saveLoomSettings()" {% if loom_settings.pause_on_active_streams %}checked{% endif %}>
                         <span>Pause During Streaming</span>
                     </label>
-                    <label class="toggle-pill">
+                    <label class="toggle-pill" title="Allow this server to relay searches and encrypted transfers between trusted peers.">
                         <input type="checkbox" id="loomAllowRelay" class="hidden-checkbox" onchange="saveLoomSettings()" {% if loom_settings.allow_relay %}checked{% endif %}>
                         <span>Allow Relay</span>
                     </label>
-                    <label class="toggle-pill">
+                    <label class="toggle-pill" title="Turn on friend-to-friend Loom discovery, search, and media transfers for this server.">
                         <input type="checkbox" id="loomEnabledToggle" class="hidden-checkbox" onchange="saveLoomSettings()" {% if loom_settings.enabled %}checked{% endif %}>
                         <span>Enable The Loom</span>
                     </label>
@@ -508,7 +505,17 @@
 
             <div class="settings-grid mb-20">
                 <div>
-                    <label class="field-label" for="loomSyncDir">Sync Directory</label>
+                    <label class="field-label" for="loomNodeId" title="Unique identifier sent to paired peers so they can verify your requests.">Node ID</label>
+                    <div class="password-field">
+                        <input type="password" id="loomNodeId" value="{{ loom_settings.node_id }}" readonly
+                            class="w-full m-0" style="box-sizing: border-box;">
+                        <div class="password-toggle" onclick="toggleVisibility('loomNodeId', 'toggleLoomNodeIdBtn')">
+                            <i data-lucide="eye" id="toggleLoomNodeIdBtn"></i>
+                        </div>
+                    </div>
+                </div>
+                <div>
+                    <label class="field-label" for="loomSyncDir" title="Folder where downloaded media from Loom peers will be saved.">Sync Directory</label>
                     <select id="loomSyncDir" class="select-input w-full m-0">
                         <option value="/media/loom" {% if not loom_settings.sync_dir or loom_settings.sync_dir == '/media/loom' %}selected{% endif %}>Loom: /media/loom</option>
                         {% set active_paths = volume_paths | selectattr('exists') | list %}
@@ -525,15 +532,15 @@
                     </select>
                 </div>
                 <div>
-                    <label class="field-label" for="loomUploadBandwidthLimit">Max Upload Bandwidth (KB/s)</label>
+                    <label class="field-label" for="loomUploadBandwidthLimit" title="Maximum outgoing upload speed shared across peers (0 = unlimited).">Max Upload Bandwidth (KB/s)</label>
                     <input type="number" min="0" id="loomUploadBandwidthLimit" value="{{ loom_settings.upload_bandwidth_limit_kbps }}" class="w-full m-0">
                 </div>
                 <div>
-                    <label class="field-label" for="loomDownloadBandwidthLimit">Max Download Bandwidth (KB/s)</label>
+                    <label class="field-label" for="loomDownloadBandwidthLimit" title="Maximum incoming download speed across active transfers (0 = unlimited).">Max Download Bandwidth (KB/s)</label>
                     <input type="number" min="0" id="loomDownloadBandwidthLimit" value="{{ loom_settings.download_bandwidth_limit_kbps }}" class="w-full m-0">
                 </div>
                 <div>
-                    <label class="field-label" for="loomMaxQuality">Max Quality Cap</label>
+                    <label class="field-label" for="loomMaxQuality" title="Highest video resolution allowed when searching and queuing media from peers.">Max Quality Cap</label>
                     <select id="loomMaxQuality" class="select-input w-full m-0">
                         <option value="720p" {% if loom_settings.max_quality == '720p' %}selected{% endif %}>720p</option>
                         <option value="1080p" {% if loom_settings.max_quality == '1080p' %}selected{% endif %}>1080p</option>
@@ -541,27 +548,31 @@
                     </select>
                 </div>
                 <div>
-                    <label class="field-label" for="loomMaxSearchHops">Max Search Hops</label>
+                    <label class="field-label" for="loomMaxSearchHops" title="Maximum peer-to-peer relay hops allowed when searching The Loom.">Max Search Hops</label>
                     <input type="number" min="1" max="10" id="loomMaxSearchHops" value="{{ loom_settings.max_search_hops or 1 }}" class="w-full m-0">
                 </div>
                 <div>
-                    <label class="field-label" for="loomMaxSendingHops">Max Sending Hops</label>
+                    <label class="field-label" for="loomMaxSendingHops" title="Maximum relay hops allowed when responding to incoming searches from peers.">Max Sending Hops</label>
                     <input type="number" min="1" max="10" id="loomMaxSendingHops" value="{{ loom_settings.max_sending_hops or 1 }}" class="w-full m-0">
                 </div>
                 <div>
-                    <label class="field-label" for="loomMaxConcurrentTransfers">Max Concurrent Transfers</label>
+                    <label class="field-label" for="loomMaxConcurrentTransfers" title="Maximum simultaneous upload streams allowed per peer.">Max Concurrent Transfers</label>
                     <input type="number" min="1" max="20" id="loomMaxConcurrentTransfers" value="{{ loom_settings.max_concurrent_transfers or 2 }}" class="w-full m-0">
                 </div>
                 <div>
-                    <label class="field-label" for="loomMaxRequestsPerMin">Max Requests / Min</label>
+                    <label class="field-label" for="loomMaxGlobalWorkers" title="Total concurrent download connections across all queued transfers (1-12; enables multi-peer speedups).">Max Global Workers</label>
+                    <input type="number" min="1" max="12" id="loomMaxGlobalWorkers" value="{{ loom_settings.max_global_workers or 3 }}" class="w-full m-0">
+                </div>
+                <div>
+                    <label class="field-label" for="loomMaxRequestsPerMin" title="Rate limit for incoming search requests per peer each minute.">Max Requests / Min</label>
                     <input type="number" min="1" max="120" id="loomMaxRequestsPerMin" value="{{ loom_settings.max_requests_per_minute or 3 }}" class="w-full m-0">
                 </div>
                 <div>
-                    <label class="field-label" for="loomMaxFileSizeGb">Max File Size (GB)</label>
+                    <label class="field-label" for="loomMaxFileSizeGb" title="Skip or block files larger than this size in GB (0 = unlimited).">Max File Size (GB)</label>
                     <input type="number" min="0" step="0.1" id="loomMaxFileSizeGb" value="{{ loom_settings.max_file_size_gb or 0 }}" class="w-full m-0">
                 </div>
                 <div>
-                    <label class="field-label" for="loomAutoRotateInterval">Auto-Rotate Addresses</label>
+                    <label class="field-label" for="loomAutoRotateInterval" title="How often to automatically rotate per-peer Tor .onion addresses (with a 72h grace period).">Auto-Rotate Addresses</label>
                     <select id="loomAutoRotateInterval" class="select-input w-full m-0">
                         <option value="disabled" {% if (loom_settings.auto_rotate_interval or 'disabled') == 'disabled' %}selected{% endif %}>Disabled</option>
                         <option value="daily" {% if loom_settings.auto_rotate_interval == 'daily' %}selected{% endif %}>Daily</option>
@@ -572,7 +583,7 @@
             </div>
 
             <div class="mb-20">
-                <label class="field-label" for="loomAllowedFiletypes">Allowed Filetypes</label>
+                <label class="field-label" for="loomAllowedFiletypes" title="Only files with these extensions can be searched, served, or downloaded over The Loom.">Allowed Filetypes</label>
                 <p class="hint mt-0 mb-10">
                     Comma-separated media extensions allowed for Loom searches and downloads. Any file outside this list is blocked.
                 </p>
@@ -580,7 +591,7 @@
             </div>
 
             <div class="mb-20">
-                <label class="field-label">Searchable Volumes</label>
+                <label class="field-label" title="Media folders peers are allowed to query for specific titles (nothing is shared by default).">Searchable Volumes</label>
                 <p class="hint mt-0 mb-10">
                     Choose which volumes peers can query for specific titles (disabled by default). Peers can only ask if you have a specific item, never list your full library.
                 </p>
@@ -672,7 +683,7 @@
             </form>
         </div>
         <div style="text-align: center; color: var(--text-muted); font-size: 0.75em;">
-            <strong>v2.5.2</strong>
+            <strong>v2.6.6</strong>
         </div>
     </div>
 
@@ -1670,6 +1681,7 @@
                 max_search_hops: Math.max(1, Number(document.getElementById('loomMaxSearchHops')?.value || 1)),
                 max_sending_hops: Math.max(1, Number(document.getElementById('loomMaxSendingHops')?.value || 1)),
                 max_concurrent_transfers: Math.max(1, Number(document.getElementById('loomMaxConcurrentTransfers')?.value || 2)),
+                max_global_workers: Math.max(1, Math.min(12, Number(document.getElementById('loomMaxGlobalWorkers')?.value || 3))),
                 max_requests_per_minute: Math.max(1, Number(document.getElementById('loomMaxRequestsPerMin')?.value || 3)),
                 max_file_size_gb: Math.max(0, Number(document.getElementById('loomMaxFileSizeGb')?.value || 0)),
                 allowed_filetypes: document.getElementById('loomAllowedFiletypes')?.value || '',
