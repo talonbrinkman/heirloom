@@ -983,7 +983,7 @@ button.three-dots-btn {
     width: 100%;
     height: 100%;
     aspect-ratio: 1/1;
-    stroke: #ffffff;
+    stroke: var(--text);
     stroke-width: 2.8px;
 }
 

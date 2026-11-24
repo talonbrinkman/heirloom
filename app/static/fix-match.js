@@ -289,6 +289,56 @@ function triggerFixMatchEncoded(btn) {
     openFixMatch(mediaType, itemId, title, year);
 }
 
+async function refreshMetadata(mediaType, itemId, btn) {
+    if (!mediaType || !itemId || !btn || btn.disabled) return;
+    btn.disabled = true;
+    const origHTML = btn.innerHTML;
+    const isIconBtn = btn.classList.contains('play-btn');
+    btn.innerHTML = isIconBtn
+        ? '<i data-lucide="refresh-cw" class="spinner"></i>'
+        : 'Refreshing...';
+    if (isIconBtn && window.lucide) window.lucide.createIcons();
+
+    try {
+        const res = await fetch('/api/media/refresh_metadata', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ media_type: mediaType, item_id: itemId })
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+            alert(data.error || data.detail || 'Failed to refresh metadata.');
+            btn.disabled = false;
+            btn.innerHTML = origHTML;
+            if (isIconBtn && window.lucide) window.lucide.createIcons();
+            return;
+        }
+        document.querySelectorAll('.dropdown-menu.show').forEach(m => m.classList.remove('show'));
+        if (mediaType === 'tv' && window.location.pathname.startsWith('/series/') && data.title) {
+            const target = `/series/${encodeURIComponent(data.title)}${window.location.search || ''}`;
+            if (window.HeirloomPjax) window.HeirloomPjax.navigate(target, { replace: true });
+            else window.location.href = target;
+        } else if (window.HeirloomPjax) {
+            window.HeirloomPjax.navigate(window.location.href, { replace: true, preserveScroll: true });
+        } else {
+            window.location.reload();
+        }
+    } catch (err) {
+        console.error('Failed to refresh metadata:', err);
+        alert('Connection error while refreshing metadata.');
+        btn.disabled = false;
+        btn.innerHTML = origHTML;
+        if (isIconBtn && window.lucide) window.lucide.createIcons();
+    }
+}
+
+function triggerRefreshMetadata(btn) {
+    if (!btn) return;
+    const mediaType = btn.dataset.mediaType;
+    const itemId = parseInt(btn.dataset.itemId, 10);
+    refreshMetadata(mediaType, itemId, btn);
+}
+
 window.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
         closeFixMatchModal();

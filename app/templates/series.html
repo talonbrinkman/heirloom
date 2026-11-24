@@ -178,6 +178,9 @@
                                 {% endif %}
                                 
                                 {% if user.is_admin %}
+                                <button type="button" class="play-btn m-0 refresh-meta-btn" data-media-type="tv" data-item-id="{{ series.id }}" onclick="triggerRefreshMetadata(this)" title="Refresh Metadata">
+                                    <i data-lucide="refresh-cw"></i>
+                                </button>
                                 <button type="button" class="play-btn m-0 fix-match-btn" data-media-type="tv" data-item-id="{{ series.id }}" data-title="{{ title }}" data-year="{{ series.year or '' }}" onclick="triggerFixMatch(this)" title="Fix Match">
                                     <i data-lucide="wrench"></i>
                                 </button>
@@ -237,6 +240,7 @@
                                                 </form>
                                                 {% endif %}
                                                 {% if user.is_admin %}
+                                                <button type="button" class="refresh-meta-btn" data-media-type="tv" data-item-id="{{ ep.id }}" onclick="triggerRefreshMetadata(this)">Refresh Metadata</button>
                                                 <button type="button" class="fix-match-btn" data-media-type="tv" data-item-id="{{ ep.id }}" data-title="{{ title }}" data-year="{{ series.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
                                                 {% endif %}
                                             </div>
@@ -324,6 +328,7 @@
                                         <button type="button" onclick="openWatchTogether('tv', {{ t.id }})">Watch Together</button>
                                         {% endif %}
                                         {% if user.is_admin %}
+                                        <button type="button" class="refresh-meta-btn" data-media-type="tv" data-item-id="{{ t.id }}" onclick="triggerRefreshMetadata(this)">Refresh Metadata</button>
                                         <button type="button" class="fix-match-btn" data-media-type="tv" data-item-id="{{ t.id }}" data-title="{{ t.title }}" data-year="{{ t.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
                                         {% endif %}
                                     </div>
@@ -410,6 +415,11 @@
                     wtBtn.setAttribute('onclick', `openWatchTogether('tv', ${ep.id})`);
                 }
 
+                // 6. Update Fix Match & Refresh Metadata buttons (if admin)
+                const refreshMetaBtn = document.querySelector('.info-actions .refresh-meta-btn');
+                if (refreshMetaBtn) {
+                    refreshMetaBtn.setAttribute('data-item-id', ep.id);
+                }
                 const fixMatchBtn = document.querySelector('.info-actions .fix-match-btn');
                 if (fixMatchBtn) {
                     fixMatchBtn.setAttribute('data-item-id', ep.id);

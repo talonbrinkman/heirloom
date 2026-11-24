@@ -892,6 +892,7 @@
                                     ` : ''}
                                     ${watchlistForm}
                                     ${(isAdmin && mediaType !== 'photo' && !isAlbum) ? `
+                                    <button type="button" class="refresh-meta-btn" data-media-type="${mediaType}" data-item-id="${m.id}" onclick="triggerRefreshMetadata(this)">Refresh Metadata</button>
                                     <button type="button" class="fix-match-btn" data-media-type="${mediaType}" data-item-id="${m.id}" data-title="${encodeURIComponent(m.title)}" data-year="${m.year || ''}" onclick="triggerFixMatchEncoded(this)">Fix Match</button>
                                     ` : ''}
                                 </div>

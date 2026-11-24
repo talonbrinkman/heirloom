@@ -293,6 +293,7 @@
                                     </form>
                                     {% endif %}
                                     {% if user.is_admin %}
+                                    <button type="button" class="refresh-meta-btn" data-media-type="{{ h.media_type }}" data-item-id="{{ h.item.id }}" onclick="triggerRefreshMetadata(this)">Refresh Metadata</button>
                                     <button type="button" class="fix-match-btn" data-media-type="{{ h.media_type }}" data-item-id="{{ h.item.id }}" data-title="{{ h.item.title }}" data-year="{{ h.item.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
                                     {% endif %}
                                 </div>
@@ -365,6 +366,7 @@
                                     </form>
                                     {% endif %}
                                     {% if user.is_admin %}
+                                    <button type="button" class="refresh-meta-btn" data-media-type="{{ r.media_type }}" data-item-id="{{ r.item.id }}" onclick="triggerRefreshMetadata(this)">Refresh Metadata</button>
                                     <button type="button" class="fix-match-btn" data-media-type="{{ r.media_type }}" data-item-id="{{ r.item.id }}" data-title="{{ r.item.title }}" data-year="{{ r.item.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
                                     {% endif %}
                                 </div>
@@ -430,6 +432,7 @@
                                         <button type="submit">Remove from Watchlist</button>
                                     </form>
                                     {% if user.is_admin %}
+                                    <button type="button" class="refresh-meta-btn" data-media-type="{{ w.media_type }}" data-item-id="{{ w.item.id }}" onclick="triggerRefreshMetadata(this)">Refresh Metadata</button>
                                     <button type="button" class="fix-match-btn" data-media-type="{{ w.media_type }}" data-item-id="{{ w.item.id }}" data-title="{{ w.item.title }}" data-year="{{ w.item.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
                                     {% endif %}
                                 </div>
@@ -500,6 +503,7 @@
                                     </form>
                                     {% endif %}
                                     {% if user.is_admin %}
+                                    <button type="button" class="refresh-meta-btn" data-media-type="movie" data-item-id="{{ m.id }}" onclick="triggerRefreshMetadata(this)">Refresh Metadata</button>
                                     <button type="button" class="fix-match-btn" data-media-type="movie" data-item-id="{{ m.id }}" data-title="{{ m.title }}" data-year="{{ m.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
                                     {% endif %}
                                 </div>
@@ -569,6 +573,7 @@
                                     </form>
                                     {% endif %}
                                     {% if user.is_admin %}
+                                    <button type="button" class="refresh-meta-btn" data-media-type="tv" data-item-id="{{ t.id }}" onclick="triggerRefreshMetadata(this)">Refresh Metadata</button>
                                     <button type="button" class="fix-match-btn" data-media-type="tv" data-item-id="{{ t.id }}" data-title="{{ t.title }}" data-year="{{ t.year or '' }}" onclick="triggerFixMatch(this)">Fix Match</button>
                                     {% endif %}
                                 </div>

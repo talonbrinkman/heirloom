@@ -535,14 +535,35 @@ def get_user_by_session_token(session: Session, token: str) -> Optional[User]:
         pass
     return session.exec(select(User).where(User.session_token == token)).first()
 
-def get_current_user(request: Request):
+def extract_session_token(request: Request) -> Optional[str]:
+    """Extract session token from cookie, Authorization Bearer header, X-Auth-Token header, or ?token=."""
     token = request.cookies.get("session_token")
     if not token:
         auth_header = request.headers.get("Authorization")
         if auth_header and auth_header.startswith("Bearer "):
-            token = auth_header.split(" ")[1]
+            token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        x_token = request.headers.get("X-Auth-Token")
+        if x_token:
+            token = x_token.strip()
     if not token:
         token = request.query_params.get("token")
+    return token or None
+
+
+def wants_json_response(request: Request) -> bool:
+    """Return True when the client expects JSON (Accept, XHR, or API token header without HTML)."""
+    accept = request.headers.get("accept", "").lower()
+    if "application/json" in accept:
+        return True
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return True
+    has_token_hdr = bool(request.headers.get("authorization") or request.headers.get("x-auth-token"))
+    return has_token_hdr and "text/html" not in accept
+
+
+def get_current_user(request: Request):
+    token = extract_session_token(request)
     if not token:
         return None
     with Session(engine) as session:
@@ -862,7 +883,7 @@ async def api_login(request: Request, login_data: APILoginRequest, session: Sess
 
 @app.api_route("/logout", methods=["GET", "POST"])
 async def process_logout(request: Request, response: Response, current_user: Optional[User] = Depends(get_current_user), session: Session = Depends(get_session)):
-    token = request.cookies.get("session_token")
+    token = extract_session_token(request)
     if token:
         try:
             sess_entry = session.exec(select(UserSession).where(UserSession.session_token == token)).first()
@@ -875,6 +896,11 @@ async def process_logout(request: Request, response: Response, current_user: Opt
         current_user.session_token = None
         session.add(current_user)
         session.commit()
+    if wants_json_response(request):
+        resp = JSONResponse({"status": "ok", "logged_out": True})
+        resp.delete_cookie("session_token")
+        resp.delete_cookie("active_profile_id")
+        return resp
     redirect = RedirectResponse(url="/login", status_code=303)
     redirect.delete_cookie("session_token")
     redirect.delete_cookie("active_profile_id")
@@ -6837,14 +6863,20 @@ def api_playback_info(
     subtitle_tracks = merge_external_subtitles(probe, item.file_path, media_type, item.id)
     formatted_subs = []
     for s in subtitle_tracks:
+        tid = s.get("id")
+        encoded_tid = urllib.parse.quote(str(tid), safe="") if tid is not None else ""
         formatted_subs.append({
-            "track_id": s.get("id"),
+            "track_id": tid,
             "language": s.get("language") or "und",
-            "title": s.get("title") or s.get("language") or f"Track {s.get('id')}",
-            "format": s.get("codec_name"),
+            "title": s.get("title") or s.get("language") or f"Track {tid}",
+            "label": s.get("label") or s.get("title") or s.get("language") or f"Track {tid}",
+            "format": s.get("codec_name") or s.get("codec") or "vtt",
+            "is_text": bool(s.get("is_text", True)),
+            "is_bitmap": bool(s.get("is_bitmap", False)),
             "is_default": bool(s.get("is_default")),
             "is_forced": bool(s.get("is_forced")),
-            "url": f"/subtitle/{media_type}/{item.id}?track_id={s.get('id')}"
+            "is_hearing_impaired": bool(s.get("is_hearing_impaired", False)),
+            "url": f"/subtitle/{media_type}/{item.id}?track_id={encoded_tid}"
         })
 
     if not formatted_subs and item.file_path:
@@ -6855,14 +6887,23 @@ def api_playback_info(
                     "track_id": 0,
                     "language": "und",
                     "title": f"External ({ext[1:].upper()})",
+                    "label": f"External ({ext[1:].upper()})",
                     "format": ext[1:],
+                    "is_text": True,
+                    "is_bitmap": False,
                     "is_default": True,
                     "is_forced": False,
+                    "is_hearing_impaired": False,
                     "url": f"/subtitle/{media_type}/{item.id}?ext={ext[1:]}"
                 })
                 break
 
     audio_tracks = probe.get("audio_tracks", [])
+    tonemap_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "hdr_tonemapping")).first()
+    server_hdr_tonemapping = (str(tonemap_cfg.value).strip().lower() not in ("disabled", "false", "0", "off")) if tonemap_cfg else True
+    default_audio_lang = (current_profile.default_audio_lang if (current_profile and current_profile.default_audio_lang) else (current_user.default_audio_lang if current_user else "eng")) or "eng"
+    default_subtitle_lang = (current_profile.default_subtitle_lang if (current_profile and current_profile.default_subtitle_lang) else (current_user.default_subtitle_lang if current_user else "eng")) or "eng"
+    auto_pause_episodes = (current_profile.auto_pause_episodes if (current_profile and getattr(current_profile, "auto_pause_episodes", None) is not None) else (getattr(current_user, "auto_pause_episodes", 3) if current_user else 3))
 
     next_episode_id = None
     prev_episode_id = None
@@ -6889,6 +6930,10 @@ def api_playback_info(
                 if i + 1 < len(sorted_eps): next_episode_id = sorted_eps[i+1].id
                 break
 
+    can_direct_video = bool(probe.get("can_direct_stream_video", False))
+    can_direct_audio = bool(probe.get("can_direct_stream_audio", False))
+    trickplay_ready = bool(is_trickplay_ready(media_type, item.id))
+
     return {
         "media_type": media_type,
         "item_id": item.id,
@@ -6903,7 +6948,7 @@ def api_playback_info(
         "resume_position_seconds": resume_seconds,
         "progress_percent": progress,
         "stream_url": f"/stream/{media_type}/{item.id}",
-        "hls_master_url": f"/stream/hls/{media_type}/{item.id}/master.m3u8",
+        "hls_master_url": f"/hls/{media_type}/{item.id}/master.m3u8",
         "poster_url": f"/metadata/{item.poster_filename}" if item.poster_filename else None,
         "backdrop_url": f"/metadata/{item.backdrop_filename}" if getattr(item, "backdrop_filename", None) else None,
         "audio_tracks": audio_tracks,
@@ -6913,7 +6958,34 @@ def api_playback_info(
         "credits_start": getattr(item, "credits_start", None),
         "credits_end": getattr(item, "credits_end", None),
         "next_episode_id": next_episode_id,
-        "prev_episode_id": prev_episode_id
+        "prev_episode_id": prev_episode_id,
+        "capabilities": {
+            "video_codec": probe.get("video_codec"),
+            "audio_codec": probe.get("audio_codec"),
+            "audio_channels": probe.get("audio_channels"),
+            "width": probe.get("width"),
+            "height": probe.get("height"),
+            "bitrate": probe.get("bitrate"),
+            "is_hdr": bool(probe.get("is_hdr", False)),
+            "hdr_format": probe.get("hdr_format"),
+            "server_hdr_tonemapping": server_hdr_tonemapping,
+            "can_direct_stream_video": can_direct_video,
+            "can_direct_stream_audio": can_direct_audio,
+            "direct_play_supported": bool(can_direct_video and can_direct_audio),
+            "available_resolutions": ["original", "1080", "720", "480"],
+            "opensubtitles_configured": bool(get_opensubtitles_api_key(session)),
+            "downloads_allowed": bool(current_user.downloads_access),
+        },
+        "trickplay": {
+            "ready": trickplay_ready,
+            "manifest_url": f"/trickplay/{media_type}/{item.id}/manifest.json" if trickplay_ready else None,
+        },
+        "preferences": {
+            "rewind_seconds": int(rewind_buffer),
+            "default_audio_lang": default_audio_lang,
+            "default_subtitle_lang": default_subtitle_lang,
+            "auto_pause_episodes": int(auto_pause_episodes) if auto_pause_episodes is not None else 3,
+        },
     }
 
 
@@ -8375,11 +8447,16 @@ def get_tv_episode_thumbnail(
 
 @app.post("/watchlist/remove/{watchlist_id}")
 async def remove_watchlist(request: Request, watchlist_id: int, current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    if not current_user: return RedirectResponse(url="/login", status_code=303)
+    if not current_user:
+        if wants_json_response(request):
+            return JSONResponse({"status": "unauthorized"}, status_code=401)
+        return RedirectResponse(url="/login", status_code=303)
     item = session.get(Watchlist, watchlist_id)
     if item and item.user_id == current_user.id:
         session.delete(item)
         session.commit()
+    if wants_json_response(request):
+        return {"status": "success", "removed": True}
     return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
 
 @app.post("/watchlist/remove_by_item/{media_type}/{item_id}")
@@ -8391,7 +8468,10 @@ async def remove_watchlist_by_item(
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
 ):
-    if not current_user: return RedirectResponse(url="/login", status_code=303)
+    if not current_user:
+        if wants_json_response(request):
+            return JSONResponse({"status": "unauthorized"}, status_code=401)
+        return RedirectResponse(url="/login", status_code=303)
     prof_id = current_profile.id if current_profile else None
     q = select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.media_type == media_type).where(Watchlist.item_id == item_id)
     if prof_id:
@@ -8400,6 +8480,8 @@ async def remove_watchlist_by_item(
     for item in items:
         session.delete(item)
     session.commit()
+    if wants_json_response(request):
+        return {"status": "success", "in_watchlist": False}
     return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
 
 @app.post("/watchlist/add/{media_type}/{item_id}")
@@ -8411,7 +8493,10 @@ async def add_watchlist(
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
 ):
-    if not current_user: return RedirectResponse(url="/login", status_code=303)
+    if not current_user:
+        if wants_json_response(request):
+            return JSONResponse({"status": "unauthorized"}, status_code=401)
+        return RedirectResponse(url="/login", status_code=303)
     prof_id = current_profile.id if current_profile else None
     q = select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.media_type == media_type).where(Watchlist.item_id == item_id)
     if prof_id:
@@ -8420,6 +8505,8 @@ async def add_watchlist(
     if not existing:
         session.add(Watchlist(user_id=current_user.id, profile_id=prof_id, media_type=media_type, item_id=item_id))
         session.commit()
+    if wants_json_response(request):
+        return {"status": "success", "in_watchlist": True}
     return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
 
 @app.post("/watchlist/toggle")
@@ -8431,7 +8518,10 @@ async def toggle_watchlist(
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
 ):
-    if not current_user: return RedirectResponse(url="/login", status_code=303)
+    if not current_user:
+        if wants_json_response(request):
+            return JSONResponse({"status": "unauthorized"}, status_code=401)
+        return RedirectResponse(url="/login", status_code=303)
     if not media_type or not item_id:
         try:
             body = await request.json()
@@ -8445,6 +8535,8 @@ async def toggle_watchlist(
         if iid_str and iid_str.isdigit():
             item_id = int(iid_str)
     if not media_type or not item_id:
+        if wants_json_response(request):
+            return JSONResponse({"error": "Missing media_type or item_id"}, status_code=400)
         return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
 
     prof_id = current_profile.id if current_profile else None
@@ -8463,7 +8555,7 @@ async def toggle_watchlist(
         session.commit()
         in_watchlist = True
 
-    if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
+    if wants_json_response(request):
         return {"status": "success", "in_watchlist": in_watchlist}
     return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
 
@@ -8481,7 +8573,7 @@ async def remove_history(
     session: Session = Depends(get_session)
 ):
     if not current_user:
-        if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
+        if wants_json_response(request):
             return Response(content='{"status": "unauthorized"}', media_type="application/json", status_code=401)
         return RedirectResponse(url="/login", status_code=303)
     prof_id = current_profile.id if current_profile else None
@@ -8492,7 +8584,7 @@ async def remove_history(
     for h in history_entries:
         session.delete(h)
     session.commit()
-    if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
+    if wants_json_response(request):
         return {"status": "success"}
     return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
 
@@ -8507,7 +8599,7 @@ async def mark_watched(
     session: Session = Depends(get_session)
 ):
     if not current_user:
-        if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
+        if wants_json_response(request):
             return Response(content='{"status": "unauthorized"}', media_type="application/json", status_code=401)
         return RedirectResponse(url="/login", status_code=303)
         
@@ -8618,7 +8710,7 @@ async def mark_watched(
 
             session.commit()
             
-    if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
+    if wants_json_response(request):
         return {"status": "success", "watched": True}
     return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
 
@@ -8633,7 +8725,7 @@ async def mark_unwatched(
     session: Session = Depends(get_session)
 ):
     if not current_user:
-        if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
+        if wants_json_response(request):
             return Response(content='{"status": "unauthorized"}', media_type="application/json", status_code=401)
         return RedirectResponse(url="/login", status_code=303)
         
@@ -8677,7 +8769,7 @@ async def mark_unwatched(
                 session.delete(h)
             session.commit()
             
-    if request.headers.get("x-requested-with") == "XMLHttpRequest" or request.headers.get("accept", "").startswith("application/json"):
+    if wants_json_response(request):
         return {"status": "success", "watched": False}
     return RedirectResponse(url=request.headers.get("referer", "/"), status_code=303)
 
@@ -9472,6 +9564,7 @@ async def save_transcoding_settings(
 
 @app.post("/settings/change_password")
 async def change_password(
+    request: Request,
     new_password: str = Form(...),
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
@@ -9488,10 +9581,13 @@ async def change_password(
     session.add(current_user)
     session.commit()
     
+    if wants_json_response(request):
+        return JSONResponse({"status": "ok"})
     return RedirectResponse(url="/settings?pw_success=1", status_code=303)
 
 @app.post("/settings/rewind")
 async def save_rewind_settings(
+    request: Request,
     rewind_seconds: int = Form(0),
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
@@ -9506,6 +9602,8 @@ async def save_rewind_settings(
         current_user.rewind_seconds = val
         session.add(current_user)
     session.commit()
+    if wants_json_response(request):
+        return JSONResponse({"status": "ok", "rewind_seconds": val})
     return RedirectResponse(url="/settings?rewind_success=1", status_code=303)
 
 @app.post("/settings/autopause")
@@ -9550,6 +9648,7 @@ async def save_language_settings(
 
 @app.post("/settings/tmdb")
 async def save_tmdb_key(
+    request: Request,
     tmdb_key: str = Form(""),
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
@@ -9565,10 +9664,13 @@ async def save_tmdb_key(
         session.add(config)
     session.commit()
     scanner_debouncer.trigger_scan(delay=0.5)
+    if wants_json_response(request):
+        return JSONResponse({"status": "ok", "configured": bool(tmdb_key.strip())})
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/settings/theaudiodb")
 async def save_theaudiodb_key(
+    request: Request,
     theaudiodb_key: str = Form(""),
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
@@ -9584,11 +9686,14 @@ async def save_theaudiodb_key(
         session.add(config)
     session.commit()
     scanner_debouncer.trigger_scan(delay=0.5)
+    if wants_json_response(request):
+        return JSONResponse({"status": "ok", "configured": bool(theaudiodb_key.strip())})
     return RedirectResponse(url="/settings", status_code=303)
 
 
 @app.post("/settings/opensubtitles")
 async def save_opensubtitles_key(
+    request: Request,
     opensubtitles_key: str = Form(""),
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
@@ -9604,6 +9709,8 @@ async def save_opensubtitles_key(
         config.value = opensubtitles_key.strip()
         session.add(config)
     session.commit()
+    if wants_json_response(request):
+        return JSONResponse({"status": "ok", "configured": bool(opensubtitles_key.strip())})
     return RedirectResponse(url="/settings", status_code=303)
 
 
@@ -9760,6 +9867,184 @@ async def search_media_matches(
         if raw_client is not None:
             await raw_client.aclose()
 
+class RefreshMetadataRequest(BaseModel):
+    media_type: str
+    item_id: int
+
+
+def _resolve_tmdb_key(session: Session) -> str:
+    """Return configured TMDB API key from SystemConfig or environment."""
+    config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
+    return (config.value if config else os.getenv("TMDB_API_KEY", "")) or ""
+
+
+async def _find_tmdb_id(
+    client: SafeHTTPClient,
+    media_type: str,
+    title: str,
+    year: Optional[Union[str, int]],
+    tmdb_key: str,
+) -> Optional[int]:
+    """Search TMDB for the best-matching movie or series ID."""
+    clean_title = (title or "").strip()
+    if not clean_title:
+        return None
+    endpoint = "https://api.themoviedb.org/3/search/movie" if media_type == "movie" else "https://api.themoviedb.org/3/search/tv"
+    year_match = re.search(r"\b(19|20)\d{2}\b", str(year or ""))
+    year_param = "year" if media_type == "movie" else "first_air_date_year"
+
+    params = {"query": clean_title, "api_key": tmdb_key}
+    if year_match:
+        params[year_param] = year_match.group(0)
+    res = await client.get(endpoint, params=params)
+    results = res.json().get("results", []) if res.status_code == 200 else []
+    if not results and year_match:
+        res = await client.get(endpoint, params={"query": clean_title, "api_key": tmdb_key})
+        results = res.json().get("results", []) if res.status_code == 200 else []
+    return results[0].get("id") if results else None
+
+
+async def _apply_tmdb_metadata(
+    session: Session,
+    client: SafeHTTPClient,
+    media_type: str,
+    item_id: int,
+    tmdb_id: int,
+    tmdb_key: str,
+) -> Union[dict, JSONResponse]:
+    """Fetch full TMDB metadata and images for a movie or TV series and update DB rows."""
+    if media_type == "movie":
+        movie = session.get(Movie, item_id)
+        if not movie:
+            raise HTTPException(status_code=404, detail="Movie not found")
+
+        url = f"https://api.themoviedb.org/3/movie/{tmdb_id}"
+        res = await client.get(url, params={"api_key": tmdb_key})
+        if res.status_code != 200:
+            return JSONResponse(status_code=400, content={"error": "Failed to fetch movie details from TMDB."})
+        m_data = res.json()
+
+        poster_filename = await async_download_image(client, m_data.get("poster_path"), "movie", tmdb_id, "poster")
+        backdrop_filename = await async_download_image(client, m_data.get("backdrop_path"), "movie", tmdb_id, "backdrop")
+        cast, director, content_rating, genres_str, trailer_key, col_id, col_name, col_poster, col_backdrop, logo_filename = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_key)
+
+        movie.title = m_data.get("title") or movie.title
+        movie.year = (m_data.get("release_date") or "")[:4] or movie.year
+        movie.plot = m_data.get("overview") or movie.plot
+        movie.rating = m_data.get("vote_average") or movie.rating
+        movie.tmdb_id = tmdb_id
+        movie.collection_id = col_id if col_id else 0
+        movie.collection_name = col_name
+        if col_poster:
+            movie.collection_poster_filename = col_poster
+        if col_backdrop:
+            movie.collection_backdrop_filename = col_backdrop
+        if logo_filename:
+            movie.logo_filename = logo_filename
+        if trailer_key:
+            movie.trailer_key = trailer_key
+        if poster_filename:
+            movie.poster_filename = poster_filename
+        if backdrop_filename:
+            movie.backdrop_filename = backdrop_filename
+        if cast:
+            movie.cast = cast
+        if director:
+            movie.director = director
+        if content_rating:
+            movie.content_rating = content_rating
+        if genres_str:
+            movie.genres = genres_str
+
+        session.add(movie)
+        session.commit()
+        _PENDING_MOVIE_IMG_META.pop(movie.id, None)
+        _checked_movie_images.discard(movie.id)
+        invalidate_movie_cache(movie.id)
+        return {"success": True, "title": movie.title, "tmdb_id": tmdb_id}
+
+    if media_type == "tv":
+        show = session.get(TVShow, item_id)
+        if not show:
+            raise HTTPException(status_code=404, detail="TV Show not found")
+
+        old_title = show.title
+        url = f"https://api.themoviedb.org/3/tv/{tmdb_id}"
+        res = await client.get(url, params={"api_key": tmdb_key})
+        if res.status_code != 200:
+            return JSONResponse(status_code=400, content={"error": "Failed to fetch TV details from TMDB."})
+        s_data = res.json()
+
+        poster_filename = await async_download_image(client, s_data.get("poster_path"), "tv", tmdb_id, "poster")
+        backdrop_filename = await async_download_image(client, s_data.get("backdrop_path"), "tv", tmdb_id, "backdrop")
+        cast, director, content_rating, genres_str, _, _, _, _, _, logo_filename = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_key)
+
+        new_title = s_data.get("name") or old_title
+        new_year = (s_data.get("first_air_date") or "")[:4] or show.year
+
+        episodes = session.exec(select(TVShow).where(TVShow.title == old_title)).all()
+        if not episodes:
+            episodes = [show]
+
+        seasons = {ep.season for ep in episodes if ep.season is not None}
+        season_posters = {}
+        episode_titles = {}
+        episode_plots = {}
+        for s in seasons:
+            try:
+                s_res = await client.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s}", params={"api_key": tmdb_key})
+                if s_res.status_code == 200:
+                    s_json = s_res.json()
+                    s_poster_path = s_json.get("poster_path")
+                    if s_poster_path:
+                        season_posters[s] = await async_download_image(client, s_poster_path, f"tv_s{s}", tmdb_id, "poster")
+                    for ep_item in s_json.get("episodes") or []:
+                        ep_num = ep_item.get("episode_number")
+                        if ep_num is not None:
+                            episode_titles[(s, int(ep_num))] = (ep_item.get("name") or "").strip()
+                            episode_plots[(s, int(ep_num))] = (ep_item.get("overview") or "").strip()
+            except Exception:
+                pass
+
+        for ep in episodes:
+            ep.title = new_title
+            ep.year = new_year
+            ep.plot = s_data.get("overview") or ep.plot
+            ep.rating = s_data.get("vote_average") or ep.rating
+            if poster_filename:
+                ep.poster_filename = poster_filename
+            if backdrop_filename:
+                ep.backdrop_filename = backdrop_filename
+            if cast:
+                ep.cast = cast
+            if director:
+                ep.director = director
+            if logo_filename:
+                ep.logo_filename = logo_filename
+            if content_rating:
+                ep.content_rating = content_rating
+            if genres_str:
+                ep.genres = genres_str
+            if ep.season in season_posters and season_posters[ep.season]:
+                ep.season_poster_filename = season_posters[ep.season]
+            if ep.season is not None and ep.episode is not None:
+                if (ep.season, ep.episode) in episode_titles:
+                    ep.episode_title = episode_titles[(ep.season, ep.episode)]
+                if (ep.season, ep.episode) in episode_plots:
+                    ep.episode_plot = episode_plots[(ep.season, ep.episode)]
+            session.add(ep)
+
+        session.commit()
+        _PENDING_TV_IMG_META.pop(old_title.strip().lower(), None)
+        _PENDING_TV_IMG_META.pop(new_title.strip().lower(), None)
+        _checked_tv_images.discard(old_title.strip().lower())
+        _checked_tv_images.discard(new_title.strip().lower())
+        invalidate_series_cache()
+        return {"success": True, "title": new_title, "tmdb_id": tmdb_id}
+
+    raise HTTPException(status_code=400, detail="Invalid media type")
+
+
 @app.post("/api/media/fix_match")
 async def fix_media_match(
     data: FixMatchRequest,
@@ -9770,148 +10055,14 @@ async def fix_media_match(
     if not current_user or not is_actual_admin(current_user, current_profile):
         raise HTTPException(status_code=403, detail="Admin permissions required")
 
-    config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
-    tmdb_key = config.value if config else os.getenv("TMDB_API_KEY", "")
+    tmdb_key = _resolve_tmdb_key(session)
     if not tmdb_key:
         return JSONResponse(status_code=400, content={"error": "TMDB API key is not configured."})
-
-    media_type = data.media_type
-    item_id = data.item_id
-    tmdb_id = data.tmdb_id
 
     raw_client = httpx.AsyncClient(timeout=15.0) if httpx is not None else None
     try:
         client = SafeHTTPClient(raw_client)
-        if media_type == "movie":
-            movie = session.get(Movie, item_id)
-            if not movie:
-                raise HTTPException(status_code=404, detail="Movie not found")
-
-            url = f"https://api.themoviedb.org/3/movie/{tmdb_id}"
-            res = await client.get(url, params={"api_key": tmdb_key})
-            if res.status_code != 200:
-                return JSONResponse(status_code=400, content={"error": "Failed to fetch movie details from TMDB."})
-            m_data = res.json()
-
-            poster_filename = await async_download_image(client, m_data.get("poster_path"), "movie", tmdb_id, "poster")
-            backdrop_filename = await async_download_image(client, m_data.get("backdrop_path"), "movie", tmdb_id, "backdrop")
-            cast, director, content_rating, genres_str, trailer_key, col_id, col_name, col_poster, col_backdrop, logo_filename = await async_fetch_additional_details(client, tmdb_id, "movie", tmdb_key)
-
-            movie.title = m_data.get("title") or movie.title
-            movie.year = (m_data.get("release_date") or "")[:4] or movie.year
-            movie.plot = m_data.get("overview") or movie.plot
-            movie.rating = m_data.get("vote_average") or movie.rating
-            movie.tmdb_id = tmdb_id
-            movie.collection_id = col_id if col_id else 0
-            movie.collection_name = col_name
-            if col_poster:
-                movie.collection_poster_filename = col_poster
-            if col_backdrop:
-                movie.collection_backdrop_filename = col_backdrop
-            if logo_filename:
-                movie.logo_filename = logo_filename
-            if trailer_key:
-                movie.trailer_key = trailer_key
-            if poster_filename:
-                movie.poster_filename = poster_filename
-            if backdrop_filename:
-                movie.backdrop_filename = backdrop_filename
-            if cast:
-                movie.cast = cast
-            if director:
-                movie.director = director
-            if content_rating:
-                movie.content_rating = content_rating
-            if genres_str:
-                movie.genres = genres_str
-
-            session.add(movie)
-            session.commit()
-            _PENDING_MOVIE_IMG_META.pop(movie.id, None)
-            _checked_movie_images.discard(movie.id)
-            invalidate_movie_cache(movie.id)
-            return {"success": True, "title": movie.title}
-
-        elif media_type == "tv":
-            show = session.get(TVShow, item_id)
-            if not show:
-                raise HTTPException(status_code=404, detail="TV Show not found")
-
-            old_title = show.title
-            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}"
-            res = await client.get(url, params={"api_key": tmdb_key})
-            if res.status_code != 200:
-                return JSONResponse(status_code=400, content={"error": "Failed to fetch TV details from TMDB."})
-            s_data = res.json()
-
-            poster_filename = await async_download_image(client, s_data.get("poster_path"), "tv", tmdb_id, "poster")
-            backdrop_filename = await async_download_image(client, s_data.get("backdrop_path"), "tv", tmdb_id, "backdrop")
-            cast, director, content_rating, genres_str, _, _, _, _, _, logo_filename = await async_fetch_additional_details(client, tmdb_id, "tv", tmdb_key)
-
-            new_title = s_data.get("name") or old_title
-            new_year = (s_data.get("first_air_date") or "")[:4] or show.year
-
-            episodes = session.exec(select(TVShow).where(TVShow.title == old_title)).all()
-            if not episodes:
-                episodes = [show]
-
-            seasons = {ep.season for ep in episodes if ep.season is not None}
-            season_posters = {}
-            episode_titles = {}
-            episode_plots = {}
-            for s in seasons:
-                try:
-                    s_res = await client.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s}", params={"api_key": tmdb_key})
-                    if s_res.status_code == 200:
-                        s_json = s_res.json()
-                        s_poster_path = s_json.get("poster_path")
-                        if s_poster_path:
-                            season_posters[s] = await async_download_image(client, s_poster_path, f"tv_s{s}", tmdb_id, "poster")
-                        for ep_item in s_json.get("episodes") or []:
-                            ep_num = ep_item.get("episode_number")
-                            if ep_num is not None:
-                                episode_titles[(s, int(ep_num))] = (ep_item.get("name") or "").strip()
-                                episode_plots[(s, int(ep_num))] = (ep_item.get("overview") or "").strip()
-                except Exception:
-                    pass
-
-            for ep in episodes:
-                ep.title = new_title
-                ep.year = new_year
-                ep.plot = s_data.get("overview") or ep.plot
-                ep.rating = s_data.get("vote_average") or ep.rating
-                if poster_filename:
-                    ep.poster_filename = poster_filename
-                if backdrop_filename:
-                    ep.backdrop_filename = backdrop_filename
-                if cast:
-                    ep.cast = cast
-                if director:
-                    ep.director = director
-                if logo_filename:
-                    ep.logo_filename = logo_filename
-                if content_rating:
-                    ep.content_rating = content_rating
-                if genres_str:
-                    ep.genres = genres_str
-                if ep.season in season_posters and season_posters[ep.season]:
-                    ep.season_poster_filename = season_posters[ep.season]
-                if ep.season is not None and ep.episode is not None:
-                    if (ep.season, ep.episode) in episode_titles:
-                        ep.episode_title = episode_titles[(ep.season, ep.episode)]
-                    if (ep.season, ep.episode) in episode_plots:
-                        ep.episode_plot = episode_plots[(ep.season, ep.episode)]
-                session.add(ep)
-
-            session.commit()
-            _PENDING_TV_IMG_META.pop(old_title.strip().lower(), None)
-            _PENDING_TV_IMG_META.pop(new_title.strip().lower(), None)
-            _checked_tv_images.discard(old_title.strip().lower())
-            _checked_tv_images.discard(new_title.strip().lower())
-            invalidate_series_cache()
-            return {"success": True, "title": new_title}
-        else:
-            raise HTTPException(status_code=400, detail="Invalid media type")
+        return await _apply_tmdb_metadata(session, client, data.media_type, data.item_id, data.tmdb_id, tmdb_key)
     except HTTPException:
         raise
     except Exception as e:
@@ -9920,8 +10071,49 @@ async def fix_media_match(
         if raw_client is not None:
             await raw_client.aclose()
 
+
+@app.post("/api/media/refresh_metadata")
+async def refresh_media_metadata(
+    data: RefreshMetadataRequest,
+    current_user: User = Depends(get_current_user),
+    current_profile: Optional[Profile] = Depends(get_current_profile),
+    session: Session = Depends(get_session)
+):
+    if not current_user or not is_actual_admin(current_user, current_profile):
+        raise HTTPException(status_code=403, detail="Admin permissions required")
+    if data.media_type not in ("movie", "tv"):
+        raise HTTPException(status_code=400, detail="Invalid media type")
+
+    tmdb_key = _resolve_tmdb_key(session)
+    if not tmdb_key:
+        return JSONResponse(status_code=400, content={"error": "TMDB API key is not configured."})
+
+    item = session.get(Movie, data.item_id) if data.media_type == "movie" else session.get(TVShow, data.item_id)
+    if not item:
+        detail = "Movie not found" if data.media_type == "movie" else "TV Show not found"
+        raise HTTPException(status_code=404, detail=detail)
+
+    raw_client = httpx.AsyncClient(timeout=15.0) if httpx is not None else None
+    try:
+        client = SafeHTTPClient(raw_client)
+        tmdb_id = getattr(item, "tmdb_id", None) if data.media_type == "movie" else None
+        if not tmdb_id:
+            tmdb_id = await _find_tmdb_id(client, data.media_type, item.title, getattr(item, "year", None), tmdb_key)
+        if not tmdb_id:
+            return JSONResponse(status_code=404, content={"error": "No matching entry found on TMDB. Try Fix Match to choose manually."})
+        return await _apply_tmdb_metadata(session, client, data.media_type, data.item_id, tmdb_id, tmdb_key)
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Failed to refresh metadata: {str(e)}"})
+    finally:
+        if raw_client is not None:
+            await raw_client.aclose()
+
+
 @app.post("/settings/remote_access")
 async def save_remote_access(
+    request: Request,
     remote_url: str = Form(""),
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
@@ -9936,6 +10128,8 @@ async def save_remote_access(
         config.value = remote_url.strip()
         session.add(config)
     session.commit()
+    if wants_json_response(request):
+        return JSONResponse({"status": "ok", "remote_access_url": config.value})
     return RedirectResponse(url="/settings", status_code=303)
 
 def _get_volume_context(session: Session):
@@ -9960,8 +10154,7 @@ def _get_volume_context(session: Session):
     return v_paths, volume_paths, mounted_volumes
 
 
-def _wants_json(request: Request) -> bool:
-    return "application/json" in request.headers.get("accept", "").lower()
+_wants_json = wants_json_response
 
 
 @app.post("/settings/add_volume")
@@ -10025,12 +10218,15 @@ async def delete_volume(
 
 @app.post("/settings/rescan")
 async def rescan_library(
+    request: Request,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
 ):
     if not is_actual_admin(current_user, current_profile): raise HTTPException(status_code=403, detail="Forbidden")
     scanner_manager.start_scan()
+    if wants_json_response(request):
+        return JSONResponse({"status": "ok", "scanning": True})
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.get("/api/suggest_volume_path")
