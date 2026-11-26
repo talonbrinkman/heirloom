@@ -14,19 +14,35 @@ final profilesListProvider = FutureProvider.autoDispose<List<Map<String, dynamic
 
 IconData getProfileIcon(String? iconName) {
   switch (iconName?.toLowerCase()) {
-    case 'smile': return LucideIcons.smile;
-    case 'tv': return LucideIcons.tv;
-    case 'heart': return LucideIcons.heart;
-    case 'star': return LucideIcons.star;
-    case 'music': return LucideIcons.music;
-    case 'film': return LucideIcons.film;
-    case 'sparkles': return LucideIcons.sparkles;
-    case 'gamepad-2': return LucideIcons.gamepad2;
-    case 'crown': return LucideIcons.crown;
-    case 'zap': return LucideIcons.zap;
-    case 'camera': return LucideIcons.camera;
+    case 'smile':
+      return LucideIcons.smile;
+    case 'cat':
+      return LucideIcons.cat;
+    case 'tv':
+      return LucideIcons.tv;
+    case 'heart':
+      return LucideIcons.heart;
+    case 'crown':
+      return LucideIcons.crown;
+    case 'flame':
+      return LucideIcons.flame;
+    case 'gamepad-2':
+      return LucideIcons.gamepad2;
+    case 'star':
+      return LucideIcons.star;
+    case 'music':
+      return LucideIcons.music;
+    case 'film':
+      return LucideIcons.film;
+    case 'sparkles':
+      return LucideIcons.sparkles;
+    case 'zap':
+      return LucideIcons.zap;
+    case 'camera':
+      return LucideIcons.camera;
     case 'user':
-    default: return LucideIcons.user;
+    default:
+      return LucideIcons.user;
   }
 }
 
@@ -70,7 +86,6 @@ class _ProfilePickerScreenState extends ConsumerState<ProfilePickerScreen> {
 
   Future<void> _selectProfileDirect(int profileId) async {
     final dio = ref.read(apiClientProvider);
-    final prefs = ref.read(sharedPreferencesProvider);
 
     try {
       final resp = await dio.post('/api/profile/select', data: {
@@ -85,8 +100,7 @@ class _ProfilePickerScreenState extends ConsumerState<ProfilePickerScreen> {
         return;
       }
 
-      await prefs.setInt('active_profile_id', profileId);
-      ref.read(activeProfileIdProvider.notifier).state = profileId;
+      await ref.read(appSessionProvider.notifier).selectProfile(profileId);
       ref.invalidate(activeProfileInfoProvider);
 
       if (mounted) {
@@ -95,7 +109,7 @@ class _ProfilePickerScreenState extends ConsumerState<ProfilePickerScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to switch profile: $e')),
+          SnackBar(content: Text(formatApiError(e, fallback: 'Failed to switch profile.'))),
         );
       }
     }
@@ -109,13 +123,11 @@ class _ProfilePickerScreenState extends ConsumerState<ProfilePickerScreen> {
       builder: (ctx) => _PinKeypadModal(
         profile: profile,
         onUnlocked: (unlockToken) async {
-          final prefs = ref.read(sharedPreferencesProvider);
           final profileId = profile['id'] as int;
-          await prefs.setInt('active_profile_id', profileId);
-          if (unlockToken != null) {
-            await prefs.setString('profile_unlocked_$profileId', unlockToken);
-          }
-          ref.read(activeProfileIdProvider.notifier).state = profileId;
+          await ref.read(appSessionProvider.notifier).selectProfile(
+                profileId,
+                pinUnlockToken: unlockToken,
+              );
           ref.invalidate(activeProfileInfoProvider);
 
           if (ctx.mounted) {
@@ -130,184 +142,287 @@ class _ProfilePickerScreenState extends ConsumerState<ProfilePickerScreen> {
   }
 
   void _showEditProfileModal(Map<String, dynamic> profile) {
-    final nameCtrl = TextEditingController(text: profile['name']);
-    int selectedRating = profile['rating_level'] as int? ?? 0;
-
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          backgroundColor: AppTheme.bgTertiary,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          title: Row(
-            children: [
-              CircleAvatar(
-                backgroundColor: parseProfileColor(profile['avatar_color']),
-                radius: 18,
-                child: Icon(getProfileIcon(profile['avatar_icon']), color: Colors.white, size: 20),
-              ),
-              const SizedBox(width: 12),
-              Text('Edit ${profile['name']}', style: const TextStyle(fontSize: 18)),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              TextField(
-                controller: nameCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'Profile Name',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 16),
-              const Text('Maturity Rating:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-              const SizedBox(height: 8),
-              DropdownButtonFormField<int>(
-                value: selectedRating,
-                dropdownColor: AppTheme.bgTertiary,
-                decoration: const InputDecoration(border: OutlineInputBorder()),
-                items: const [
-                  DropdownMenuItem(value: 0, child: Text('Adult (All content)')),
-                  DropdownMenuItem(value: 1, child: Text('Teen (PG-13 / TV-14)')),
-                  DropdownMenuItem(value: 2, child: Text('Child (G, PG, TV-Y)')),
-                ],
-                onChanged: (val) {
-                  if (val != null) setDialogState(() => selectedRating = val);
-                },
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Cancel', style: TextStyle(color: Colors.white70)),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                final dio = ref.read(apiClientProvider);
-                try {
-                  await dio.post('/api/profile/${profile['id']}/update', data: {
-                    'name': nameCtrl.text.trim(),
-                    'rating_level': selectedRating,
-                    'is_kids': selectedRating == 2,
-                  });
-                  ref.invalidate(profilesListProvider);
-                  if (ctx.mounted) Navigator.of(ctx).pop();
-                } catch (e) {
-                  if (ctx.mounted) {
-                    ScaffoldMessenger.of(ctx).showSnackBar(
-                      SnackBar(content: Text('Failed to update: $e')),
-                    );
-                  }
-                }
-              },
-              child: const Text('Save'),
-            ),
-          ],
-        ),
-      ),
-    );
+    _showProfileEditorModal(existing: profile);
   }
 
   void _showAddProfileModal() {
-    final nameCtrl = TextEditingController();
-    int selectedRating = 0;
-    String selectedColor = '#e50914';
+    _showProfileEditorModal();
+  }
 
-    final colors = ['#e50914', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
+  void _showProfileEditorModal({Map<String, dynamic>? existing}) {
+    final isEdit = existing != null;
+    final isPrimary = existing?['is_primary'] == true;
+    final hasPin = existing?['has_pin'] == true;
+
+    final nameCtrl = TextEditingController(text: existing?['name']?.toString() ?? '');
+    final pinCtrl = TextEditingController();
+    int selectedRating = existing?['rating_level'] as int? ?? (existing?['is_kids'] == true ? 2 : 0);
+    String selectedColor = existing?['avatar_color']?.toString() ?? '#e50914';
+    String selectedIcon = existing?['avatar_icon']?.toString() ?? 'user';
+    bool obscurePin = true;
+    bool removeExistingPin = false;
+    bool saving = false;
+    String? formError;
+
+    const webColors = [
+      '#e50914',
+      '#3b82f6',
+      '#10b981',
+      '#f59e0b',
+      '#8b5cf6',
+      '#ec4899',
+      '#06b6d4',
+      '#64748b',
+    ];
+
+    const webIcons = [
+      'user',
+      'smile',
+      'cat',
+      'tv',
+      'heart',
+      'crown',
+      'flame',
+      'gamepad-2',
+    ];
 
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          backgroundColor: AppTheme.bgTertiary,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          title: const Text('Add Profile', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                TextField(
-                  controller: nameCtrl,
-                  autofocus: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Profile Name',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                const Text('Avatar Color:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                const SizedBox(height: 8),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: colors.map((c) {
-                    final isSel = selectedColor == c;
-                    return GestureDetector(
-                      onTap: () => setDialogState(() => selectedColor = c),
-                      child: Container(
-                        width: 32,
-                        height: 32,
+        builder: (sbCtx, setModalState) => AlertDialog(
+          backgroundColor: AppColors.surface,
+          title: Text(isEdit ? 'Edit Profile' : 'Add Profile', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          content: SizedBox(
+            width: 360,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        width: 68,
+                        height: 68,
                         decoration: BoxDecoration(
-                          color: parseProfileColor(c),
-                          shape: BoxShape.circle,
-                          border: isSel ? Border.all(color: Colors.white, width: 3) : null,
+                          color: parseProfileColor(selectedColor),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Icon(getProfileIcon(selectedIcon), color: AppColors.text, size: 34),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: TextField(
+                          controller: nameCtrl,
+                          autofocus: !isEdit,
+                          maxLength: 30,
+                          decoration: const InputDecoration(
+                            labelText: 'Profile Name',
+                            counterText: '',
+                          ),
                         ),
                       ),
-                    );
-                  }).toList(),
-                ),
-                const SizedBox(height: 16),
-                const Text('Maturity Rating:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                const SizedBox(height: 8),
-                DropdownButtonFormField<int>(
-                  value: selectedRating,
-                  dropdownColor: AppTheme.bgTertiary,
-                  decoration: const InputDecoration(border: OutlineInputBorder()),
-                  items: const [
-                    DropdownMenuItem(value: 0, child: Text('Adult (All content)')),
-                    DropdownMenuItem(value: 1, child: Text('Teen (PG-13 / TV-14)')),
-                    DropdownMenuItem(value: 2, child: Text('Child (G, PG, TV-Y)')),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  const Text('Avatar Color', style: TextStyle(color: AppColors.textMuted, fontSize: 13, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: webColors.map((c) {
+                      final sel = selectedColor.toLowerCase() == c;
+                      return GestureDetector(
+                        onTap: () => setModalState(() => selectedColor = c),
+                        child: Container(
+                          width: 32,
+                          height: 32,
+                          decoration: BoxDecoration(
+                            color: parseProfileColor(c),
+                            shape: BoxShape.circle,
+                            border: sel ? Border.all(color: AppColors.text, width: 3) : null,
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text('Avatar Icon', style: TextStyle(color: AppColors.textMuted, fontSize: 13, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: webIcons.map((iconKey) {
+                      final sel = selectedIcon.toLowerCase() == iconKey;
+                      return InkWell(
+                        borderRadius: BorderRadius.circular(AppSpacing.radius),
+                        onTap: () => setModalState(() => selectedIcon = iconKey),
+                        child: Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: sel ? AppColors.accent : AppColors.surfaceHover,
+                            borderRadius: BorderRadius.circular(AppSpacing.radius),
+                          ),
+                          child: Icon(
+                            getProfileIcon(iconKey),
+                            size: 20,
+                            color: sel ? AppColors.text : AppColors.textMuted,
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  if (!isPrimary) ...[
+                    const SizedBox(height: 16),
+                    const Text('Content Rating', style: TextStyle(color: AppColors.textMuted, fontSize: 13, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 6),
+                    DropdownButtonFormField<int>(
+                      value: selectedRating,
+                      dropdownColor: AppColors.surfaceHover,
+                      items: const [
+                        DropdownMenuItem(value: 0, child: Text('Adult (All ratings allowed)')),
+                        DropdownMenuItem(value: 1, child: Text('Teen (PG-13 / TV-14 & under)')),
+                        DropdownMenuItem(value: 2, child: Text('Child (G, PG, TV-Y & under)')),
+                      ],
+                      onChanged: (val) {
+                        if (val != null) setModalState(() => selectedRating = val);
+                      },
+                    ),
                   ],
-                  onChanged: (val) {
-                    if (val != null) setDialogState(() => selectedRating = val);
-                  },
-                ),
-              ],
+                  const SizedBox(height: 16),
+                  const Text('Profile Lock (PIN)', style: TextStyle(color: AppColors.textMuted, fontSize: 13, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 4),
+                  Text(
+                    isEdit && hasPin
+                        ? 'Enter 4–15 digits to change PIN, or toggle Remove PIN below.'
+                        : 'Optional 4 to 15 digit numeric PIN.',
+                    style: const TextStyle(color: AppColors.textMuted, fontSize: 12),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: pinCtrl,
+                    enabled: !removeExistingPin,
+                    obscureText: obscurePin,
+                    keyboardType: TextInputType.number,
+                    maxLength: 15,
+                    decoration: InputDecoration(
+                      hintText: isEdit && hasPin && !removeExistingPin ? '•••• (keep existing)' : '4–15 digits',
+                      counterText: '',
+                      suffixIcon: IconButton(
+                        icon: Icon(obscurePin ? LucideIcons.eye : LucideIcons.eyeOff, size: 18, color: AppColors.textMuted),
+                        onPressed: () => setModalState(() => obscurePin = !obscurePin),
+                      ),
+                    ),
+                  ),
+                  if (isEdit && hasPin) ...[
+                    const SizedBox(height: 6),
+                    GestureDetector(
+                      onTap: () => setModalState(() => removeExistingPin = !removeExistingPin),
+                      child: Row(
+                        children: [
+                          Checkbox(
+                            value: removeExistingPin,
+                            onChanged: (val) => setModalState(() => removeExistingPin = val == true),
+                          ),
+                          const Text('Remove PIN lock', style: TextStyle(color: AppColors.textMuted, fontSize: 13)),
+                        ],
+                      ),
+                    ),
+                  ],
+                  if (formError != null) ...[
+                    const SizedBox(height: 10),
+                    Text(formError!, style: const TextStyle(color: AppColors.accent, fontSize: 13)),
+                  ],
+                ],
+              ),
             ),
           ),
           actions: [
+            if (isEdit && !isPrimary)
+              ElevatedButton.icon(
+                style: AppButtonStyles.danger,
+                onPressed: saving
+                    ? null
+                    : () async {
+                        setModalState(() => saving = true);
+                        try {
+                          await ref.read(apiClientProvider).post('/api/profile/${existing['id']}/delete');
+                          ref.invalidate(profilesListProvider);
+                          if (ctx.mounted) Navigator.of(ctx).pop();
+                        } catch (e) {
+                          setModalState(() {
+                            saving = false;
+                            formError = formatApiError(e, fallback: 'Failed to delete profile.');
+                          });
+                        }
+                      },
+                icon: const Icon(LucideIcons.trash2, size: 14),
+                label: const Text('Delete'),
+              ),
             TextButton(
               onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Cancel', style: TextStyle(color: Colors.white70)),
+              child: const Text('Cancel'),
             ),
             ElevatedButton(
-              onPressed: () async {
-                final name = nameCtrl.text.trim();
-                if (name.isEmpty) return;
+              onPressed: saving
+                  ? null
+                  : () async {
+                      final name = nameCtrl.text.trim();
+                      if (name.isEmpty) {
+                        setModalState(() => formError = 'Profile name is required.');
+                        return;
+                      }
+                      final pinVal = pinCtrl.text.trim();
+                      if (pinVal.isNotEmpty && (!RegExp(r'^\d{4,15}$').hasMatch(pinVal))) {
+                        setModalState(() => formError = 'PIN must be 4 to 15 numeric digits.');
+                        return;
+                      }
 
-                final dio = ref.read(apiClientProvider);
-                try {
-                  await dio.post('/api/profile/create', data: {
-                    'name': name,
-                    'avatar_color': selectedColor,
-                    'avatar_icon': 'user',
-                    'rating_level': selectedRating,
-                    'is_kids': selectedRating == 2,
-                  });
-                  ref.invalidate(profilesListProvider);
-                  if (ctx.mounted) Navigator.of(ctx).pop();
-                } catch (e) {
-                  if (ctx.mounted) {
-                    ScaffoldMessenger.of(ctx).showSnackBar(
-                      SnackBar(content: Text('Failed to create profile: $e')),
-                    );
-                  }
-                }
-              },
-              child: const Text('Create'),
+                      setModalState(() {
+                        saving = true;
+                        formError = null;
+                      });
+
+                      final dio = ref.read(apiClientProvider);
+                      try {
+                        if (isEdit) {
+                          final payload = <String, dynamic>{
+                            'name': name,
+                            'avatar_color': selectedColor,
+                            'avatar_icon': selectedIcon,
+                            if (!isPrimary) 'rating_level': selectedRating,
+                            if (!isPrimary) 'is_kids': selectedRating == 2,
+                          };
+                          if (removeExistingPin) {
+                            payload['remove_pin'] = true;
+                          } else if (pinVal.isNotEmpty) {
+                            payload['pin'] = pinVal;
+                          } else if (hasPin) {
+                            payload['pin'] = '__EXISTING_PIN__';
+                          }
+                          await dio.post('/api/profile/${existing['id']}/update', data: payload);
+                        } else {
+                          await dio.post('/api/profile/create', data: {
+                            'name': name,
+                            'avatar_color': selectedColor,
+                            'avatar_icon': selectedIcon,
+                            'rating_level': selectedRating,
+                            'is_kids': selectedRating == 2,
+                            if (pinVal.isNotEmpty) 'pin': pinVal,
+                          });
+                        }
+                        ref.invalidate(profilesListProvider);
+                        ref.invalidate(activeProfileInfoProvider);
+                        if (ctx.mounted) Navigator.of(ctx).pop();
+                      } catch (e) {
+                        setModalState(() {
+                          saving = false;
+                          formError = formatApiError(e, fallback: 'Failed to save profile.');
+                        });
+                      }
+                    },
+              child: Text(saving ? 'Saving...' : (isEdit ? 'Save Profile' : 'Create')),
             ),
           ],
         ),
@@ -321,16 +436,16 @@ class _ProfilePickerScreenState extends ConsumerState<ProfilePickerScreen> {
     final activeId = ref.watch(activeProfileIdProvider);
 
     return Scaffold(
-      backgroundColor: AppTheme.bgPrimary,
+      backgroundColor: AppColors.bg,
       appBar: AppBar(
         automaticallyImplyLeading: false,
         leading: activeId != null
             ? IconButton(
-                icon: const Icon(LucideIcons.arrowLeft),
+                icon: const Icon(LucideIcons.arrowLeft, color: AppColors.textMuted),
                 onPressed: () => context.go('/'),
               )
             : null,
-        title: const Text('Heirloom', style: TextStyle(color: AppTheme.primaryRed, fontWeight: FontWeight.bold, fontSize: 24)),
+        title: const Text('Heirloom', style: TextStyle(color: AppColors.text, fontWeight: FontWeight.bold, fontSize: 24)),
         centerTitle: true,
       ),
       body: profilesAsync.when(
@@ -343,7 +458,7 @@ class _ProfilePickerScreenState extends ConsumerState<ProfilePickerScreen> {
               children: [
                 const Icon(LucideIcons.alertCircle, color: AppTheme.primaryRed, size: 48),
                 const SizedBox(height: 16),
-                Text('Error loading profiles:\n$err', textAlign: TextAlign.center, style: const TextStyle(color: Colors.red)),
+                Text(formatApiError(err, fallback: 'Unable to load profiles.'), textAlign: TextAlign.center, style: const TextStyle(color: AppColors.accent)),
                 const SizedBox(height: 16),
                 ElevatedButton.icon(
                   onPressed: () => ref.invalidate(profilesListProvider),
@@ -396,12 +511,11 @@ class _ProfilePickerScreenState extends ConsumerState<ProfilePickerScreen> {
                                   aspectRatio: 1.0,
                                   child: Container(
                                     decoration: BoxDecoration(
-                                      color: AppTheme.bgTertiary,
+                                      color: AppColors.surface,
                                       borderRadius: BorderRadius.circular(16),
-                                      border: Border.all(color: Colors.white24, width: 1.5),
                                     ),
                                     child: const Center(
-                                      child: Icon(LucideIcons.plus, size: 48, color: AppTheme.textTertiary),
+                                      child: Icon(LucideIcons.plus, size: 48, color: AppColors.textMuted),
                                     ),
                                   ),
                                 ),

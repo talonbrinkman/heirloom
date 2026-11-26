@@ -858,6 +858,7 @@ async def process_login(request: Request, username: str = Form(...), password: s
 class APILoginRequest(BaseModel):
     username: str
     password: str
+    remember_me: bool = True
 
 @app.post("/api/login")
 async def api_login(request: Request, login_data: APILoginRequest, session: Session = Depends(get_session)):
@@ -872,13 +873,28 @@ async def api_login(request: Request, login_data: APILoginRequest, session: Sess
             session.add(UserSession(
                 user_id=user.id,
                 session_token=new_token,
-                expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+                expires_at=datetime.now(timezone.utc) + timedelta(days=30 if login_data.remember_me else 1),
                 client_name=request.headers.get("user-agent", "")[:120]
             ))
         except Exception:
             pass
         session.commit()
-        return {"success": True, "token": user.session_token, "user": {"id": user.id, "username": user.username}}
+        return {
+            "success": True,
+            "token": user.session_token,
+            "remember_me": bool(login_data.remember_me),
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "is_admin": user.is_admin,
+                "movies_access": user.movies_access,
+                "tv_access": user.tv_access,
+                "photos_access": user.photos_access,
+                "music_access": user.music_access,
+                "downloads_access": user.downloads_access,
+                "watch_together_access": user.watch_together_access,
+            },
+        }
     record_failed_attempt(request)
     return JSONResponse(status_code=401, content={"success": False, "error": "Invalid credentials"})
 
@@ -2855,6 +2871,7 @@ def root(
 def api_library(
     request: Request, media_type: str, page: int = 1, limit: int = 50, 
     search: str = "", sort: str = "title_asc",
+    view: Optional[str] = None,
     genre: Optional[str] = None,
     collection: Optional[str] = None,
     current_user: User = Depends(get_current_user),
@@ -2867,6 +2884,38 @@ def api_library(
     
     if media_type == "movie":
         if not current_user.movies_access: raise HTTPException(status_code=403, detail="Forbidden")
+        if view in ("categories", "collections", "recommended"):
+            subq_v = select(func.min(Movie.id)).group_by(func.coalesce(Movie.tmdb_id, func.lower(Movie.title)))
+            q_v = select(Movie).where(Movie.id.in_(subq_v))
+            if rating_level == 1:
+                q_v = q_v.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+            elif rating_level >= 2:
+                q_v = q_v.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+            all_v = session.exec(q_v).all()
+            if view == "categories":
+                return {"categories": build_categories_data(all_v)}
+            if view == "collections":
+                cols = build_collections_data(all_v)
+                return {
+                    "collections": [
+                        {
+                            "name": c["name"],
+                            "count": c["count"],
+                            "poster_filename": c["poster_filename"],
+                            "backdrop_filename": c["backdrop_filename"],
+                            "year_range": c["year_range"],
+                        }
+                        for c in cols
+                    ]
+                }
+            watched_m, _, _ = get_user_watched_status(session, current_user.id, prof_id)
+            rated = sorted([m for m in all_v if m.rating is not None], key=lambda m: m.rating or 0, reverse=True)[:20]
+            rec_add = sorted(all_v, key=lambda m: m.id or 0, reverse=True)[:20]
+            rec_rel = sorted(all_v, key=get_release_year, reverse=True)[:20]
+            pool = [m for m in all_v if m.id not in watched_m] or list(all_v)
+            def _ser_m(m_list):
+                return [{"id": m.id, "title": m.title, "year": m.year, "rating": m.rating, "poster_filename": m.poster_filename, "type": "movie", "media_type": "movie", "is_watched": m.id in watched_m} for m in m_list]
+            return {"recommended": _ser_m(pool[:20]), "top_rated": _ser_m(rated), "recently_added": _ser_m(rec_add), "recently_released": _ser_m(rec_rel)}
         
         # Deduplicate editions at SQL level via grouping by tmdb_id or normalized title
         subq = select(func.min(Movie.id)).group_by(func.coalesce(Movie.tmdb_id, func.lower(Movie.title)))
@@ -2895,6 +2944,38 @@ def api_library(
         items = session.exec(query.offset((page - 1) * limit).limit(limit)).all()
     elif media_type == "tv":
         if not current_user.tv_access: raise HTTPException(status_code=403, detail="Forbidden")
+        if view in ("categories", "collections", "recommended"):
+            subq_v = select(func.min(TVShow.id)).group_by(func.lower(TVShow.title))
+            q_v = select(TVShow).where(TVShow.id.in_(subq_v))
+            if rating_level == 1:
+                q_v = q_v.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+            elif rating_level >= 2:
+                q_v = q_v.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+            all_v = session.exec(q_v).all()
+            if view == "categories":
+                return {"categories": build_categories_data(all_v)}
+            if view == "collections":
+                cols = build_collections_data(all_v)
+                return {
+                    "collections": [
+                        {
+                            "name": c["name"],
+                            "count": c["count"],
+                            "poster_filename": c["poster_filename"],
+                            "backdrop_filename": c["backdrop_filename"],
+                            "year_range": c["year_range"],
+                        }
+                        for c in cols
+                    ]
+                }
+            _, _, watched_t = get_user_watched_status(session, current_user.id, prof_id)
+            rated = sorted([t for t in all_v if t.rating is not None], key=lambda t: t.rating or 0, reverse=True)[:20]
+            rec_add = sorted(all_v, key=lambda t: t.id or 0, reverse=True)[:20]
+            rec_rel = sorted(all_v, key=get_release_year, reverse=True)[:20]
+            pool = [t for t in all_v if t.title.strip().lower() not in watched_t] or list(all_v)
+            def _ser_t(t_list):
+                return [{"id": t.id, "title": t.title, "year": t.year, "rating": t.rating, "poster_filename": t.poster_filename, "type": "tv", "media_type": "tv", "is_watched": t.title.strip().lower() in watched_t} for t in t_list]
+            return {"recommended": _ser_t(pool[:20]), "top_rated": _ser_t(rated), "recently_added": _ser_t(rec_add), "recently_released": _ser_t(rec_rel)}
         
         # One representative show record per distinct title
         subq = select(func.min(TVShow.id)).group_by(func.lower(TVShow.title))
@@ -3202,7 +3283,7 @@ def api_server_info(
     avail_vols = get_available_volumes(session)
     info = {
         "server_name": "Heirloom",
-        "version": "1.7.4",
+        "version": "2.6.6",
         "features": {
             "movies": bool(avail_vols.get("movie")),
             "tv": bool(avail_vols.get("tv")),
@@ -3221,6 +3302,8 @@ def api_server_info(
             "tv_access": current_user.tv_access,
             "photos_access": current_user.photos_access,
             "music_access": current_user.music_access,
+            "downloads_access": current_user.downloads_access,
+            "watch_together_access": current_user.watch_together_access,
         }
         if current_profile:
             info["active_profile"] = {
@@ -3241,12 +3324,17 @@ class MobileSettingsRequest(BaseModel):
 
 @app.get("/api/settings")
 def api_get_settings(
+    request: Request,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
     session: Session = Depends(get_session)
 ):
     if not current_user:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+    is_admin = is_actual_admin(current_user, current_profile)
+    is_primary = (current_profile is None or current_profile.is_primary)
+    can_change_password = is_primary
 
     rewind_val = (current_profile.rewind_seconds if current_profile and current_profile.rewind_seconds is not None else current_user.rewind_seconds) or 0
     autopause_val = (current_profile.auto_pause_episodes if current_profile and current_profile.auto_pause_episodes is not None else current_user.auto_pause_episodes)
@@ -3255,7 +3343,9 @@ def api_get_settings(
     audio_val = (current_profile.default_audio_lang if current_profile and current_profile.default_audio_lang else current_user.default_audio_lang) or "eng"
     sub_val = (current_profile.default_subtitle_lang if current_profile and current_profile.default_subtitle_lang else current_user.default_subtitle_lang) or "off"
 
-    return {
+    resp_payload = {
+        "is_admin": is_admin,
+        "can_change_password": can_change_password,
         "user": {
             "id": current_user.id,
             "username": current_user.username,
@@ -3264,6 +3354,8 @@ def api_get_settings(
             "tv_access": current_user.tv_access,
             "photos_access": current_user.photos_access,
             "music_access": current_user.music_access,
+            "downloads_access": current_user.downloads_access,
+            "watch_together_access": current_user.watch_together_access,
         },
         "active_profile": {
             "id": current_profile.id if current_profile else None,
@@ -3284,9 +3376,66 @@ def api_get_settings(
         "available_languages": [{"code": c, "name": n} for c, n in AVAILABLE_LANGUAGES],
         "server": {
             "name": "Heirloom",
-            "version": "1.7.4"
+            "version": "2.6.6"
         }
     }
+
+    if is_admin:
+        _, volume_paths, mounted_volumes = _get_volume_context(session)
+        users_invites = _get_users_and_invites_context(request, session)
+
+        remote_url_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "remote_access_url")).first()
+        remote_url = remote_url_cfg.value if remote_url_cfg else ""
+
+        tmdb_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
+        tmdb_key = tmdb_cfg.value if tmdb_cfg else os.getenv("TMDB_API_KEY", "")
+
+        adb_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "theaudiodb_api_key")).first()
+        theaudiodb_key = adb_cfg.value if adb_cfg else os.getenv("THEAUDIODB_API_KEY", "")
+        opensubtitles_key = get_opensubtitles_api_key(session)
+
+        hw_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "hw_accel_profile")).first()
+        hw_accel_profile = hw_cfg.value if hw_cfg else "auto"
+
+        hdr_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "hdr_tonemapping")).first()
+        if hdr_cfg:
+            raw_hdr = str(hdr_cfg.value).strip().lower()
+            if raw_hdr in ("true", "1", "on"):
+                hdr_tonemapping = "hable"
+            elif raw_hdr in ("false", "0", "off", "disabled"):
+                hdr_tonemapping = "disabled"
+            elif raw_hdr in ("hable", "mobius", "reinhard", "linear", "gamma", "clip"):
+                hdr_tonemapping = raw_hdr
+            else:
+                hdr_tonemapping = "hable"
+        else:
+            hdr_tonemapping = "hable"
+
+        intro_cfg = session.exec(select(SystemConfig).where(SystemConfig.key == "auto_intro_detection")).first()
+        auto_intro_detection = intro_cfg.value if intro_cfg else "true"
+
+        loom_peers = session.exec(select(LoomPeer).order_by(LoomPeer.id.desc())).all()
+        loom_jobs = session.exec(select(LoomTransferJob).order_by(LoomTransferJob.id.desc()).limit(30)).all()
+
+        resp_payload["admin"] = {
+            "volume_paths": volume_paths,
+            "mounted_volumes": mounted_volumes,
+            "users": users_invites["users"],
+            "invites": users_invites["invites"],
+            "host_url": users_invites["host_url"],
+            "remote_url": remote_url,
+            "tmdb_key": tmdb_key,
+            "theaudiodb_key": theaudiodb_key,
+            "opensubtitles_key": opensubtitles_key,
+            "hw_accel_profile": hw_accel_profile,
+            "hdr_tonemapping": hdr_tonemapping,
+            "auto_intro_detection": auto_intro_detection,
+            "loom_settings": get_loom_settings(session),
+            "loom_peers": [_serialize_loom_peer(p) for p in loom_peers],
+            "loom_jobs": [_serialize_loom_job(j) for j in loom_jobs],
+        }
+
+    return resp_payload
 
 @app.post("/api/settings")
 def api_save_settings(
@@ -3483,13 +3632,39 @@ def api_dashboard(
     else:
         recent_photos = []
 
+    recent_albums = []
+    if current_user.music_access:
+        try:
+            albums_q = session.exec(select(Album).order_by(Album.id.desc()).limit(20)).all()
+            recent_albums = [
+                {
+                    "id": a.id,
+                    "title": a.title,
+                    "artist_name": a.artist_name,
+                    "year": a.year or a.artist_name or "",
+                    "poster_filename": a.cover_filename,
+                    "type": "album",
+                }
+                for a in albums_q
+            ]
+        except Exception:
+            recent_albums = []
+
+    w_m_ids_full, _, w_tv_titles_full = get_user_watched_status(session, current_user.id, prof_id)
+    ip_m_ids, ip_tv_titles = get_user_in_progress_status(session, current_user.id, prof_id)
+
     return {
         "recent_movies": recent_movies,
         "recent_tv": recent_tv,
         "history": history,
         "watchlist": watchlist,
         "recommended": recommended,
-        "recent_photos": recent_photos
+        "recent_photos": recent_photos,
+        "recent_albums": recent_albums,
+        "watched_movie_ids": list(w_m_ids_full),
+        "watched_tv_titles": list(w_tv_titles_full),
+        "in_progress_movie_ids": list(ip_m_ids),
+        "in_progress_tv_titles": list(ip_tv_titles),
     }
 
 @app.get("/api/movie/{movie_id}")
@@ -3533,13 +3708,15 @@ def api_movie(
     if prof_id:
         hist_q = hist_q.where((WatchHistory.profile_id == prof_id) | (WatchHistory.profile_id == None))
     history = session.exec(hist_q).first()
-    has_progress = history.progress > 0 if history and history.progress else False
-    
+    watched_m_ids, _, _ = get_user_watched_status(session, current_user.id, prof_id)
+    is_watched = movie.id in watched_m_ids
+    has_progress = bool(history and history.progress and history.progress > 0 and not is_watched)
+
     wl_q = select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.item_id == movie.id).where(Watchlist.media_type == 'movie')
     if prof_id:
         wl_q = wl_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
     in_watchlist = bool(session.exec(wl_q).first())
-    
+
     return {
         "id": movie.id,
         "title": movie.title,
@@ -3547,15 +3724,20 @@ def api_movie(
         "plot": movie.plot,
         "rating": movie.rating,
         "runtime": movie.runtime,
+        "genres": movie.genres,
+        "tmdb_id": movie.tmdb_id,
+        "logo_filename": movie.logo_filename,
         "content_rating": movie.content_rating,
         "poster_filename": movie.poster_filename,
         "backdrop_filename": movie.backdrop_filename,
         "director": movie.director,
         "cast": cast_list,
         "file_path": movie.file_path,
+        "is_watched": is_watched,
         "has_progress": has_progress,
         "progress": history.progress if history else 0,
-        "in_watchlist": in_watchlist
+        "duration": history.duration if (history and history.duration) else 0,
+        "in_watchlist": in_watchlist,
     }
 
 @app.get("/api/series/{series_id}")
@@ -3605,6 +3787,8 @@ def api_series(
 
     import re, os
     seasons = {}
+    all_watched = bool(episodes)
+    any_progress = False
     for ep in episodes:
         m = re.search(r'[Ss](\d+)\s*[-_]?\s*[Ee]?(\d+)', ep.file_path)
         season_num = int(m.group(1)) if m else (ep.season or 1)
@@ -3614,14 +3798,35 @@ def api_series(
             seasons[season_num] = []
             
         history = hist_by_ep.get(ep.id)
-        
+        prog_val = float(history.progress or 0.0) if history else 0.0
+        ep_watched = prog_val >= 90.0
+        ep_has_prog = prog_val > 0.0 and not ep_watched
+        if not ep_watched:
+            all_watched = False
+        if prog_val > 0.0:
+            any_progress = True
+
+        ep_title = (getattr(ep, "episode_title", None) or "").strip()
+        if not ep_title and ep.file_path:
+            fn = os.path.splitext(os.path.basename(ep.file_path))[0]
+            nm = re.search(r'[Ss]\d+\s*[-_]?\s*[Ee]?\d+[ \-_]*(.+)', fn)
+            if nm and nm.group(1).strip():
+                ep_title = nm.group(1).strip()
+        if not ep_title:
+            ep_title = f"Episode {ep_num}"
+
         seasons[season_num].append({
             "id": ep.id,
             "season": season_num,
             "episode": ep_num,
+            "title": ep_title,
+            "overview": getattr(ep, "episode_plot", None) or "",
+            "still_filename": getattr(ep, "thumbnail_filename", None) or ep.poster_filename,
             "file_path": ep.file_path,
-            "has_progress": history.progress > 0 if history and history.progress else False,
-            "progress": history.progress if history else 0
+            "is_watched": ep_watched,
+            "has_progress": ep_has_prog,
+            "progress": prog_val,
+            "duration": history.duration if (history and history.duration) else 0,
         })
         
     wl_q = select(Watchlist).where(Watchlist.user_id == current_user.id).where(Watchlist.item_id == show.id).where(Watchlist.media_type == 'tv')
@@ -3636,12 +3841,16 @@ def api_series(
         "plot": show.plot,
         "rating": show.rating,
         "runtime": show.runtime,
+        "genres": show.genres,
+        "logo_filename": show.logo_filename,
         "content_rating": show.content_rating,
         "poster_filename": show.poster_filename,
         "backdrop_filename": show.backdrop_filename,
         "director": show.director,
         "cast": cast_list,
         "in_watchlist": in_watchlist,
+        "is_watched": all_watched,
+        "has_progress": any_progress and not all_watched,
         "seasons": seasons
     }
 

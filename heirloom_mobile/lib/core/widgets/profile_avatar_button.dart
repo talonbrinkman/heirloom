@@ -134,15 +134,11 @@ class ProfileAvatarButton extends ConsumerWidget {
                 },
               ),
               ListTile(
-                leading: const Icon(LucideIcons.logOut, color: AppTheme.primaryRed),
-                title: const Text('Sign Out', style: TextStyle(color: AppTheme.primaryRed, fontWeight: FontWeight.w600)),
+                leading: const Icon(LucideIcons.logOut, color: AppColors.accent),
+                title: const Text('Sign Out', style: TextStyle(color: AppColors.accent, fontWeight: FontWeight.w600)),
                 onTap: () async {
                   Navigator.of(ctx).pop();
-                  final prefs = ref.read(sharedPreferencesProvider);
-                  await prefs.remove('auth_token');
-                  await prefs.remove('active_profile_id');
-                  ref.read(authTokenProvider.notifier).state = null;
-                  ref.read(activeProfileIdProvider.notifier).state = null;
+                  await ref.read(appSessionProvider.notifier).signOut();
                   if (context.mounted) {
                     context.go('/login');
                   }
@@ -161,7 +157,6 @@ class ProfileAvatarButton extends ConsumerWidget {
       decoration: BoxDecoration(
         color: color.withOpacity(0.15),
         borderRadius: BorderRadius.circular(4),
-        border: Border.all(color: color.withOpacity(0.4)),
       ),
       child: Text(
         text,
