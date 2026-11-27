@@ -91,10 +91,10 @@
             showMediaLoader(title ? `Loading ${title}` : 'Loading Series...', 'Fetching episodes and series details');
         } else if (path.startsWith('/movie/')) {
             showMediaLoader(title ? `Loading ${title}` : 'Loading Movie...', 'Fetching movie details');
+        } else if (path.startsWith('/person/')) {
+            showMediaLoader(title ? `Loading ${title}` : 'Loading Person...', 'Fetching person details');
         } else if (inSearchResults) {
-            if (path.startsWith('/person/')) {
-                showMediaLoader(title ? `Loading ${title}` : 'Loading Person...', 'Fetching person details');
-            } else if (path.startsWith('/album/')) {
+            if (path.startsWith('/album/')) {
                 showMediaLoader(title ? `Loading ${title}` : 'Loading Album...', 'Fetching album details');
             } else if (path.startsWith('/artist/')) {
                 showMediaLoader(title ? `Loading ${title}` : 'Loading Artist...', 'Fetching artist details');

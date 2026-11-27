@@ -6224,7 +6224,6 @@ async def person_view(
     person_identifier: str,
     current_user: User = Depends(get_current_user),
     current_profile: Optional[Profile] = Depends(get_current_profile),
-    session: Session = Depends(get_session)
 ):
     if not current_user:
         return RedirectResponse(url="/login", status_code=303)
@@ -6233,13 +6232,40 @@ async def person_view(
 
     rating_level = get_profile_rating_level(current_user, current_profile)
     prof_id = current_profile.id if current_profile else None
+    user_id = current_user.id
+    movies_access = current_user.movies_access
+    tv_access = current_user.tv_access
 
     person_str = urllib.parse.unquote(person_identifier).strip()
     if not person_str:
         raise HTTPException(status_code=404, detail="Person not found")
 
-    tmdb_config = session.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
-    tmdb_key = tmdb_config.value if tmdb_config and tmdb_config.value else os.getenv("TMDB_API_KEY")
+    def _load_initial():
+        with Session(engine) as db_sess:
+            tmdb_cfg = db_sess.exec(select(SystemConfig).where(SystemConfig.key == "tmdb_api_key")).first()
+            key = tmdb_cfg.value if tmdb_cfg and tmdb_cfg.value else os.getenv("TMDB_API_KEY")
+            if person_str.isdigit():
+                db_p = db_sess.exec(select(Person).where(Person.tmdb_id == int(person_str))).first()
+            else:
+                db_p = db_sess.exec(select(Person).where(func.lower(Person.name) == person_str.lower())).first()
+            if db_p and db_p.biography is not None and db_p.combined_credits_json is not None:
+                try:
+                    credits_obj = json.loads(db_p.combined_credits_json)
+                except Exception:
+                    credits_obj = {}
+                return key, {
+                    "tmdb_id": db_p.tmdb_id,
+                    "name": db_p.name,
+                    "profile_filename": db_p.profile_filename,
+                    "birthday": db_p.birthday,
+                    "deathday": db_p.deathday,
+                    "place_of_birth": db_p.place_of_birth,
+                    "biography": db_p.biography or None,
+                    "combined_credits": credits_obj,
+                }
+            return key, None
+
+    tmdb_key, cached_person = await asyncio.to_thread(_load_initial)
 
     person_data = None
     combined_credits = None
@@ -6251,26 +6277,20 @@ async def person_view(
     place_of_birth = None
     biography = None
 
-    if person_str.isdigit():
-        db_person = session.exec(select(Person).where(Person.tmdb_id == int(person_str))).first()
-    else:
-        db_person = session.exec(select(Person).where(func.lower(Person.name) == person_str.lower())).first()
-
-    if db_person and db_person.biography is not None and db_person.combined_credits_json is not None:
-        tmdb_person_id = db_person.tmdb_id
-        target_name = db_person.name
-        profile_filename = db_person.profile_filename
-        birthday = db_person.birthday
-        deathday = db_person.deathday
-        place_of_birth = db_person.place_of_birth
-        biography = db_person.biography or None
-        try:
-            combined_credits = json.loads(db_person.combined_credits_json)
-        except Exception:
-            combined_credits = {}
+    if cached_person is not None:
+        tmdb_person_id = cached_person["tmdb_id"]
+        target_name = cached_person["name"]
+        profile_filename = cached_person["profile_filename"]
+        birthday = cached_person["birthday"]
+        deathday = cached_person["deathday"]
+        place_of_birth = cached_person["place_of_birth"]
+        biography = cached_person["biography"]
+        combined_credits = cached_person["combined_credits"]
     elif tmdb_key and httpx is not None:
         raw_client = httpx.AsyncClient(timeout=10.0)
         client = SafeHTTPClient(raw_client)
+        img_bytes = None
+        img_target_file = None
         try:
             if person_str.isdigit():
                 tmdb_person_id = int(person_str)
@@ -6298,16 +6318,25 @@ async def person_view(
                     if person_data.get("profile_path"):
                         profile_path = person_data["profile_path"]
                         profile_filename = f"person_{tmdb_person_id}_profile.jpg"
-                        target_file = os.path.join(METADATA_DIR, profile_filename)
-                        if not os.path.exists(target_file):
+                        img_target_file = os.path.join(METADATA_DIR, profile_filename)
+                        if not await asyncio.to_thread(os.path.exists, img_target_file):
                             img_url = f"https://image.tmdb.org/t/p/w600_and_h900_bestv2{profile_path}"
                             img_res = await client.get(img_url)
                             if img_res.status_code == 200:
-                                os.makedirs(METADATA_DIR, exist_ok=True)
-                                with open(target_file, "wb") as f:
-                                    f.write(img_res.content)
+                                img_bytes = img_res.content
+        except Exception:
+            pass
+        finally:
+            await raw_client.aclose()
 
-                    rec = db_person or session.exec(select(Person).where(Person.tmdb_id == tmdb_person_id)).first()
+        if person_data is not None and tmdb_person_id:
+            def _persist_person():
+                if img_bytes and img_target_file:
+                    os.makedirs(METADATA_DIR, exist_ok=True)
+                    with open(img_target_file, "wb") as f:
+                        f.write(img_bytes)
+                with Session(engine) as db_sess:
+                    rec = db_sess.exec(select(Person).where(Person.tmdb_id == tmdb_person_id)).first()
                     if not rec:
                         rec = Person(tmdb_id=tmdb_person_id, name=target_name)
                     rec.tmdb_id = tmdb_person_id
@@ -6320,151 +6349,157 @@ async def person_view(
                         rec.profile_filename = profile_filename
                     rec.combined_credits_json = json.dumps(combined_credits or {})
                     rec.updated_at = datetime.now(timezone.utc)
-                    session.add(rec)
-                    session.commit()
-        except Exception:
-            pass
-        finally:
-            await raw_client.aclose()
+                    db_sess.add(rec)
+                    db_sess.commit()
 
-    # Fallback to local DB cast profile picture if not found
-    if not profile_filename or not os.path.exists(os.path.join(METADATA_DIR, profile_filename)):
-        cast_match = session.exec(select(Movie.cast).where(Movie.cast.ilike(f"%{target_name}%")).limit(15)).all()
-        for cm in cast_match:
-            if cm and cm.startswith("["):
-                try:
-                    items = json.loads(cm)
-                    for it in items:
-                        if it.get("name", "").strip().lower() == target_name.lower():
-                            if it.get("profile_filename") and os.path.exists(os.path.join(METADATA_DIR, it["profile_filename"])):
-                                profile_filename = it["profile_filename"]
-                                break
-                except Exception:
-                    pass
-            if profile_filename:
-                break
+            try:
+                await asyncio.to_thread(_persist_person)
+            except Exception:
+                pass
+
+    def _build_context():
+        nonlocal profile_filename
+        from sqlalchemy import or_
+
+        with Session(engine) as db_sess:
+            # Fallback to local DB cast profile picture if not found
+            if not profile_filename or not os.path.exists(os.path.join(METADATA_DIR, profile_filename)):
+                cast_match = db_sess.exec(select(Movie.cast).where(Movie.cast.ilike(f"%{target_name}%")).limit(15)).all()
+                for cm in cast_match:
+                    if cm and cm.startswith("["):
+                        try:
+                            items = json.loads(cm)
+                            for it in items:
+                                if it.get("name", "").strip().lower() == target_name.lower():
+                                    if it.get("profile_filename") and os.path.exists(os.path.join(METADATA_DIR, it["profile_filename"])):
+                                        profile_filename = it["profile_filename"]
+                                        break
+                        except Exception:
+                            pass
+                    if profile_filename:
+                        break
+
+            # Collect TMDB IDs & titles from credits
+            tmdb_movie_ids = set()
+            tmdb_tv_titles = set()
+
+            if combined_credits:
+                for c in combined_credits.get("cast", []) + combined_credits.get("crew", []):
+                    m_type = c.get("media_type")
+                    if m_type == "movie":
+                        if c.get("id"):
+                            tmdb_movie_ids.add(c["id"])
+                    elif m_type == "tv":
+                        if c.get("name"):
+                            tmdb_tv_titles.add(c["name"].strip().lower())
+
+            watched_movie_ids, _, watched_tv_titles = get_user_watched_status(db_sess, user_id, prof_id)
+            in_progress_movie_ids, in_progress_tv_titles = get_user_in_progress_status(db_sess, user_id, prof_id)
+
+            wl_m_q = select(Watchlist.item_id).where(Watchlist.user_id == user_id, Watchlist.media_type == 'movie')
+            if prof_id:
+                wl_m_q = wl_m_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+            user_watchlist_movies = set(db_sess.exec(wl_m_q).all())
+
+            wl_t_q = select(Watchlist.item_id).where(Watchlist.user_id == user_id, Watchlist.media_type == 'tv')
+            if prof_id:
+                wl_t_q = wl_t_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
+            user_watchlist_tv = set(db_sess.exec(wl_t_q).all())
+
+            known_for = []
+            seen_movie_titles = set()
+
+            if movies_access:
+                m_conds = [
+                    Movie.cast.ilike(f"%{target_name}%"),
+                    Movie.director.ilike(f"%{target_name}%")
+                ]
+                if tmdb_movie_ids:
+                    m_conds.append(Movie.tmdb_id.in_(list(tmdb_movie_ids)))
+
+                m_q = select(Movie).where(or_(*m_conds))
+                if rating_level == 1:
+                    m_q = m_q.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
+                elif rating_level >= 2:
+                    m_q = m_q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
+
+                matched_movies = db_sess.exec(m_q).all()
+                for m in matched_movies:
+                    norm_t = m.title.strip().lower()
+                    if norm_t in seen_movie_titles:
+                        continue
+                    seen_movie_titles.add(norm_t)
+
+                    known_for.append({
+                        "id": m.id,
+                        "media_type": "movie",
+                        "title": m.title,
+                        "year": m.year,
+                        "rating": m.rating or 0.0,
+                        "poster_filename": m.poster_filename,
+                        "url": f"/movie/{m.id}",
+                        "play_url": f"/play/movie/{m.id}",
+                        "is_watched": m.id in watched_movie_ids,
+                        "has_progress": (m.id not in watched_movie_ids) and (m.id in in_progress_movie_ids),
+                        "in_watchlist": m.id in user_watchlist_movies,
+                        "director": m.director or "",
+                        "cast": m.cast or ""
+                    })
+
+            seen_tv_titles = set()
+            if tv_access:
+                t_conds = [
+                    TVShow.cast.ilike(f"%{target_name}%"),
+                    TVShow.director.ilike(f"%{target_name}%")
+                ]
+                if tmdb_tv_titles:
+                    t_conds.append(func.lower(TVShow.title).in_(list(tmdb_tv_titles)))
+
+                t_q = select(TVShow).where(or_(*t_conds))
+                if rating_level == 1:
+                    t_q = t_q.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
+                elif rating_level >= 2:
+                    t_q = t_q.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
+
+                matched_shows = db_sess.exec(t_q).all()
+                distinct_titles = {t.title for t in matched_shows}
+                if distinct_titles:
+                    all_episodes_for_shows = db_sess.exec(
+                        select(TVShow).where(TVShow.title.in_(list(distinct_titles)))
+                    ).all()
+                    processed_shows = process_tv_shows(all_episodes_for_shows)
+                else:
+                    processed_shows = []
+
+                for t in processed_shows:
+                    norm_t = t.title.strip().lower()
+                    if norm_t in seen_tv_titles:
+                        continue
+                    seen_tv_titles.add(norm_t)
+
+                    known_for.append({
+                        "id": t.id,
+                        "media_type": "tv",
+                        "title": t.title,
+                        "year": t.year,
+                        "rating": t.rating or 0.0,
+                        "poster_filename": t.poster_filename or t.season_poster_filename,
+                        "url": f"/series/{urllib.parse.quote(t.title)}",
+                        "play_url": f"/play/tv/{t.id}",
+                        "is_watched": norm_t in watched_tv_titles,
+                        "has_progress": (norm_t not in watched_tv_titles) and (norm_t in in_progress_tv_titles),
+                        "in_watchlist": t.id in user_watchlist_tv,
+                        "director": t.director or "",
+                        "cast": t.cast or ""
+                    })
+
+            user_profiles = db_sess.exec(select(Profile).where(Profile.user_id == user_id).order_by(Profile.id.asc())).all()
+            return known_for, user_profiles
+
+    known_for, user_profiles = await asyncio.to_thread(_build_context)
 
     # Birthdate / Age / Biography
     dates_display = format_person_dates(birthday, deathday)
-
-    # Collect TMDB IDs & titles from credits
-    tmdb_movie_ids = set()
-    tmdb_movie_titles = set()
-    tmdb_tv_titles = set()
-
-    if combined_credits:
-        for c in combined_credits.get("cast", []) + combined_credits.get("crew", []):
-            m_type = c.get("media_type")
-            if m_type == "movie":
-                if c.get("id"):
-                    tmdb_movie_ids.add(c["id"])
-                if c.get("title"):
-                    tmdb_movie_titles.add(c["title"].strip().lower())
-            elif m_type == "tv":
-                if c.get("name"):
-                    tmdb_tv_titles.add(c["name"].strip().lower())
-
-    watched_movie_ids, _, watched_tv_titles = get_user_watched_status(session, current_user.id, prof_id)
-    in_progress_movie_ids, in_progress_tv_titles = get_user_in_progress_status(session, current_user.id, prof_id)
-
-    wl_m_q = select(Watchlist.item_id).where(Watchlist.user_id == current_user.id, Watchlist.media_type == 'movie')
-    if prof_id:
-        wl_m_q = wl_m_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
-    user_watchlist_movies = set(session.exec(wl_m_q).all())
-
-    wl_t_q = select(Watchlist.item_id).where(Watchlist.user_id == current_user.id, Watchlist.media_type == 'tv')
-    if prof_id:
-        wl_t_q = wl_t_q.where((Watchlist.profile_id == prof_id) | (Watchlist.profile_id == None))
-    user_watchlist_tv = set(session.exec(wl_t_q).all())
-
-    from sqlalchemy import or_
-
-    known_for = []
-    seen_movie_titles = set()
-
-    if current_user.movies_access:
-        m_conds = [
-            Movie.cast.ilike(f"%{target_name}%"),
-            Movie.director.ilike(f"%{target_name}%")
-        ]
-        if tmdb_movie_ids:
-            m_conds.append(Movie.tmdb_id.in_(list(tmdb_movie_ids)))
-
-        m_q = select(Movie).where(or_(*m_conds))
-        if rating_level == 1:
-            m_q = m_q.where(Movie.content_rating.in_(TEEN_SAFE_RATINGS))
-        elif rating_level >= 2:
-            m_q = m_q.where(Movie.content_rating.in_(CHILD_SAFE_RATINGS))
-
-        matched_movies = session.exec(m_q).all()
-        for m in matched_movies:
-            norm_t = m.title.strip().lower()
-            if norm_t in seen_movie_titles:
-                continue
-            seen_movie_titles.add(norm_t)
-
-            known_for.append({
-                "id": m.id,
-                "media_type": "movie",
-                "title": m.title,
-                "year": m.year,
-                "rating": m.rating or 0.0,
-                "poster_filename": m.poster_filename,
-                "url": f"/movie/{m.id}",
-                "play_url": f"/play/movie/{m.id}",
-                "is_watched": m.id in watched_movie_ids,
-                "has_progress": (m.id not in watched_movie_ids) and (m.id in in_progress_movie_ids),
-                "in_watchlist": m.id in user_watchlist_movies,
-                "director": m.director or "",
-                "cast": m.cast or ""
-            })
-
-    seen_tv_titles = set()
-    if current_user.tv_access:
-        t_conds = [
-            TVShow.cast.ilike(f"%{target_name}%"),
-            TVShow.director.ilike(f"%{target_name}%")
-        ]
-        if tmdb_tv_titles:
-            t_conds.append(func.lower(TVShow.title).in_(list(tmdb_tv_titles)))
-
-        t_q = select(TVShow).where(or_(*t_conds))
-        if rating_level == 1:
-            t_q = t_q.where(TVShow.content_rating.in_(TEEN_SAFE_RATINGS))
-        elif rating_level >= 2:
-            t_q = t_q.where(TVShow.content_rating.in_(CHILD_SAFE_RATINGS))
-
-        matched_shows = session.exec(t_q).all()
-        distinct_titles = {t.title for t in matched_shows}
-        if distinct_titles:
-            all_episodes_for_shows = session.exec(
-                select(TVShow).where(TVShow.title.in_(list(distinct_titles)))
-            ).all()
-            processed_shows = process_tv_shows(all_episodes_for_shows)
-        else:
-            processed_shows = []
-
-        for t in processed_shows:
-            norm_t = t.title.strip().lower()
-            if norm_t in seen_tv_titles:
-                continue
-            seen_tv_titles.add(norm_t)
-
-            known_for.append({
-                "id": t.id,
-                "media_type": "tv",
-                "title": t.title,
-                "year": t.year,
-                "rating": t.rating or 0.0,
-                "poster_filename": t.poster_filename or t.season_poster_filename,
-                "url": f"/series/{urllib.parse.quote(t.title)}",
-                "play_url": f"/play/tv/{t.id}",
-                "is_watched": norm_t in watched_tv_titles,
-                "has_progress": (norm_t not in watched_tv_titles) and (norm_t in in_progress_tv_titles),
-                "in_watchlist": t.id in user_watchlist_tv,
-                "director": t.director or "",
-                "cast": t.cast or ""
-            })
 
     # Sort known_for by rating descending
     known_for.sort(key=lambda x: (x.get("rating") or 0.0, str(x.get("year") or "")), reverse=True)
@@ -6508,8 +6543,6 @@ async def person_view(
         "place_of_birth": place_of_birth,
         "biography": biography
     }
-
-    user_profiles = session.exec(select(Profile).where(Profile.user_id == current_user.id).order_by(Profile.id.asc())).all()
 
     return templates.TemplateResponse(request=request, name="person.html", context={
         "user": current_user,

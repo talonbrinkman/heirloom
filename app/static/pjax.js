@@ -141,8 +141,14 @@
         if (inflightFetch) {
             try { inflightFetch.abort(); } catch (_) { }
         }
-        inflightFetch = new AbortController();
-        const signal = inflightFetch.signal;
+        const controller = new AbortController();
+        inflightFetch = controller;
+        const signal = controller.signal;
+        let timedOut = false;
+        const fetchTimeoutId = setTimeout(() => {
+            timedOut = true;
+            try { controller.abort(); } catch (_) { }
+        }, 20000);
 
         try {
             const res = await fetch(url.href, {
@@ -150,6 +156,7 @@
                 credentials: 'same-origin',
                 signal,
             });
+            clearTimeout(fetchTimeoutId);
 
             const finalUrl = new URL(res.url || url.href, window.location.origin);
             const contentType = (res.headers.get('content-type') || '').toLowerCase();
@@ -206,7 +213,8 @@
                 }
             }
         } catch (err) {
-            if (err && err.name === 'AbortError') return;
+            clearTimeout(fetchTimeoutId);
+            if (err && err.name === 'AbortError' && !timedOut) return;
             console.error('[PJAX] Navigation failed, falling back:', err);
             window.location.href = url.href;
         } finally {

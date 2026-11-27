@@ -1,4 +1,6 @@
 import os
+import time
+import logging
 import threading
 from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
@@ -11,19 +13,21 @@ from .scanner import scan_media_library, VIDEO_EXTENSIONS, PHOTO_EXTENSIONS, AUD
 class ScannerDebouncer:
     def __init__(self, delay=8.0):
         self.delay = delay
+        self._lock = threading.Lock()
         self._timer = None
 
     def trigger_scan(self, delay=None):
-        if self._timer is not None:
-            self._timer.cancel()
         d = delay if delay is not None else self.delay
-        self._timer = threading.Timer(d, self._run_scan)
-        self._timer.start()
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(d, self._run_scan)
+            self._timer.daemon = True
+            self._timer.start()
 
     def _run_scan(self):
         try:
-            with Session(engine) as session:
-                scan_media_library(session)
+            scan_media_library()
         except Exception as e:
             print(f"Error during background scan: {e}")
 
@@ -80,21 +84,95 @@ class MediaEventHandler(FileSystemEventHandler):
                     scanner_debouncer.trigger_scan(delay=8.0)
 
 observer = Observer()
+_observer_lock = threading.Lock()
+
+
+class _InotifyOverflowGuard(logging.Handler):
+    """Detects repeated watchdog inotify queue overflows and disables live watching to prevent I/O/UI freezes."""
+
+    def __init__(self, burst_gap_seconds=3.0, window_seconds=120.0, max_bursts=2):
+        super().__init__(level=logging.WARNING)
+        self._lock = threading.Lock()
+        self._burst_gap = burst_gap_seconds
+        self._window = window_seconds
+        self._max_bursts = max_bursts
+        self._bursts: list[float] = []
+        self._last_event_ts = 0.0
+        self._tripped = False
+
+    def reset(self):
+        with self._lock:
+            self._bursts.clear()
+            self._last_event_ts = 0.0
+            self._tripped = False
+
+    def emit(self, record):
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return
+        if "inotify queue overflowed" not in msg.lower():
+            return
+
+        now = time.monotonic()
+        should_trip = False
+        with self._lock:
+            if self._tripped:
+                return
+            # Group multiple directory log lines from a single overflow into one burst
+            if now - self._last_event_ts > self._burst_gap:
+                self._bursts.append(now)
+            self._last_event_ts = now
+            self._bursts = [t for t in self._bursts if now - t <= self._window]
+            if len(self._bursts) >= self._max_bursts:
+                self._tripped = True
+                should_trip = True
+
+        if should_trip:
+            threading.Thread(target=_disable_live_observer_on_overflow, daemon=True).start()
+
+
+_overflow_guard = _InotifyOverflowGuard()
+
+
+def _disable_live_observer_on_overflow():
+    global observer
+    print(
+        "[Watchdog] Repeated inotify queue overflows detected. Disabling live filesystem watcher "
+        "to prevent recursive watch reconciliation from freezing the server; relying on periodic "
+        "scans and manual rescans. To keep live watching enabled on large libraries, increase "
+        "fs.inotify.max_queued_events (e.g. 262144) on the Docker host."
+    )
+    with _observer_lock:
+        if observer.is_alive():
+            try:
+                observer.stop()
+                observer.join(timeout=3.0)
+            except Exception:
+                pass
+        observer = Observer()
+
 
 def _try_increase_inotify_limit():
-    """Attempt to increase kernel inotify watch limit automatically if container has write access."""
-    try:
-        proc_path = "/proc/sys/fs/inotify/max_user_watches"
-        if os.path.exists(proc_path):
-            with open(proc_path, "r") as f:
-                content = f.read().strip()
-                current = int(content) if content.isdigit() else 0
-            if current < 524288:
-                with open(proc_path, "w") as f:
-                    f.write("524288\n")
-                print(f"[Watchdog] Automatically increased inotify max_user_watches to 524288.")
-    except Exception:
-        pass
+    """Attempt to increase kernel inotify limits automatically if container has write access."""
+    targets = (
+        ("/proc/sys/fs/inotify/max_user_watches", 524288),
+        ("/proc/sys/fs/inotify/max_queued_events", 262144),
+        ("/proc/sys/fs/inotify/max_user_instances", 1024),
+    )
+    for proc_path, desired in targets:
+        try:
+            if os.path.exists(proc_path):
+                with open(proc_path, "r") as f:
+                    content = f.read().strip()
+                    current = int(content) if content.isdigit() else 0
+                if current < desired:
+                    with open(proc_path, "w") as f:
+                        f.write(f"{desired}\n")
+                    name = os.path.basename(proc_path)
+                    print(f"[Watchdog] Automatically increased inotify {name} to {desired}.")
+        except Exception:
+            pass
 
 def _schedule_all(target_observer, volume_paths, handler):
     """Schedules all existing volume paths onto the given observer instance."""
@@ -110,60 +188,72 @@ def start_watcher():
     
     _try_increase_inotify_limit()
 
-    # Try to stop existing observer if running
-    if observer.is_alive():
+    watchdog_logger = logging.getLogger("watchdog")
+    if _overflow_guard not in watchdog_logger.handlers:
+        watchdog_logger.addHandler(_overflow_guard)
+    _overflow_guard.reset()
+
+    with _observer_lock:
+        # Try to stop existing observer if running
+        if observer.is_alive():
+            try:
+                observer.stop()
+                observer.join(timeout=2.0)
+            except Exception:
+                pass
+        observer = Observer()
+
+        if os.getenv("HEIRLOOM_DISABLE_WATCHER", "").strip().lower() in ("1", "true", "yes"):
+            print("[Watchdog] Live filesystem watcher disabled via HEIRLOOM_DISABLE_WATCHER. Relying on periodic scans and manual rescans.")
+            periodic_scanner.start()
+            return
+            
         try:
-            observer.stop()
-            observer.join(timeout=2.0)
-        except Exception:
-            pass
-    observer = Observer()
-        
-    try:
-        with Session(engine) as session:
-            volume_paths = session.exec(select(VolumePath)).all()
-    except Exception as e:
-        print(f"[Watchdog] Could not query volume paths: {e}")
-        return
+            with Session(engine) as session:
+                volume_paths = session.exec(select(VolumePath)).all()
+        except Exception as e:
+            print(f"[Watchdog] Could not query volume paths: {e}")
+            return
 
-    handler = MediaEventHandler()
-    used_observer = observer
-
-    try:
-        # 1. Attempt native inotify/OS observer first
-        scheduled = _schedule_all(used_observer, volume_paths, handler)
-        if scheduled:
-            used_observer.start()
-    except (OSError, Exception) as e:
-        is_inotify_limit = False
-        if isinstance(e, OSError) and (getattr(e, 'errno', None) == 28 or "inotify watch limit" in str(e).lower()):
-            is_inotify_limit = True
-        elif "inotify watch limit" in str(e).lower():
-            is_inotify_limit = True
-
-        if is_inotify_limit:
-            print("[Watchdog] Inotify watch limit reached. Native filesystem watching disabled to prevent high CPU usage on large media volumes. Library updates will rely on periodic scans and manual rescans.")
-        else:
-            print(f"[Watchdog] Native observer failed ({e}). Active directory polling disabled to prevent high CPU usage. Library updates will rely on periodic scans and manual rescans.")
+        handler = MediaEventHandler()
+        used_observer = observer
 
         try:
-            used_observer.stop()
-        except Exception:
-            pass
+            # 1. Attempt native inotify/OS observer first
+            scheduled = _schedule_all(used_observer, volume_paths, handler)
+            if scheduled:
+                used_observer.start()
+        except (OSError, Exception) as e:
+            is_inotify_limit = False
+            if isinstance(e, OSError) and (getattr(e, 'errno', None) == 28 or "inotify watch limit" in str(e).lower()):
+                is_inotify_limit = True
+            elif "inotify watch limit" in str(e).lower():
+                is_inotify_limit = True
 
-        # Do NOT start PollingObserver across large media volumes - it stats every file every few seconds and pegs the CPU.
-        # Instead, leave observer idle and rely on PeriodicScanWorker and manual rescans.
-        used_observer = Observer()
+            if is_inotify_limit:
+                print("[Watchdog] Inotify watch limit reached. Native filesystem watching disabled to prevent high CPU usage on large media volumes. Library updates will rely on periodic scans and manual rescans.")
+            else:
+                print(f"[Watchdog] Native observer failed ({e}). Active directory polling disabled to prevent high CPU usage. Library updates will rely on periodic scans and manual rescans.")
 
-    observer = used_observer
+            try:
+                used_observer.stop()
+            except Exception:
+                pass
+
+            # Do NOT start PollingObserver across large media volumes - it stats every file every few seconds and pegs the CPU.
+            # Instead, leave observer idle and rely on PeriodicScanWorker and manual rescans.
+            used_observer = Observer()
+
+        observer = used_observer
     periodic_scanner.start()
 
 def stop_watcher():
     global observer
     periodic_scanner.stop()
-    if observer.is_alive():
-        try:
-            observer.stop()
-            observer.join(timeout=2.0)
-        except Exception:
-            pass
+    with _observer_lock:
+        if observer.is_alive():
+            try:
+                observer.stop()
+                observer.join(timeout=2.0)
+            except Exception:
+                pass
